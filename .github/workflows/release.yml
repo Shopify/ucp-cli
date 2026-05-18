@@ -12,7 +12,7 @@ jobs:
   changesets:
     name: changeset release
     if: github.event_name == 'push'
-    runs-on: shopify-ubuntu-latest
+    runs-on: ubuntu-latest
     environment:
       name: npm-ucp-cli
       url: https://www.npmjs.com/package/@shopify/ucp-cli
