@@ -1,0 +1,8 @@
+{
+  "*.{ts,tsx,js,mjs,cjs}": [
+    "node node_modules/@biomejs/biome/bin/biome check --write --no-errors-on-unmatched"
+  ],
+  "*.{json,md}": [
+    "node node_modules/@biomejs/biome/bin/biome format --write --no-errors-on-unmatched"
+  ]
+}

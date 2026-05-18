@@ -1,0 +1,13 @@
+# Keep formatter-sensitive text files LF-only on every checkout.
+# Without this, Windows runners may materialize CRLF files and Biome's
+# `lineEnding: "lf"` treats the entire tree as misformatted.
+* text=auto eol=lf
+
+# Explicit binary guardrails for future assets/artifacts.
+*.gif binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.webp binary
+*.tgz binary
+*.zip binary

@@ -1,0 +1,90 @@
+{
+  "name": "@shopify/ucp-cli",
+  "version": "0.4.2",
+  "description": "Reference CLI + MCP server for the Universal Commerce Protocol",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Shopify/ucp-cli"
+  },
+  "bugs": {
+    "url": "https://github.com/Shopify/ucp-cli/issues"
+  },
+  "homepage": "https://github.com/Shopify/ucp-cli#readme",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.28.0",
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "bin": {
+    "ucp": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "skills",
+    "src",
+    "!src/**/*.test.ts",
+    "!src/test-utils.ts"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "gen:schemas": "node --experimental-strip-types --no-warnings scripts/codegen-schemas.ts",
+    "test": "vitest run --exclude=**/*.integration.test.ts",
+    "test:integration": "pnpm build && vitest run integration",
+    "test:full": "pnpm build && vitest run",
+    "test:watch": "vitest",
+    "prepare": "husky",
+    "prepublishOnly": "pnpm build",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "pnpm build && pnpm publish --no-git-checks --access public"
+  },
+  "dependencies": {
+    "@jmespath-community/jmespath": "^1.3.0",
+    "incur": "^0.4.5",
+    "yaml": "^2.8.4"
+  },
+  "devDependencies": {
+    "@apidevtools/json-schema-ref-parser": "^15.3.5",
+    "@biomejs/biome": "^2.4.15",
+    "@types/node": "^22.19.18",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "husky": "^9.1.7",
+    "json-schema-to-zod": "^2.8.1",
+    "lint-staged": "^15.5.2",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.11",
+    "vitest": "^4.1.5",
+    "zod": "^4.4.3",
+    "@changesets/cli": "^2.31.0"
+  },
+  "ucp": {
+    "specVersion": "2026-04-08",
+    "specBaseUrl": "https://ucp.dev",
+    "protocolMin": "2026-01-23",
+    "protocolMax": "2026-04-08",
+    "default_profile_url_template": "https://www.igvita.com/ucp/profile.json",
+    "default_catalog_url": "https://catalog.shopify.com"
+  }
+}

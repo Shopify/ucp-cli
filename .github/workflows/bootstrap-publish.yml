@@ -1,0 +1,123 @@
+name: Bootstrap Publish
+
+# Bare-bones manual publish workflow for the initial @shopify/ucp-cli
+# release(s). This is intentionally minimal: no version bumping, no
+# changelog generation, no git tagging. Bump `version` in package.json on
+# `main`, then dispatch this workflow.
+#
+# This will be replaced by Changesets once we are past the first few
+# publishes and want automated version/tag/changelog management.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Run the full pipeline + pack but skip the actual publish. Defaults to true; flip to false to actually publish."
+        required: true
+        type: boolean
+        default: true
+      tag:
+        description: "Dist-tag for this publish. 'next' for prereleases (e.g. 0.3.0-alpha.1), 'latest' only for stable versions."
+        required: true
+        type: choice
+        default: next
+        options:
+          - next
+          - latest
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ucp-cli-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Bootstrap publish @shopify/ucp-cli to npm
+    # Refuse to run from anywhere but `main`.
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: npm-ucp-cli
+      url: https://www.npmjs.com/package/@shopify/ucp-cli
+    runs-on: shopify-ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: shop/setup-javascript-action@main
+        with:
+          node-version: 22
+          pnpm-version: 10.28.0
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Integration test (real CLI bin against built dist)
+        run: pnpm test:integration
+
+      - name: Pack and inspect contents
+        run: |
+          pnpm pack --pack-destination /tmp/ucp-cli-bootstrap
+          echo "Tarball contents:"
+          tar -tzf /tmp/ucp-cli-bootstrap/*.tgz | sort
+
+      - name: Print publish plan
+        env:
+          DIST_TAG: ${{ inputs.tag }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "::notice::Plan: publish @shopify/ucp-cli@${VERSION} with --tag ${DIST_TAG} (dry-run=${DRY_RUN})"
+
+      # Fail fast with a clear error if the NPM_TOKEN secret is missing or
+      # empty. Nothing about the token value is logged — only its presence
+      # as a boolean.
+      - name: Verify NPM_TOKEN is present
+        if: ${{ !inputs.dry-run }}
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NPM_TOKEN}" ]; then
+            echo "::error::NPM_TOKEN secret is missing or empty. Add it in repo Settings → Secrets and variables → Actions before re-running."
+            exit 1
+          fi
+          echo "::notice::NPM_TOKEN is present."
+
+      - name: Configure npm auth
+        if: ${{ !inputs.dry-run }}
+        run: |
+          echo "registry=https://registry.npmjs.org/" > ~/.npmrc
+          echo "//registry.npmjs.org/:_authToken=\${NODE_AUTH_TOKEN}" >> ~/.npmrc
+
+      - name: Publish to npm
+        if: ${{ !inputs.dry-run }}
+        run: pnpm publish --no-git-checks --ignore-scripts --tag "$DIST_TAG" --access public
+        env:
+          DIST_TAG: ${{ inputs.tag }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Dry-run summary
+        if: ${{ inputs.dry-run }}
+        env:
+          DIST_TAG: ${{ inputs.tag }}
+        run: |
+          echo "::notice::Dry-run requested — skipped npm publish."
+          echo "Would have published with: --tag $DIST_TAG --access public"

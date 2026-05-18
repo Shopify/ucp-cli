@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codegen-drift:
+    # Catch silent regressions in src/core/generated/. The schema generator now
+    # reads package.json#ucp.{specVersion,specBaseUrl} and fetches the frozen
+    # published schema URLs directly; there is no repo tag checkout in this
+    # pipeline anymore. Keep this gate aligned with scripts/codegen-schemas.ts
+    # instead of reintroducing a stale shadow source of truth.
+    name: codegen drift gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shop/setup-javascript-action@main
+        with:
+          node-version: 22
+          pnpm-version: 10.28.0
+      - run: pnpm install --frozen-lockfile
+      - name: regenerate schemas from published spec URLs
+        run: pnpm gen:schemas
+      - name: assert no drift in src/core/generated/
+        run: git diff --exit-code -- src/core/generated/
+
+  check:
+    name: lint + typecheck (${{ matrix.os }} / Node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: shop/setup-javascript-action@main
+        with:
+          node-version: ${{ matrix.node }}
+          pnpm-version: 10.28.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm test:integration
+
+  global-install:
+    name: real pnpm add -g (${{ matrix.os }} / Node ${{ matrix.node }})
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: shop/setup-javascript-action@main
+        with:
+          node-version: ${{ matrix.node }}
+          pnpm-version: 10.28.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: pack and global-install the tarball
+        shell: bash
+        run: |
+          set -e
+          pnpm pack --pack-destination ./pack-out
+          tarball=$(find "$PWD/pack-out" -maxdepth 1 -name '*.tgz' -print -quit)
+          pnpm add --global "$tarball"
+          ucp --version

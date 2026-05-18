@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  changesets:
+    name: changeset release
+    if: github.event_name == 'push'
+    runs-on: shopify-ubuntu-latest
+    environment:
+      name: npm-ucp-cli
+      url: https://www.npmjs.com/package/@shopify/ucp-cli
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: shop/setup-javascript-action@main
+        with:
+          node-version: 24
+          pnpm-version: 10.28.0
+      - run: pnpm install --frozen-lockfile
+      - name: Configure public npm registry
+        shell: bash
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          userconfig="$RUNNER_TEMP/npm-public.npmrc"
+          {
+            echo '@shopify:registry=https://registry.npmjs.org/'
+            echo 'registry=https://registry.npmjs.org/'
+            if [[ -n "${NPM_TOKEN:-}" ]]; then
+              printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN"
+            fi
+          } > "$userconfig"
+          echo "NPM_CONFIG_USERCONFIG=$userconfig" >> "$GITHUB_ENV"
+      - name: Check whether the package has been bootstrapped on npm
+        id: npm-package
+        continue-on-error: true
+        run: pnpm view @shopify/ucp-cli version --registry=https://registry.npmjs.org
+      - name: Skip Changesets until the first publish exists
+        if: steps.npm-package.outcome != 'success'
+        run: echo "@shopify/ucp-cli is not on npm yet; use the Bootstrap Publish workflow first."
+      - uses: changesets/action@8eb63fb4cfc7f9643537c7d39d0b68c835012a19 # v1.5.3
+        if: steps.npm-package.outcome == 'success'
+        with:
+          version: pnpm version-packages
+          publish: pnpm release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Temporary bootstrap path: set this to the granular npm token from Keytech.
+          # Once npm Trusted Publisher/OIDC is configured for this workflow + environment,
+          # remove this env var and delete the secret; npm auth should flow through the
+          # id-token permission above.
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
