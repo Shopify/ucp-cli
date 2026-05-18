@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write       # Required for Changesets to push branches
+  id-token: write       # Required for OIDC authentication
+  pull-requests: write  # Required for Changesets to create PRs
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
@@ -47,22 +52,12 @@ jobs:
             fi
           } > "$userconfig"
           echo "NPM_CONFIG_USERCONFIG=$userconfig" >> "$GITHUB_ENV"
-      - name: Check whether the package has been bootstrapped on npm
-        id: npm-package
-        continue-on-error: true
-        run: pnpm view @shopify/ucp-cli version --registry=https://registry.npmjs.org
-      - name: Skip Changesets until the first publish exists
-        if: steps.npm-package.outcome != 'success'
-        run: echo "@shopify/ucp-cli is not on npm yet; use the Bootstrap Publish workflow first."
       - uses: changesets/action@8eb63fb4cfc7f9643537c7d39d0b68c835012a19 # v1.5.3
-        if: steps.npm-package.outcome == 'success'
         with:
           version: pnpm version-packages
           publish: pnpm release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Temporary bootstrap path: set this to the granular npm token from Keytech.
-          # Once npm Trusted Publisher/OIDC is configured for this workflow + environment,
-          # remove this env var and delete the secret; npm auth should flow through the
-          # id-token permission above.
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+          NPM_TOKEN: ""
+          NODE_AUTH_TOKEN: ""
