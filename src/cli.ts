@@ -5,8 +5,6 @@
 // --help, --llms, --mcp, `mcp add`, and `skills`. Integration tests should
 // exercise this dispatcher directly so output shape stays faithful.
 
-import { fileURLToPath } from 'node:url'
-
 import { Cli, middleware, z } from 'incur'
 
 import { buildCta } from './cli/cta.js'
@@ -1149,13 +1147,12 @@ export function isSkillsAddInvocation(argv: readonly string[]): boolean {
   )
 }
 
-// Binary entrypoint stays at the bottom of the module. See note (2) on
-// businessNotResolvedError above for the ESM-ordering rationale.
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+export async function runUcpCli(argv = process.argv.slice(2)): Promise<void> {
   // `--mcp` toggles MCP stdio mode in incur. The escalation hook must be a
-  // no-op in that mode (see src/core/escalation.ts). Detecting at the entry
-  // and threading via `inMcpMode` keeps the run-handler boundary clean.
-  const inMcpMode = process.argv.includes('--mcp')
+  // no-op in that mode (see src/core/escalation.ts). Detecting at the executable
+  // boundary and threading via `inMcpMode` keeps run handlers importable and
+  // side-effect free for tests/library consumers.
+  const inMcpMode = argv.includes('--mcp')
   // `--verbose` flips on stderr trace output (see src/core/verbose.ts). Muted
   // in MCP mode — stderr during stdio JSON-RPC has no human reader and would
   // confuse log scrapers attached to the host. Two reasons we detect from
@@ -1171,7 +1168,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   // listed in `ucp --help` Global Options — incur 0.4.5 hard-codes that
   // block (Help.js:262) with no extension hook. Documented in README under
   // Development → Debug tracing until upstream exposes a registration API.
-  const argv = process.argv.slice(2)
   const verboseRequested =
     argv.includes('--verbose') ||
     process.env.UCP_VERBOSE === '1' ||

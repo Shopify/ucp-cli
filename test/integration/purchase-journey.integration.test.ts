@@ -12,7 +12,7 @@
 // without external help? The assertions model what a competent agent
 // would check at each step.
 //
-// Runs against dist/cli.js — `pnpm test:integration` builds first.
+// Runs against the packaged bin entry — `pnpm test:integration` builds first.
 
 import { execFile } from 'node:child_process'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -31,7 +31,7 @@ import {
 } from '../fixtures/mock-ucp-shopping.js'
 
 const execFileAsync = promisify(execFile)
-const CLI = fileURLToPath(new URL('../../dist/cli.js', import.meta.url))
+const CLI = fileURLToPath(new URL('../../dist/bin.js', import.meta.url))
 
 interface Journey {
   businessUrl: string

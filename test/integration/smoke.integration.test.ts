@@ -3,12 +3,12 @@
 // incur's serve() behavior matches what PROTOCOL expects (exit codes,
 // --version, --llms, help on no args).
 //
-// Runs against dist/cli.js (must `pnpm build` first; pnpm test:integration
-// does so for you).
+// Runs against the packaged bin entry (must `pnpm build` first; pnpm
+// test:integration does so for you).
 
 import { execFile, spawn } from 'node:child_process'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises'
+import { platform, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -16,7 +16,7 @@ import { describe, expect, it } from 'vitest'
 import { startMockBusiness } from '../fixtures/mock-business.js'
 
 const execFileAsync = promisify(execFile)
-const CLI_PATH = fileURLToPath(new URL('../../dist/cli.js', import.meta.url))
+const CLI_PATH = fileURLToPath(new URL('../../dist/bin.js', import.meta.url))
 
 async function run(...args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
   try {
@@ -34,6 +34,19 @@ describe('smoke: compiled binary', () => {
     expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+/)
     expect(code).toBe(0)
   })
+
+  it.skipIf(platform() === 'win32')(
+    'serves when invoked through an installed-bin symlink',
+    async () => {
+      const binDir = await mkdtemp(join(tmpdir(), 'ucp-bin-symlink-'))
+      const binPath = join(binDir, 'ucp')
+      await symlink(CLI_PATH, binPath)
+
+      const { stdout, stderr } = await execFileAsync('node', [binPath, '--version'])
+      expect(stderr).toBe('')
+      expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+/)
+    },
+  )
 
   it('bare invocation prints help with the cli name + description, exits 0', async () => {
     const { stdout, code } = await run()

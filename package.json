@@ -22,7 +22,7 @@
     "registry": "https://registry.npmjs.org"
   },
   "bin": {
-    "ucp": "./dist/cli.js"
+    "ucp": "./dist/bin.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
