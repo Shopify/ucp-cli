@@ -41,7 +41,7 @@ jobs:
     environment:
       name: npm-ucp-cli
       url: https://www.npmjs.com/package/@shopify/ucp-cli
-    runs-on: shopify-ubuntu-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
