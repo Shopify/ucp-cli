@@ -170,7 +170,15 @@ Full spec at [jmespath.org](https://jmespath.org). `jq` and other tools (Python,
 
 ### Escalation hook recipes
 
-The hook fires only when checkout `result.status === "requires_escalation"`; message severities such as `requires_buyer_input` / `requires_buyer_review` affect framing, not the firing condition. It receives a compact payload (`status`, `url`, `reason`, `business`, `operation`) as JSON on stdin. Auth-class errors such as `AUTH_REQUIRED` / `INSUFFICIENT_PERMISSIONS` do not fire the hook; they return structured error CTAs so the agent can hand the buyer off using the best URL it already has. Configure per-call with `--on-escalation '<cmd>'`, sticky across a shell session with `export UCP_ON_ESCALATION='<cmd>'`, or persistently via `~/.ucp/config.yaml` (`escalation.command`) or an executable `~/.ucp/hooks/escalation`. Resolution order: per-call flag wins, then env, then config, then hook file. The hook-file convention is POSIX-oriented; on Windows prefer a shell command via flag/env/config.
+Fires when checkout `result.status === "requires_escalation"`. Receives a compact JSON payload (`status`, `url`, `reason`, `business`, `operation`) on stdin. Auth-class errors (`AUTH_REQUIRED`, `INSUFFICIENT_PERMISSIONS`) do **not** fire the hook — they return structured error CTAs so the agent can hand off using the best URL it already has.
+
+Configure one (first match wins):
+
+- **Per-call flag** — `ucp <op> --on-escalation '<cmd>'`
+- **Env var** — `export UCP_ON_ESCALATION='<cmd>'` (most common)
+- **Persistent config** — `~/.ucp/config.yaml`: `escalation.command: '<cmd>'`
+
+`<cmd>` runs through `/bin/sh -c` on POSIX and `cmd.exe /d /s /c` on Windows. To run an existing script, point at it directly: `'/path/to/escalation.sh'` (POSIX) or `'powershell -NoProfile -File C:\path\escalation.ps1'` (Windows).
 
 One-shot, interactive (browser open):
 

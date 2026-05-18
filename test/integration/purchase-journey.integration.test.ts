@@ -29,6 +29,7 @@ import {
   MOCK_VARIANT_ID,
   startMockUcpShopping,
 } from '../fixtures/mock-ucp-shopping.js'
+import { nodeHookCommand } from '../fixtures/shell-command.js'
 
 const execFileAsync = promisify(execFile)
 const CLI = fileURLToPath(new URL('../../dist/bin.js', import.meta.url))
@@ -93,7 +94,14 @@ async function setupJourney(): Promise<Journey> {
     "process.stdin.pipe(require('node:fs').createWriteStream(process.argv[2]))\n",
     'utf-8',
   )
-  baseEnv.UCP_ON_ESCALATION = `node ${JSON.stringify(hookCaptureScript)} ${JSON.stringify(hookCapturePath)}`
+  // This is a shell command because UCP_ON_ESCALATION intentionally accepts
+  // the same user-facing command string as --on-escalation. Do not use
+  // JSON.stringify for path quoting here: it produces JavaScript string
+  // escapes, not shell quoting, and Windows + Node 24 can crash before the CLI
+  // reports the hook result. The shared helper is intentionally test-only:
+  // this integration test is about end-to-end hook firing, not about fuzzing
+  // cmd.exe quoting.
+  baseEnv.UCP_ON_ESCALATION = nodeHookCommand(hookCaptureScript, hookCapturePath)
 
   const run = async (
     args: string[],

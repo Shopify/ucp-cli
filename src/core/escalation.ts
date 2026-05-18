@@ -7,24 +7,31 @@
 // the structured checkout response).
 //
 // Resolution order (first match wins):
-//   1. CLI flag         --on-escalation '<cmd>'
-//   2. Env var          UCP_ON_ESCALATION='<cmd>'
-//   3. Config field     ~/.ucp/config.yaml: escalation.command
-//   4. File convention  ~/.ucp/hooks/escalation  (executable)
+//   1. CLI flag      --on-escalation '<cmd>'
+//   2. Env var       UCP_ON_ESCALATION='<cmd>'
+//   3. Config field  ~/.ucp/config.yaml: escalation.command
 //
-// 1–3 are shell command lines run through the platform shell (`/bin/sh -c` on
-// POSIX, `cmd.exe /d /s /c` on Windows). 4 is an executable spawned directly.
-// Going single-command + JSON-on-stdin instead of typed hook kinds keeps the
-// CLI's surface tiny and lets users compose browsers, Slack, notifications,
-// etc. via shell pipes they already know.
+// All sources are shell command strings run through the platform shell
+// (`/bin/sh -c` on POSIX, `cmd.exe /d /s /c` on Windows). One contract, one
+// model, identical on every OS. Going single-command + JSON-on-stdin instead
+// of typed hook kinds keeps the CLI's surface tiny and lets users compose
+// browsers, Slack, notifications, etc. via shell pipes they already know.
+//
+// Earlier versions also supported a POSIX-only file convention
+// (`~/.ucp/hooks/escalation`, executable). It was dropped because:
+//   - it duplicated config-source (“put your command in a file” vs “point
+//     config at a file”),
+//   - its `X_OK` executability check has no Windows-meaningful semantics,
+//   - it introduced platform asymmetry users had to learn around.
+// Users who want “drop a script and run it” should reference the script from
+// config: `escalation.command: '/path/to/escalation.sh'`.
 //
 // MCP server mode is a no-op: an MCP server must not surprise the host
 // process by spawning subprocesses or opening browsers. The structured
 // envelope reaches the agent regardless.
 
 import { type SpawnOptions, spawn } from 'node:child_process'
-import { constants as fsConstants } from 'node:fs'
-import { access, readFile, stat } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { parse as parseYaml } from 'yaml'
@@ -45,14 +52,12 @@ export interface EscalationPayload {
   structured_action?: Record<string, unknown>
 }
 
-export type HookSource = 'flag' | 'env' | 'config' | 'file'
+export type HookSource = 'flag' | 'env' | 'config'
 
 export interface EscalationHook {
   source: HookSource
-  /** Shell command (sources flag/env/config) or executable path (source file). */
+  /** Shell command line. Always run through the platform shell. */
   command: string
-  /** True for source=file: spawn the path directly with no shell. */
-  isFile: boolean
 }
 
 export interface ResolveHookOptions {
@@ -65,7 +70,7 @@ export interface ResolveHookOptions {
 }
 
 /**
- * Walk the four sources in order; return the first match. Empty strings are
+ * Walk the three sources in order; return the first match. Empty strings are
  * treated as not-set so `UCP_ON_ESCALATION=` falls through to lower-priority
  * sources — otherwise users can't unset an inherited value.
  */
@@ -73,21 +78,17 @@ export async function resolveEscalationHook(
   opts: ResolveHookOptions = {},
 ): Promise<EscalationHook | undefined> {
   if (opts.argFlag !== undefined && opts.argFlag.length > 0) {
-    return { source: 'flag', command: opts.argFlag, isFile: false }
+    return { source: 'flag', command: opts.argFlag }
   }
   const env = opts.env ?? process.env
   const envCmd = env.UCP_ON_ESCALATION
   if (typeof envCmd === 'string' && envCmd.length > 0) {
-    return { source: 'env', command: envCmd, isFile: false }
+    return { source: 'env', command: envCmd }
   }
   const home = profileStoreHome({ ...(opts.homeDir !== undefined && { homeDir: opts.homeDir }) })
   const configCmd = await readConfigCommand(home)
   if (configCmd !== undefined) {
-    return { source: 'config', command: configCmd, isFile: false }
-  }
-  const filePath = join(home, 'hooks', 'escalation')
-  if (await isExecutable(filePath)) {
-    return { source: 'file', command: filePath, isFile: true }
+    return { source: 'config', command: configCmd }
   }
   return undefined
 }
@@ -110,17 +111,6 @@ async function readConfigCommand(home: string): Promise<string | undefined> {
   if (typeof escalation !== 'object' || escalation === null) return undefined
   const command = (escalation as Record<string, unknown>).command
   return typeof command === 'string' && command.length > 0 ? command : undefined
-}
-
-async function isExecutable(path: string): Promise<boolean> {
-  try {
-    const s = await stat(path)
-    if (!s.isFile()) return false
-    await access(path, fsConstants.X_OK)
-    return true
-  } catch {
-    return false
-  }
 }
 
 export type RunHookResult =
@@ -190,14 +180,11 @@ export async function runEscalationHook(opts: RunHookOptions): Promise<RunHookRe
       // For `cmd.exe /c <command>`, Node's default Windows argv quoting escapes
       // inner quotes before cmd parses them. That makes commands like
       // `node "C:\\Temp\\hook.cjs"` reach Node with literal quote characters in
-      // argv[1]. Shell hooks already provide a complete command string, so pass
+      // argv[1]. Shell hooks always provide a complete command string, so pass
       // the cmd argv through verbatim and let cmd own command-string parsing.
-      windowsVerbatimArguments:
-        process.platform === 'win32' && !hook.isFile && usesDefaultPlatformShell,
+      windowsVerbatimArguments: process.platform === 'win32' && usesDefaultPlatformShell,
     }
-    const child = hook.isFile
-      ? spawn(hook.command, [], spawnOptions)
-      : spawn(shell, shellArgs, spawnOptions)
+    const child = spawn(shell, shellArgs, spawnOptions)
 
     const timer = setTimeout(() => {
       timedOut = true
