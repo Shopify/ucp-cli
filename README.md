@@ -229,7 +229,7 @@ Symlink globally for active dev:
 
 ```sh
 pnpm build && pnpm link --global
-# Now `ucp` everywhere points at this repo's dist/cli.js. Re-run pnpm build
+# Now `ucp` everywhere points at this repo's dist/bin.js. Re-run pnpm build
 # after changes; the symlink stays valid.
 ```
 

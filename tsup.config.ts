@@ -3,7 +3,7 @@ import { buildDefines } from './scripts/defines.mjs'
 
 export default defineConfig({
   entry: {
-    cli: 'src/cli.ts',
+    bin: 'src/bin.ts',
     index: 'src/index.ts',
   },
   format: ['esm'],

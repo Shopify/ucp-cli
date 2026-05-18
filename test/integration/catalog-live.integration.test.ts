@@ -32,7 +32,7 @@ import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
 
 const execFileAsync = promisify(execFile)
-const CLI_PATH = fileURLToPath(new URL('../../dist/cli.js', import.meta.url))
+const CLI_PATH = fileURLToPath(new URL('../../dist/bin.js', import.meta.url))
 
 const LIVE = process.env.UCP_LIVE_TESTS === '1' || process.env.UCP_LIVE_TESTS === 'true'
 
