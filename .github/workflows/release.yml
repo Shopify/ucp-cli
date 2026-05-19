@@ -37,22 +37,7 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Configure public npm registry
-        shell: bash
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          userconfig="$RUNNER_TEMP/npm-public.npmrc"
-          {
-            echo '@shopify:registry=https://registry.npmjs.org/'
-            echo 'registry=https://registry.npmjs.org/'
-            if [[ -n "${NPM_TOKEN:-}" ]]; then
-              printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN"
-            fi
-          } > "$userconfig"
-          echo "NPM_CONFIG_USERCONFIG=$userconfig" >> "$GITHUB_ENV"
-      - uses: changesets/action@8eb63fb4cfc7f9643537c7d39d0b68c835012a19 # v1.5.3
+      - uses: changesets/action@63a615b9cd06ba9a3e6d13796c7fbcb080a60a0b # v1.8.0
         with:
           version: pnpm version-packages
           publish: pnpm release
