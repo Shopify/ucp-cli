@@ -56,7 +56,7 @@
     "prepublishOnly": "pnpm build",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release": "pnpm build && pnpm publish --no-git-checks --access public"
+    "release": "pnpm build && pnpm changeset publish"
   },
   "dependencies": {
     "@jmespath-community/jmespath": "^1.3.0",
