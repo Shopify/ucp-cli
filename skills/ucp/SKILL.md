@@ -236,10 +236,9 @@ Configure one source (first match wins):
 ucp <op> --on-escalation '<command>'       # per-call flag
 export UCP_ON_ESCALATION='<command>'       # env var (most common)
 # Or ~/.ucp/config.yaml: escalation: { command: '<command>' }
-# Or POSIX: ~/.ucp/hooks/escalation (executable file; payload on stdin)
 ```
 
-On Windows, prefer flag/env/config shell commands; the hook-file convention is POSIX-oriented.
+Commands run through `/bin/sh -c` on POSIX, `cmd.exe /d /s /c` on Windows. To run an existing script, point at it directly: `'/path/to/escalation.sh'` (POSIX) or `'powershell -NoProfile -File C:\path\escalation.ps1'` (Windows).
 
 **Common hook examples:**
 

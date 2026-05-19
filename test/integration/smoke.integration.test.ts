@@ -35,6 +35,19 @@ describe('smoke: compiled binary', () => {
     expect(code).toBe(0)
   })
 
+  // Package managers (npm, pnpm, brew) install POSIX bins as symlinks pointing
+  // into node_modules/.../dist/bin.js, so the CLI must run when reached via a
+  // symlink (not just via the realpath). Earlier versions had a
+  // `process.argv[1] === fileURLToPath(import.meta.url)` guard in src/cli.ts
+  // that silently no-op'd for symlinks; src/bin.ts now unconditionally calls
+  // runUcpCli(), so this failure class is architecturally impossible — this
+  // test catches any future re-introduction cheaply (no pack/install needed).
+  //
+  // Skipped on Windows because (a) fs.symlink requires admin / Developer Mode
+  // by default, and (b) Windows package managers install bins as .cmd shims
+  // rather than symlinks, so a symlink probe wouldn't model real Windows
+  // install behavior anyway. The Windows installed-bin path is covered by the
+  // `real pnpm add -g` CI job, which uses the actual platform mechanism.
   it.skipIf(platform() === 'win32')(
     'serves when invoked through an installed-bin symlink',
     async () => {

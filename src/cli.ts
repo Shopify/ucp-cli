@@ -1093,7 +1093,7 @@ function businessNotResolvedError(): ErrorEnvelopeOpts {
   }
 }
 
-// Resolve the escalation hook (per the four-source resolution order documented
+// Resolve the escalation hook (per the three-source resolution order documented
 // in src/core/escalation.ts) and fire it. Always async-await before returning
 // the checkout envelope: the hook is *notification*, not gating, but sending
 // the Slack/browser notification before the agent sees the result keeps the

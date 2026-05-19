@@ -1060,7 +1060,7 @@ describe('createUcpCli — escalation hook', () => {
       completeCheckout: async () => ESCALATION_RESULT,
       resolveEscalationHook: async (opts) => {
         resolveCalls.push(opts)
-        return { source: 'env', command: 'echo run', isFile: false }
+        return { source: 'env', command: 'echo run' }
       },
       runEscalationHook: async (opts) => {
         runCalls.push({
@@ -1101,7 +1101,7 @@ describe('createUcpCli — escalation hook', () => {
     const firstCall = runCalls[0]
     if (firstCall === undefined) throw new Error('expected a runCall')
     expect(firstCall.skip).toBeUndefined()
-    expect(firstCall.hook).toEqual({ source: 'env', command: 'echo run', isFile: false })
+    expect(firstCall.hook).toEqual({ source: 'env', command: 'echo run' })
     // Payload built from checkout object: status, continue_url → url, message content → reason.
     expect(firstCall.payload).toMatchObject({
       status: 'requires_escalation',

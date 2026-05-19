@@ -1,11 +1,12 @@
 // Escalation hook: resolution order + JSON-on-stdin contract + MCP no-op.
 
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { platform } from 'node:process'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+
+import { nodeHookCommand } from '../../test/fixtures/shell-command.js'
 
 import {
   buildEscalationPayload,
@@ -35,18 +36,6 @@ const SAMPLE_PAYLOAD: EscalationPayload = {
   reason: '3DS challenge required',
   business: 'https://shop.example.com',
   operation: 'complete_checkout',
-}
-
-// Use temp script files instead of inline `node -e` snippets: Windows cmd.exe
-// quote-stripping turns those snippets into a test of shell parser trivia rather
-// than the escalation hook contract.
-function shellArg(value: string): string {
-  if (platform === 'win32') return `"${value.replace(/"/g, '""')}"`
-  return `'${value.replace(/'/g, `'\\''`)}'`
-}
-
-function nodeHookCommand(script: string, ...args: string[]): string {
-  return ['node', shellArg(script), ...args.map(shellArg)].join(' ')
 }
 
 async function writeHookScript(dir: string, name: string, source: string): Promise<string> {
@@ -165,11 +154,7 @@ describe('resolveEscalationHook', () => {
     expect(await resolveEscalationHook({ env: {}, homeDir })).toBeUndefined()
   })
 
-  it('argFlag wins over env, config, and file', async () => {
-    await mkdir(join(homeDir, 'hooks'), { recursive: true })
-    const filePath = join(homeDir, 'hooks', 'escalation')
-    await writeFile(filePath, '#!/bin/sh\necho file', 'utf-8')
-    await chmod(filePath, 0o755)
+  it('argFlag wins over env and config', async () => {
     await writeFile(join(homeDir, 'config.yaml'), 'escalation:\n  command: echo config\n', 'utf-8')
 
     const hook = await resolveEscalationHook({
@@ -177,56 +162,38 @@ describe('resolveEscalationHook', () => {
       env: { UCP_ON_ESCALATION: 'echo env' },
       homeDir,
     })
-    expect(hook).toEqual({ source: 'flag', command: 'echo flag', isFile: false })
+    expect(hook).toEqual({ source: 'flag', command: 'echo flag' })
   })
 
-  it('env wins over config and file', async () => {
-    await mkdir(join(homeDir, 'hooks'), { recursive: true })
-    const filePath = join(homeDir, 'hooks', 'escalation')
-    await writeFile(filePath, '#!/bin/sh\necho file', 'utf-8')
-    await chmod(filePath, 0o755)
+  it('env wins over config', async () => {
     await writeFile(join(homeDir, 'config.yaml'), 'escalation:\n  command: echo config\n', 'utf-8')
 
     const hook = await resolveEscalationHook({
       env: { UCP_ON_ESCALATION: 'echo env' },
       homeDir,
     })
-    expect(hook).toEqual({ source: 'env', command: 'echo env', isFile: false })
+    expect(hook).toEqual({ source: 'env', command: 'echo env' })
   })
 
-  it('config.yaml wins over file', async () => {
-    await mkdir(join(homeDir, 'hooks'), { recursive: true })
-    const filePath = join(homeDir, 'hooks', 'escalation')
-    await writeFile(filePath, '#!/bin/sh\necho file', 'utf-8')
-    await chmod(filePath, 0o755)
+  it('config.yaml is the lowest-priority source', async () => {
     await writeFile(join(homeDir, 'config.yaml'), 'escalation:\n  command: echo config\n', 'utf-8')
 
     const hook = await resolveEscalationHook({ env: {}, homeDir })
-    expect(hook).toEqual({ source: 'config', command: 'echo config', isFile: false })
-  })
-
-  it('file convention is the lowest-priority source', async () => {
-    await mkdir(join(homeDir, 'hooks'), { recursive: true })
-    const filePath = join(homeDir, 'hooks', 'escalation')
-    await writeFile(filePath, '#!/bin/sh\necho file', 'utf-8')
-    await chmod(filePath, 0o755)
-
-    const hook = await resolveEscalationHook({ env: {}, homeDir })
-    expect(hook).toEqual({ source: 'file', command: filePath, isFile: true })
+    expect(hook).toEqual({ source: 'config', command: 'echo config' })
   })
 
   it.each([
     ['empty argFlag', { argFlag: '', env: { UCP_ON_ESCALATION: 'echo env' } }],
     ['empty env', { env: { UCP_ON_ESCALATION: '' } }],
   ])('treats %s as not-set so unsetting falls through', async (_, opts) => {
-    // No config.yaml, no hook file ⇒ should resolve to undefined when both
-    // upper sources are explicitly empty.
+    // No config.yaml ⇒ should resolve to undefined when both upper sources are
+    // explicitly empty.
     const hook = await resolveEscalationHook({ ...opts, homeDir })
     if ('env' in opts && opts.env.UCP_ON_ESCALATION === '') {
       expect(hook).toBeUndefined()
     } else {
       // empty argFlag falls through to env
-      expect(hook).toEqual({ source: 'env', command: 'echo env', isFile: false })
+      expect(hook).toEqual({ source: 'env', command: 'echo env' })
     }
   })
 
@@ -242,20 +209,12 @@ describe('resolveEscalationHook', () => {
     await writeFile(join(homeDir, 'config.yaml'), 'escalation:\n  command: 5\n', 'utf-8')
     expect(await resolveEscalationHook({ env: {}, homeDir })).toBeUndefined()
   })
-
-  it.skipIf(platform === 'win32')('ignores hooks/escalation when not executable', async () => {
-    await mkdir(join(homeDir, 'hooks'), { recursive: true })
-    const filePath = join(homeDir, 'hooks', 'escalation')
-    await writeFile(filePath, '#!/bin/sh\necho file', 'utf-8')
-    await chmod(filePath, 0o644)
-    expect(await resolveEscalationHook({ env: {}, homeDir })).toBeUndefined()
-  })
 })
 
 describe('runEscalationHook', () => {
   it('returns invoked=false with reason=mcp-mode when skip=true', async () => {
     const result = await runEscalationHook({
-      hook: { source: 'env', command: 'echo should-not-run', isFile: false },
+      hook: { source: 'env', command: 'echo should-not-run' },
       payload: SAMPLE_PAYLOAD,
       skip: true,
     })
@@ -284,7 +243,6 @@ describe('runEscalationHook', () => {
         hook: {
           source: 'env',
           command: nodeHookCommand(captureScript, captureFile),
-          isFile: false,
         },
         payload: SAMPLE_PAYLOAD,
         stderr,
@@ -316,7 +274,6 @@ describe('runEscalationHook', () => {
         hook: {
           source: 'env',
           command: nodeHookCommand(script),
-          isFile: false,
         },
         payload: SAMPLE_PAYLOAD,
         stderr,
@@ -343,7 +300,6 @@ describe('runEscalationHook', () => {
         hook: {
           source: 'env',
           command: nodeHookCommand(script),
-          isFile: false,
         },
         payload: SAMPLE_PAYLOAD,
         stderr,
@@ -363,7 +319,7 @@ describe('runEscalationHook', () => {
       const script = await writeHookScript(tmpDir, 'exit.cjs', 'process.exit(7)\n')
       const stderr = new StderrSink()
       const result = await runEscalationHook({
-        hook: { source: 'env', command: nodeHookCommand(script), isFile: false },
+        hook: { source: 'env', command: nodeHookCommand(script) },
         payload: SAMPLE_PAYLOAD,
         stderr,
       })
@@ -377,16 +333,17 @@ describe('runEscalationHook', () => {
     }
   })
 
-  it('logs spawn-failure when the hook executable is missing', async () => {
+  it('logs spawn-failure when the shell binary is missing', async () => {
+    // With the file-source convention removed, every hook routes through the
+    // shell. The remaining spawn-failure path is the shell binary itself being
+    // absent — inject it explicitly so we exercise the child.on('error') branch
+    // without relying on a platform path that happens to not exist.
     const stderr = new StderrSink()
     const result = await runEscalationHook({
-      hook: {
-        source: 'file',
-        command: '/nonexistent/path/to/hook-binary-that-does-not-exist',
-        isFile: true,
-      },
+      hook: { source: 'env', command: 'echo unused' },
       payload: SAMPLE_PAYLOAD,
       stderr,
+      shell: '/nonexistent/path/to/shell-binary-that-does-not-exist',
     })
     expect(result.invoked).toBe(true)
     if (result.invoked) {
@@ -405,7 +362,7 @@ describe('runEscalationHook', () => {
       )
       const stderr = new StderrSink()
       const result = await runEscalationHook({
-        hook: { source: 'env', command: nodeHookCommand(script), isFile: false },
+        hook: { source: 'env', command: nodeHookCommand(script) },
         payload: SAMPLE_PAYLOAD,
         stderr,
         timeoutMs: 100,
@@ -429,7 +386,7 @@ describe('runEscalationHook', () => {
     try {
       const script = await writeHookScript(tmpDir, 'stdout.cjs', "console.log('SHOULD-NOT-LEAK')\n")
       const result = await runEscalationHook({
-        hook: { source: 'env', command: nodeHookCommand(script), isFile: false },
+        hook: { source: 'env', command: nodeHookCommand(script) },
         payload: SAMPLE_PAYLOAD,
       })
       expect(result.invoked).toBe(true)

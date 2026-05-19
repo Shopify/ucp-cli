@@ -1,11 +1,19 @@
 // Purchase journey integration test.
 //
 // Drives the compiled CLI through the full UCP shopping flow against a local
-// mock business and measures:
+// mock business and measures what only end-to-end execution can prove:
 //   1. Each step produces clean, unwrapped output (not raw MCP envelopes).
 //   2. Every op success response carries a `cta` pointing at the next step.
-//   3. complete_checkout triggers a requires_buyer_review escalation.
-//   4. The escalation hook fires and receives the correct JSON payload.
+//   3. complete_checkout returns a requires_buyer_review escalation envelope
+//      with the right CTA copy and exit code.
+//
+// Escalation hook spawning (env/flag/config sources, shell quoting, stdin
+// payload, exit-code/timeout/EPIPE handling) is covered exhaustively in
+// `src/core/escalation.test.ts`. The CLI wiring that calls resolveHook +
+// runHook on a requires_escalation response is covered in `src/cli.test.ts`.
+// Re-asserting subprocess plumbing here would only test the platform shell,
+// not the journey — and it would couple this test to cmd.exe quoting on
+// Windows for no integration-level signal.
 //
 // Treat this as an agent-fidelity check: does an agent following SKILL.md
 // and CLI output alone have everything it needs to complete the flow
@@ -15,7 +23,7 @@
 // Runs against the packaged bin entry — `pnpm test:integration` builds first.
 
 import { execFile } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -36,7 +44,6 @@ const CLI = fileURLToPath(new URL('../../dist/bin.js', import.meta.url))
 interface Journey {
   businessUrl: string
   ucpHome: string
-  hookCapturePath: string
   run(
     args: string[],
     extraEnv?: Record<string, string>,
@@ -47,7 +54,6 @@ interface Journey {
 async function setupJourney(): Promise<Journey> {
   const mock = await startMockUcpShopping()
   const ucpHome = await mkdtemp(join(tmpdir(), 'ucp-eval-'))
-  const hookCapturePath = join(ucpHome, 'escalation-payload.json')
 
   // Minimal agent profile so the CLI can resolve a profileUrl.
   const profileDir = join(ucpHome, 'profiles', 'eval')
@@ -84,16 +90,9 @@ async function setupJourney(): Promise<Journey> {
   // Allow the mock server's http://127.0.0.1 URL through the https-only guard.
   // TEST infix is intentional: this is not a production/deployment knob.
   baseEnv.UCP_TEST_ALLOW_INSECURE_LOCALHOST = 'true'
-  // Hook writes payload to file so assertions can read it. Use a tiny Node
-  // program instead of shell redirection: CI runs this integration suite on
-  // Windows too, where `cat > 'path'` is not portable.
-  const hookCaptureScript = join(ucpHome, 'capture-escalation.cjs')
-  await writeFile(
-    hookCaptureScript,
-    "process.stdin.pipe(require('node:fs').createWriteStream(process.argv[2]))\n",
-    'utf-8',
-  )
-  baseEnv.UCP_ON_ESCALATION = `node ${JSON.stringify(hookCaptureScript)} ${JSON.stringify(hookCapturePath)}`
+  // Intentionally do not set UCP_ON_ESCALATION. Hook resolution + spawn is
+  // unit-tested; here we only assert the CLI handles requires_escalation
+  // correctly (envelope, CTA, exit code, stderr quiet by default).
 
   const run = async (
     args: string[],
@@ -121,7 +120,6 @@ async function setupJourney(): Promise<Journey> {
   return {
     businessUrl: mock.url,
     ucpHome,
-    hookCapturePath,
     run,
     async close() {
       await mock.close()
@@ -281,7 +279,7 @@ describe('eval: purchase journey', () => {
 
   // ─── Step 5: complete + escalation ────────────────────────────────────────
 
-  it('step 5 — complete_checkout: escalation envelope + hook fires with payload', async () => {
+  it('step 5 — complete_checkout: requires_escalation envelope + CTA copy + exits 0', async () => {
     const { json, code, stderr } = await j.run(['checkout', 'complete', MOCK_CHECKOUT_ID])
 
     // CLI exits 0 — requires_escalation is a normal UCP checkout response.
@@ -294,19 +292,9 @@ describe('eval: purchase journey', () => {
     expect(checkout.continue_url).toBe(MOCK_ESCALATION_URL)
 
     // Default CLI output is quiet on stderr for protocol-state changes:
-    // requires_escalation is represented by the structured checkout result,
-    // CTA, and hook payload. Human breadcrumbs are opt-in via --verbose.
+    // requires_escalation is represented by the structured checkout result
+    // and CTA. Human breadcrumbs are opt-in via --verbose.
     expect(stderr).not.toMatch(/\[ucp\] escalation \[complete_checkout\]/i)
-
-    // Hook fired: the capture file should contain the JSON payload.
-    const captured = JSON.parse(await readFile(j.hookCapturePath, 'utf-8')) as Record<
-      string,
-      unknown
-    >
-    // Payload built from flat checkout response: status is top-level field.
-    expect(captured.status).toBe('requires_escalation')
-    expect(captured.url).toBe(MOCK_ESCALATION_URL)
-    expect(captured.operation).toBe('complete_checkout')
 
     // CTA must be messages-aware: mock returns requires_buyer_review (checkout complete,
     // buyer authorizes). Description must distinguish this from requires_buyer_input
