@@ -1,6 +1,6 @@
 # `@shopify/ucp-cli`
 
-**A shopping skill for AI agents, powered by the [Universal Commerce Protocol](https://github.com/Shopify/ucp-spec).**
+**A shopping skill for AI agents, powered by the [Universal Commerce Protocol](https://github.com/Universal-Commerce-Protocol/ucp).**
 
 - **Search products across millions of merchants** via a unified global catalog
 - **Build carts and complete checkouts** against any UCP-enabled merchant
