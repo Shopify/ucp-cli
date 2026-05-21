@@ -14,6 +14,7 @@
 
 import { ErrorCodes, UcpError } from '../lib/errors.js'
 import type { CtaBlock } from '../lib/types.js'
+import { defaultUserAgent, formatHeadersForTrace } from './headers.js'
 import { parseHttpsUrl } from './url.js'
 import { vlog } from './verbose.js'
 
@@ -89,13 +90,21 @@ export async function mcpRpc<T = unknown>(opts: McpRpcOptions): Promise<T> {
 
   let response: Response
   try {
+    // Outbound header bag in send-order. Built into a local first so we can
+    // log it under verbose without re-spreading or risking divergence between
+    // the trace and what hits the wire.
+    const requestHeaders: Record<string, string> = {
+      // User-Agent first so a caller-supplied UA in `opts.headers` overrides;
+      // framing headers last so users can never accidentally replace them.
+      'User-Agent': defaultUserAgent(),
+      ...opts.headers,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    }
+    vlog(`mcp:   headers: ${formatHeadersForTrace(requestHeaders)}`)
     response = await fetchImpl(endpoint, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        ...opts.headers,
-      },
+      headers: requestHeaders,
       body: requestBody,
       signal,
     })

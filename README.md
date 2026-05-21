@@ -211,6 +211,46 @@ ucp cart update <id> --business https://<seller-domain> \
 
 Builds and validates the request, prints the exact payload that would hit the wire (including auto-injected `meta.idempotency-key` and `meta.ucp-agent`), skips the network call. Cart and checkout updates are full-replace: carry forward request-shaped line items, using `line_items[].id` only for existing lines and `line_items[].item.id` for the underlying item/variant. Useful for debugging payloads or confirming a mutation before issuing it.
 
+### Custom request headers (auth, tenancy, tracing)
+
+UCP requests attach a built-in `User-Agent: @shopify/ucp-cli/<version>`. Override or extend with two user sources, merged with the built-in by priority (lowest to highest):
+
+0. CLI built-in `User-Agent`
+1. `~/.ucp/profiles/<name>/headers.json` `default` block — apply to every request
+2. `~/.ucp/profiles/<name>/headers.json` `businesses[<origin>]` block — per-origin add/override
+3. `--header 'Name: Value'` (repeatable) — per-call
+
+Higher source wins per header name (case-insensitive); non-conflicting headers from every source ship. Empty values unset for that scope. Framing headers the dispatcher owns (`Content-Type`, `Accept`, `Host`, `Connection`, hop-by-hop, `MCP-Protocol-Version`) are silently dropped from all user sources. Sensitive header values (`Authorization`, `Cookie`, and any name ending in `-Token`, `-Key`, `-Secret`, `-Password`) are redacted in verbose traces (`UCP_VERBOSE=1`).
+
+Persistent setup, modeled on git's `[http]` / `[http "<URL>"]`:
+
+```json
+{
+  "default": {
+    "Trace-Id": "my-agent-${HOSTNAME}"
+  },
+  "businesses": {
+    "https://shop.example.com": {
+      "Authorization": "Bearer ${EXAMPLE_TOKEN}"
+    }
+  }
+}
+```
+
+Values support `${ENV_VAR}` interpolation so the file stays free of secrets.
+
+Per-call usage:
+
+```sh
+# Bearer auth (covers the most common case in one keystroke)
+ucp catalog search --header "Authorization: Bearer $TOKEN" --set /query='surf boards'
+
+# Multiple headers (repeat the flag)
+ucp catalog search --header "Authorization: Bearer $TOKEN" --header 'Trace-Id: req-abc'
+```
+
+There is no `--auth-bearer` flag and no `UCP_AUTH_BEARER` env var. `--header` is the only knob; bearer auth is just one shape it can carry. This keeps the CLI surface from growing every time a merchant picks a different auth header.
+
 ### Environment variables
 
 | Variable | Effect |

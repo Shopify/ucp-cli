@@ -21,6 +21,7 @@ import { z } from 'incur'
 import { type ErrorCode, UcpError } from '../lib/errors.js'
 import type { ErrorLayer } from '../lib/types.js'
 import { formatZodIssues } from '../lib/zod-format.js'
+import { defaultUserAgent, formatHeadersForTrace } from './headers.js'
 import { vlog } from './verbose.js'
 
 /**
@@ -131,6 +132,14 @@ export interface FetchCachedOptions<T = unknown> {
   signal?: AbortSignal
   /** Per-request timeout in milliseconds. Default 30 s. */
   timeoutMs?: number
+  /**
+   * Additional outbound headers (auth, tenancy, etc). Spread between the
+   * built-in User-Agent default and the framing `Accept` header, so a
+   * caller-supplied User-Agent overrides the built-in but no source can
+   * clobber the dispatcher's `Accept`. Reserved-header filtering is the
+   * caller's responsibility (see {@link resolveHeaders}).
+   */
+  headers?: Record<string, string>
 }
 
 /**
@@ -167,8 +176,16 @@ export async function fetchCached<T = unknown>(
 
   let response: Response
   try {
+    const requestHeaders: Record<string, string> = {
+      // User-Agent first so a caller-supplied UA in `options.headers` overrides;
+      // Accept last so users can never accidentally replace the framing header.
+      'User-Agent': defaultUserAgent(),
+      ...options.headers,
+      Accept: 'application/json',
+    }
+    vlog(`cache: headers: ${formatHeadersForTrace(requestHeaders)}`)
     response = await fetchImpl(url, {
-      headers: { Accept: 'application/json' },
+      headers: requestHeaders,
       signal,
     })
   } catch (err) {
