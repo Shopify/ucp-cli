@@ -6,15 +6,7 @@
 //
 // Transforms applied:
 //   - T2 injectObjectType
-//   - T3 relaxPlatformEndpointRequirement (TEMPORARY)
 //   - T4 openAdditionalProperties
-//   - T5 relaxBusinessPaymentHandlersRequirement (TEMPORARY)
-//
-// ⚠ INCLUDES TEMPORARY TRANSFORM(S):
-//   - T3 relaxPlatformEndpointRequirement — pending upstream fix for over-strict
-//     endpoint requirement on platform_schema rest/mcp branches.
-//   - T5 relaxBusinessPaymentHandlersRequirement — pending upstream fix making
-//     payment_handlers optional on business_schema (read-only catalogs do not have one).
 //
 // To regenerate:  pnpm gen:schemas
 // CI drift gate:  any uncommitted change here fails the build.
