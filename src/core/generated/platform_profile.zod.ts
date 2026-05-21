@@ -7,11 +7,6 @@
 // Transforms applied:
 //   - T2 injectObjectType
 //   - T4 openAdditionalProperties
-//   - T5 relaxBusinessPaymentHandlersRequirement (TEMPORARY)
-//
-// ⚠ INCLUDES TEMPORARY TRANSFORM(S):
-//   - T5 relaxBusinessPaymentHandlersRequirement — pending upstream fix making
-//     payment_handlers optional on business_schema (read-only catalogs do not have one).
 //
 // To regenerate:  pnpm gen:schemas
 // CI drift gate:  any uncommitted change here fails the build.

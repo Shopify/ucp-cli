@@ -6,15 +6,18 @@
 // Pipeline:
 //   1. Read package.json#ucp.{specVersion, specBaseUrl}; UCP_SPEC_BASE_URL
 //      env override wins over package.json
-//   2. Pre-fetch ucp.json; apply T5 in-memory (TEMPORARY — see below)
-//   3. $RefParser.dereference against entry URL, with a custom resolve.http
-//      resolver that serves the mutated ucp.json from memory and passes every
-//      other URL through to fetch()
-//   4. Apply T2 injectObjectType()                    — bundle-level, permanent
-//   5. Apply T4 openAdditionalProperties()            — bundle-level, permanent
-//   6. For each of [platform_profile, business_profile]:
+//   2. $RefParser.dereference against entry URL, with a pass-through
+//      resolve.http resolver (every URL goes through fetch()).
+//   3. Apply T2 injectObjectType()                    — bundle-level, permanent
+//   4. Apply T4 openAdditionalProperties()            — bundle-level, permanent
+//   5. For each of [platform_profile, business_profile]:
 //        jsonSchemaToZod → write to src/core/generated/<branch>.zod.ts
-//   7. Stamp each output with a header banner pointing back here
+//   6. Stamp each output with a header banner pointing back here
+//
+// No temporary transforms are active at the current specVersion. The T3 and T5
+// patterns (pre-fetch source doc + mutate by name + serve mutated copy through
+// a resolve.http short-circuit) were removed once upstream stabilized at this
+// version. Reintroduce the same shape if a future temporary fix is needed.
 //
 // Published artifacts at `<base>/<version>/schemas/...` carry absolute,
 // version-prefixed `$id` URLs that match the absolute fetch paths — refs
@@ -22,15 +25,10 @@
 // (Earlier file-form pipeline needed T1 stripIds() to paper over a source-
 // form `$id` vs filesystem-relative `$ref` mismatch; that's gone now.)
 //
-// Why T5 runs against its source document before dereference: after deref,
-// named $defs markers are lost and look-alike branches become hard to
-// disambiguate. Mutating the source document by name beforehand is robust
-// and obvious. (T3 was the sibling pattern for platform_schema; removed
-// once the upstream spec fix landed at this specVersion.)
-//
 // Version paths under <base>/<version>/ are frozen-by-convention: BC and
-// non-BC fixes both land at a new version path. T5's self-destruct trigger
-// is therefore engineer-driven (bump specVersion), never spontaneous.
+// non-BC fixes both land at a new version path. Temporary-transform self-
+// destruct triggers (when reintroduced) are therefore engineer-driven (bump
+// specVersion), never spontaneous.
 //
 // Run via: pnpm gen:schemas
 // CI drift gate: `pnpm gen:schemas && git diff --exit-code src/core/generated/`
@@ -72,32 +70,23 @@ async function main() {
   const specBaseUrl = (process.env.UCP_SPEC_BASE_URL ?? pkg.ucp.specBaseUrl).replace(/\/$/, '')
 
   const entryUrl = `${specBaseUrl}/${specVersion}/schemas/discovery/profile.json`
-  const ucpUrl = `${specBaseUrl}/${specVersion}/schemas/ucp.json`
 
   console.log(`▸ spec version: ${specVersion}`)
   console.log(`▸ spec base:    ${specBaseUrl}`)
   console.log(`▸ entry:        ${entryUrl}`)
 
-  // T5 (TEMPORARY): pre-fetch the ucp.json document and mutate in memory.
-  // The custom resolver below serves the mutated copy to ref-parser when it
-  // asks for ucpUrl; everything else passes through to fetch().
-  //
-  // T3 was a sibling transform against service.json's platform_schema; the
-  // upstream spec fix landed at this specVersion, the drift gate caught it,
-  // and the transform was removed per its self-destruct checklist. If a
-  // future temporary transform on service.json is needed, re-introduce the
-  // pre-fetch + resolver short-circuit alongside it.
-  const ucpDoc = await fetchJson(ucpUrl)
-  const t5Touched = relaxBusinessPaymentHandlersRequirementInPlace(ucpDoc)
-  if (t5Touched === 0) throw t5SelfDestructError()
-
+  // No temporary transforms applied at the current specVersion. Both T3
+  // (platform_schema endpoint) and T5 (business_schema payment_handlers) were
+  // removed once the upstream picture stabilized at this version. If a future
+  // temporary fix is needed, re-introduce the pre-fetch + resolver short-
+  // circuit pattern: fetch the source document, mutate by name, and serve the
+  // mutated copy back through a custom resolve.http reader.
   const dereffed = (await $RefParser.dereference(entryUrl, {
     resolve: {
       http: {
         order: 1,
         canRead: /^https?:/i,
         async read(file: { url: string }) {
-          if (file.url === ucpUrl) return JSON.stringify(ucpDoc)
           return await fetchText(file.url)
         },
       },
@@ -111,16 +100,8 @@ async function main() {
   injectObjectType(dereffed) // T2
   openAdditionalProperties(dereffed) // T4
 
-  console.warn(
-    `⚠ T5 (TEMPORARY): relaxed business_schema payment_handlers requirement on ${t5Touched} branch(es). Remove this transform once the spec PR making payment_handlers optional on business_schema lands and specVersion is bumped to that version.`,
-  )
-
   await mkdir(OUT_DIR, { recursive: true })
-  const transformsApplied = [
-    'T2 injectObjectType',
-    'T4 openAdditionalProperties',
-    'T5 relaxBusinessPaymentHandlersRequirement (TEMPORARY)',
-  ]
+  const transformsApplied = ['T2 injectObjectType', 'T4 openAdditionalProperties']
 
   for (const branch of BRANCHES) {
     const subSchema = (dereffed.$defs as Record<string, JsonNode>)?.[branch.def]
@@ -156,10 +137,6 @@ async function fetchText(url: string): Promise<string> {
   }
   if (!r.ok) throw new Error(`HTTP ${r.status} fetching ${url}`)
   return await r.text()
-}
-
-async function fetchJson(url: string): Promise<Record<string, unknown>> {
-  return JSON.parse(await fetchText(url))
 }
 
 // ─── transforms ───────────────────────────────────────────────────────────
@@ -227,80 +204,9 @@ function openAdditionalProperties(node: JsonNode): void {
   }
 }
 
-// T5 — relaxBusinessPaymentHandlersRequirementInPlace ⚠ TEMPORARY ⚠
-//
-// The canonical ucp.json#/$defs/business_schema requires `payment_handlers`
-// on every business profile. That rejects legitimate read-only business
-// profiles (browse/search-only catalogs, lookup endpoints, content-only
-// integrations) that have no checkout flow to declare. Concrete example:
-// catalog.shopify.com publishes a search/lookup business profile with no
-// payment_handlers and is rejected by our discovery validation.
-//
-// This transform reaches into the in-memory ucp.json document, finds the
-// business_schema allOf piece that carries the `required` array, and
-// removes `payment_handlers`. The `services` requirement is preserved —
-// a business with no services declared is not useful. Operating on
-// ucp.json by name BEFORE dereference is robust: post-dereference, the
-// business_schema/platform_schema marker is lost and per-flavor required
-// arrays become hard to disambiguate.
-//
-// REMOVE THIS TRANSFORM once the spec PR making payment_handlers optional
-// on business_schema lands at a published specVersion and we bump to it.
-// The drift-gate CI step will catch the resulting regen.
-function relaxBusinessPaymentHandlersRequirementInPlace(obj: Record<string, unknown>): number {
-  const businessSchema = (obj?.$defs as Record<string, unknown> | undefined)?.business_schema
-  if (!isObject(businessSchema)) {
-    throw new Error('T5: ucp.json#/$defs/business_schema not found — schema layout changed?')
-  }
-  let touched = 0
-  for (const piece of asArray(businessSchema.allOf)) {
-    if (!isObject(piece)) continue
-    if (!Array.isArray(piece.required)) continue
-    const required: unknown[] = piece.required
-    const before = required.length
-    const after = required.filter((r) => r !== 'payment_handlers')
-    piece.required = after
-    if (after.length < before) touched++
-  }
-  return touched
-}
-
-function t5SelfDestructError(): Error {
-  return new Error(
-    'T5 (relaxBusinessPaymentHandlersRequirementInPlace): expected to relax 1 business_schema ' +
-      'allOf branch but matched 0. Likely the upstream spec fix has landed at this specVersion. ' +
-      'To remove this transform:\n' +
-      '  1. scripts/codegen-schemas.ts: delete relaxBusinessPaymentHandlersRequirementInPlace()\n' +
-      '     and its call site in main() (look for `// T5`).\n' +
-      '  2. scripts/codegen-schemas.ts: simplify the resolve.http resolver — remove the\n' +
-      '     `if (file.url === ucpUrl)` short-circuit; drop the ucpDoc pre-fetch.\n' +
-      '  3. scripts/codegen-schemas.ts: drop the T5 entry from transformsApplied[] and the\n' +
-      '     t5Touched warn log; drop t5SelfDestructError().\n' +
-      '  4. scripts/codegen-schemas.ts: drop the T5 line in banner()/T5 notice block.\n' +
-      '  5. Re-run `pnpm gen:schemas` and commit the updated src/core/generated/.',
-  )
-}
-
-function asArray(x: unknown): unknown[] {
-  return Array.isArray(x) ? x : []
-}
-
-function isObject(x: unknown): x is Record<string, unknown> {
-  return typeof x === 'object' && x !== null && !Array.isArray(x)
-}
-
 // ─── output banner ────────────────────────────────────────────────────────
 
 function banner(entryUrl: string, specVersion: string, transforms: string[]): string {
-  const temporary: string[] = []
-  if (transforms.some((t) => t.startsWith('T5'))) {
-    temporary.push(
-      '//   - T5 relaxBusinessPaymentHandlersRequirement — pending upstream fix making\n//     payment_handlers optional on business_schema (read-only catalogs do not have one).',
-    )
-  }
-  const tempNotice = temporary.length
-    ? `//\n// ⚠ INCLUDES TEMPORARY TRANSFORM(S):\n${temporary.join('\n')}\n`
-    : ''
   return `// AUTOGENERATED — DO NOT EDIT.
 //
 // Generated by scripts/codegen-schemas.ts from UCP spec at:
@@ -309,7 +215,7 @@ function banner(entryUrl: string, specVersion: string, transforms: string[]): st
 //
 // Transforms applied:
 ${transforms.map((t) => `//   - ${t}`).join('\n')}
-${tempNotice}//
+//
 // To regenerate:  pnpm gen:schemas
 // CI drift gate:  any uncommitted change here fails the build.
 `
