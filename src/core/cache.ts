@@ -21,7 +21,7 @@ import { z } from 'incur'
 import { type ErrorCode, UcpError } from '../lib/errors.js'
 import type { ErrorLayer } from '../lib/types.js'
 import { formatZodIssues } from '../lib/zod-format.js'
-import { defaultUserAgent, formatHeadersForTrace } from './headers.js'
+import { ucpFetch } from './http-client.js'
 import { vlog } from './verbose.js'
 
 /**
@@ -154,7 +154,6 @@ export async function fetchCached<T = unknown>(
   url: string,
   options: FetchCachedOptions<T>,
 ): Promise<T> {
-  const fetchImpl = options.fetch ?? fetch
   const layer: ErrorLayer = options.errorLayer ?? 'transport'
   const cachePath = join(options.cacheDir, `${originToFilename(url)}.json`)
 
@@ -176,17 +175,12 @@ export async function fetchCached<T = unknown>(
 
   let response: Response
   try {
-    const requestHeaders: Record<string, string> = {
-      // User-Agent first so a caller-supplied UA in `options.headers` overrides;
-      // Accept last so users can never accidentally replace the framing header.
-      'User-Agent': defaultUserAgent(),
-      ...options.headers,
-      Accept: 'application/json',
-    }
-    vlog(`cache: headers: ${formatHeadersForTrace(requestHeaders)}`)
-    response = await fetchImpl(url, {
-      headers: requestHeaders,
+    response = await ucpFetch(url, {
+      ...(options.headers !== undefined && { headers: options.headers }),
+      framing: { Accept: 'application/json' },
       signal,
+      ...(options.fetch !== undefined && { fetch: options.fetch }),
+      traceLabel: 'cache',
     })
   } catch (err) {
     throw new UcpError({

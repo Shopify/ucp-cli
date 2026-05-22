@@ -235,6 +235,12 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
         .boolean()
         .default(false)
         .describe('Bypass the local profile cache and re-fetch from the business.'),
+      header: z
+        .array(z.string())
+        .default([])
+        .describe(
+          'Add an outbound HTTP header on the discovery + tools/list requests this command makes. Repeatable. Format: --header "Name: Value". Same semantics as on operation commands; required when a merchant gates `/.well-known/ucp` or tools/list behind auth. For bearer auth: --header "Authorization: Bearer $TOKEN".',
+        ),
       view: z
         .string()
         .optional()
@@ -278,9 +284,11 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       // fired had `meta.defaults.catalog` been set, so when it didn't, the init
       // CTA is the recovery path.
       if (businessUrl === undefined) return c.error(businessNotResolvedError())
+      const headers = await resolveCallHeaders(c.options, session, businessUrl)
       const discoverResult = await discoverImpl(businessUrl, {
         force: c.options.refresh,
         profileUrl: requireProfileUrl(session.profile.profileUrl),
+        headers,
       })
       return c.ok(applyView({ result: discoverResult }, viewState))
     },
@@ -409,12 +417,11 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       if (!prep.ok) return c.error(prep.error)
       const wrapped = wrapOperationInput(prep.input, bodyKey)
       const merged = mergeId(wrapped, c.args.id, idPlacement)
-      // Resolve outbound headers BEFORE dispatch so authentication, tenancy,
-      // and tracing flow into both the well-known fetch (in discover) and the
-      // tools/call POST. `resolveHeaders` always returns at least the built-in
-      // User-Agent; on errors (bad headers.json) it throws an INVALID_INPUT
-      // that incur surfaces as a structured error envelope.
-      const headers = await resolveOpHeaders(c.options, prep)
+      const headers = await resolveCallHeaders(
+        c.options,
+        { profile: { name: prep.profileName } },
+        prep.business,
+      )
       // Capture the trusted negotiated view via the internal side-channel.
       // Filled by `callOperation` after `discover()` resolves (BEFORE any
       // OPERATION_NOT_OFFERED throw), so CTAs on transport-layer failures
@@ -846,19 +853,19 @@ async function prepareOperation(
   }
 }
 
-// Resolve the outbound HTTP header bag once per dispatch. Origin scoping uses
-// the canonical scheme://host[:port] form so `headers.json` per-business keys
-// match regardless of the path the user typed for --business. Falls back to
-// the raw business string if canonicalization fails (extremely defensive: by
-// this point prepareOperation has already validated the URL via session).
-async function resolveOpHeaders(
-  options: OperationOptions,
-  prep: { business: string; profileName: string },
+// `?? businessUrl` is defensive only: every caller has already routed the URL
+// through session resolution / parseHttpsUrl, so canonicalizeOrigin should not
+// fail here. Failing closed (throwing) would break dispatch on a non-bug; the
+// raw string is a safe last-resort origin key against headers.json.
+async function resolveCallHeaders(
+  options: { header: string[] },
+  session: { profile: { name: string } },
+  businessUrl: string,
 ): Promise<HeaderMap> {
   return resolveHeaders({
     argFlags: options.header,
-    origin: canonicalizeOrigin(prep.business) ?? prep.business,
-    profile: prep.profileName,
+    origin: canonicalizeOrigin(businessUrl) ?? businessUrl,
+    profile: session.profile.name,
   })
 }
 
@@ -910,15 +917,7 @@ async function inputSchemaOperation(
   }
 
   const profileUrl = requireProfileUrl(session.profile.profileUrl)
-  // --input-schema still calls discover, which fetches /.well-known/ucp and
-  // (cache-miss) tools/list. Merchants that gate discovery behind auth need
-  // the same resolved headers as the dispatch path; resolveHeaders is cheap
-  // and idempotent, so we don't try to skip it for the schema-only fast path.
-  const headers = await resolveHeaders({
-    argFlags: c.options.header,
-    origin: canonicalizeOrigin(businessUrl) ?? businessUrl,
-    profile: session.profile.name,
-  })
+  const headers = await resolveCallHeaders(c.options, session, businessUrl)
   const resolved = await discoverImpl(businessUrl, {
     capabilities: [helper.capability],
     profileUrl,
