@@ -58,7 +58,9 @@ describe('createUcpCli', () => {
     expect(JSON.parse(output)).toMatchObject({
       result: { business: 'https://shop.example.com', negotiated: {} },
     })
-    expect(calls).toEqual([['https://shop.example.com', { force: false, profileUrl: PROFILE_URL }]])
+    expect(calls).toMatchObject([
+      ['https://shop.example.com', { force: false, profileUrl: PROFILE_URL }],
+    ])
   })
 
   it('wires catalog search args and options to the search helper', async () => {
@@ -348,6 +350,41 @@ describe('createUcpCli — business resolution', () => {
       'https://session.example.com',
       { force: false, profileUrl: PROFILE_URL },
     ])
+  })
+
+  it('discover: forwards --header onto the discover call so auth-gated /.well-known/ucp works', async () => {
+    // Regression: top-level `ucp discover` is the natural first command an
+    // agent runs to probe a merchant. If discovery itself is auth-gated
+    // (some merchants require auth even on /.well-known/ucp or tools/list),
+    // --header must reach discoverImpl. Mirrors the operation-command path.
+    const calls: unknown[] = []
+    const cli = createUcpCli({
+      resolveSession: stubSession('https://session.example.com'),
+      discover: async (...args) => {
+        calls.push(args)
+        return { business: args[0], profile: {}, negotiated: {} } as never
+      },
+    })
+    const { exitCode } = await serveCli(cli, [
+      'discover',
+      '--business',
+      'https://merchant.example.com',
+      '--header',
+      'Authorization: Bearer probe-token',
+      '--header',
+      'Tenant-Id: acme',
+    ])
+    expect(exitCode).toBe(0)
+    const firstCall = calls[0] as [string, { headers?: Record<string, string> }]
+    expect(firstCall[0]).toBe('https://merchant.example.com')
+    expect(firstCall[1]?.headers).toMatchObject({
+      Authorization: 'Bearer probe-token',
+      'Tenant-Id': 'acme',
+    })
+    // Built-in User-Agent ships at lowest priority on every dispatch, including
+    // discover. Asserting it here guards against future refactors that
+    // accidentally drop the built-in identification layer.
+    expect(firstCall[1]?.headers?.['User-Agent']).toMatch(/^@shopify\/ucp-cli\//)
   })
 
   it('discover: emits BUSINESS_NOT_RESOLVED with CTA when nothing resolves', async () => {

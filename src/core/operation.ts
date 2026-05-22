@@ -20,7 +20,7 @@ import { mcpRpc } from './mcp-client.js'
 
 export type CallOperationCallerOptions = Pick<
   DiscoverOptions,
-  'agentRange' | 'cacheDir' | 'fetch' | 'force' | 'profileUrl' | 'signal'
+  'agentRange' | 'cacheDir' | 'fetch' | 'force' | 'headers' | 'profileUrl' | 'signal'
 > & {
   /**
    * `--dry-run`: run the full pre-flight (discover → meta inject → schema
@@ -66,6 +66,7 @@ export function forwardCallOptions(
       cacheDir: options.cacheDir,
       fetch: options.fetch,
       force: options.force,
+      headers: options.headers,
       signal: options.signal,
       dryRun: options.dryRun,
       _onDiscover: options._onDiscover,
@@ -122,7 +123,10 @@ export function serviceOp(capability: string, toolName: string, opName: string):
 }
 
 export interface CallOperationOptions
-  extends Pick<DiscoverOptions, 'agentRange' | 'cacheDir' | 'fetch' | 'force' | 'signal'> {
+  extends Pick<
+    DiscoverOptions,
+    'agentRange' | 'cacheDir' | 'fetch' | 'force' | 'headers' | 'signal'
+  > {
   profileUrl: string
   dryRun?: boolean
   /** See {@link CallOperationCallerOptions._onDiscover}. */
@@ -183,6 +187,7 @@ export async function callOperation<T = unknown>(
       cacheDir: options.cacheDir,
       fetch: options.fetch,
       force: options.force,
+      headers: options.headers,
       signal: options.signal,
     }),
   })
@@ -239,7 +244,11 @@ export async function callOperation<T = unknown>(
       name: tool.name,
       arguments: args,
     },
-    ...omitUndefined({ fetch: options.fetch, signal: options.signal }),
+    ...omitUndefined({
+      fetch: options.fetch,
+      signal: options.signal,
+      headers: options.headers,
+    }),
   })
   // MCP tools/call wraps results in { content:[{type:'text',text:'<json>'}], isError? }.
   // Unwrap to the inner UCP envelope so callers never see the transport wrapper.

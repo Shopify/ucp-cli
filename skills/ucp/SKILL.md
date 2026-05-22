@@ -256,6 +256,10 @@ export UCP_ON_ESCALATION='jq -r .url | tee >(xargs open) | xargs -I{} osascript 
 
 The agent's job, beyond configuration, is to surface the escalation to the buyer with context: what was being done, why it stopped here, and what the buyer needs to do next. The hook handles delivery; the agent handles framing.
 
+### Custom request headers
+
+Pass `--header 'Name: Value'` (repeatable) on any op when a merchant requires a custom HTTP header — e.g. `--header "Authorization: Bearer $TOKEN"` or `--header "Api-Key: $KEY"`.
+
 ### Agent-initiated escalation ("this is as far as I got you")
 
 When the CLI returns a blocking error — auth the CLI cannot perform, an unrecoverable operation error, or a merchant without the needed operation — stop retrying that blocked operation and hand the buyer off. Use the most specific buyer URL you already have; never invent one. A checkout auth/permission gate does **not** invalidate earlier unauthenticated work: preserve cart ids, selected variants, cart-stage shipping estimates, discounts, and totals you already obtained.

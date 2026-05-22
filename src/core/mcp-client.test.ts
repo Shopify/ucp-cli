@@ -61,7 +61,7 @@ describe('mcpRpc — wire format', () => {
       endpoint: ENDPOINT,
       method: 'tools/call',
       params: { name: 'search_catalog', arguments: { query: 'hat' } },
-      headers: { 'X-Trace-Id': 'abc123' },
+      headers: { 'Trace-Id': 'abc123' },
       fetch,
       id: 'x',
     })
@@ -71,7 +71,7 @@ describe('mcpRpc — wire format', () => {
     const headers = new Headers(captured.init.headers as Record<string, string>)
     expect(headers.get('content-type')).toBe('application/json')
     expect(headers.get('accept')).toBe('application/json')
-    expect(headers.get('x-trace-id')).toBe('abc123')
+    expect(headers.get('trace-id')).toBe('abc123')
 
     const body = JSON.parse(captured.init.body as string) as { params: unknown }
     expect(body.params).toEqual({ name: 'search_catalog', arguments: { query: 'hat' } })

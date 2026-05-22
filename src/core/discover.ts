@@ -87,6 +87,13 @@ export interface DiscoverOptions {
   signal?: AbortSignal
   /** Platform profile URL advertised to the business during MCP discovery. */
   profileUrl?: string
+  /**
+   * Outbound headers (auth, tenancy, etc) attached to every HTTP call made
+   * during discovery: the `/.well-known/ucp` GET and any `tools/list` POSTs.
+   * Some merchants require auth even on discovery, so the same resolved bag
+   * that flows to `tools/call` flows here too.
+   */
+  headers?: Record<string, string>
   /** Injectable for tests (forwarded to `fetchBusinessProfile` and `mcpRpc`). */
   fetch?: typeof fetch
 }
@@ -115,7 +122,12 @@ export async function discover(
 
   const profile = await fetchBusinessProfile(normalizedBusiness.origin, {
     cacheDir: profileCacheDir,
-    ...omitUndefined({ fetch: options.fetch, signal: options.signal, force: options.force }),
+    ...omitUndefined({
+      fetch: options.fetch,
+      signal: options.signal,
+      force: options.force,
+      headers: options.headers,
+    }),
   })
 
   const services = profile.ucp.services as Record<string, unknown> | undefined
@@ -157,6 +169,7 @@ export async function discover(
         force: options.force,
         fetch: options.fetch,
         signal: options.signal,
+        headers: options.headers,
       }),
     })
     const tools = Object.keys(negotiated[capability].tools).sort()
@@ -177,6 +190,7 @@ interface HydrateOptions {
   fetch?: typeof fetch
   signal?: AbortSignal
   profileUrl?: string
+  headers?: Record<string, string>
 }
 
 async function hydrateCapability(opts: HydrateOptions): Promise<NegotiatedCapability> {
@@ -194,6 +208,7 @@ async function hydrateCapability(opts: HydrateOptions): Promise<NegotiatedCapabi
           params: opts.profileUrl !== undefined ? profileParams(opts.profileUrl) : undefined,
           fetch: opts.fetch,
           signal: opts.signal,
+          headers: opts.headers,
         }),
       }),
   })

@@ -186,6 +186,8 @@ export interface FetchProfileOptions {
   fetch?: typeof fetch
   /** Skip the cache read. Cache is still written on success. */
   force?: boolean
+  /** Outbound headers (auth, tenancy, etc); forwarded to `fetchCached`. */
+  headers?: Record<string, string>
 }
 
 function defaultBusinessCacheDir(): string {
@@ -210,6 +212,11 @@ export async function fetchBusinessProfile(
       schemaInvalid: ErrorCodes.PROFILE_SCHEMA_INVALID,
     },
     errorLayer: 'transport',
-    ...omitUndefined({ force: options.force, fetch: options.fetch, signal: options.signal }),
+    ...omitUndefined({
+      force: options.force,
+      fetch: options.fetch,
+      signal: options.signal,
+      headers: options.headers,
+    }),
   })
 }

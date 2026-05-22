@@ -21,6 +21,7 @@ import { z } from 'incur'
 import { type ErrorCode, UcpError } from '../lib/errors.js'
 import type { ErrorLayer } from '../lib/types.js'
 import { formatZodIssues } from '../lib/zod-format.js'
+import { ucpFetch } from './http-client.js'
 import { vlog } from './verbose.js'
 
 /**
@@ -131,6 +132,14 @@ export interface FetchCachedOptions<T = unknown> {
   signal?: AbortSignal
   /** Per-request timeout in milliseconds. Default 30 s. */
   timeoutMs?: number
+  /**
+   * Additional outbound headers (auth, tenancy, etc). Spread between the
+   * built-in User-Agent default and the framing `Accept` header, so a
+   * caller-supplied User-Agent overrides the built-in but no source can
+   * clobber the dispatcher's `Accept`. Reserved-header filtering is the
+   * caller's responsibility (see {@link resolveHeaders}).
+   */
+  headers?: Record<string, string>
 }
 
 /**
@@ -145,7 +154,6 @@ export async function fetchCached<T = unknown>(
   url: string,
   options: FetchCachedOptions<T>,
 ): Promise<T> {
-  const fetchImpl = options.fetch ?? fetch
   const layer: ErrorLayer = options.errorLayer ?? 'transport'
   const cachePath = join(options.cacheDir, `${originToFilename(url)}.json`)
 
@@ -167,9 +175,12 @@ export async function fetchCached<T = unknown>(
 
   let response: Response
   try {
-    response = await fetchImpl(url, {
-      headers: { Accept: 'application/json' },
+    response = await ucpFetch(url, {
+      ...(options.headers !== undefined && { headers: options.headers }),
+      framing: { Accept: 'application/json' },
       signal,
+      ...(options.fetch !== undefined && { fetch: options.fetch }),
+      traceLabel: 'cache',
     })
   } catch (err) {
     throw new UcpError({

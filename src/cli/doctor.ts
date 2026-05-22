@@ -13,6 +13,7 @@
 import { access, constants, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import { ucpFetch } from '../core/http-client.js'
 import {
   activeYamlPath,
   type ProfileStoreOptions,
@@ -172,7 +173,16 @@ async function checkProfileUrl(
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), HEAD_TIMEOUT_MS)
   try {
-    const res = await fetchImpl(url, { method: 'HEAD', signal: ac.signal })
+    // Route through ucpFetch so the agent-profile probe carries the same
+    // built-in User-Agent that every other outbound request sends. No
+    // merchant-scoped --header overrides apply here — this URL belongs to
+    // the agent's own identity, not a merchant.
+    const res = await ucpFetch(url, {
+      method: 'HEAD',
+      signal: ac.signal,
+      fetch: fetchImpl,
+      traceLabel: 'doctor',
+    })
     if (res.ok) {
       return { id: 'profile-url', status: 'ok', detail: `${url} → ${res.status}` }
     }

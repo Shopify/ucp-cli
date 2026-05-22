@@ -24,6 +24,7 @@ import {
   resolveEscalationHook,
   runEscalationHook,
 } from './core/escalation.js'
+import { canonicalizeOrigin, type HeaderMap, resolveHeaders } from './core/headers.js'
 import { isDryRunPreview } from './core/operation.js'
 import { DEFAULT_AGENT_CAPABILITY_IDS } from './core/profile.js'
 import { acceptsHttpsUrl, parseHttpsUrl } from './core/url.js'
@@ -78,6 +79,8 @@ export type ShoppingHelperDep = (
     force: boolean
     profileUrl: string
     dryRun?: boolean
+    /** Resolved outbound HTTP headers; see {@link resolveHeaders}. */
+    headers?: Record<string, string>
     /** Internal-only side-channel; see CallOperationCallerOptions._onDiscover. */
     _onDiscover?: (discovered: DiscoveredBusiness) => void
   },
@@ -232,6 +235,12 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
         .boolean()
         .default(false)
         .describe('Bypass the local profile cache and re-fetch from the business.'),
+      header: z
+        .array(z.string())
+        .default([])
+        .describe(
+          'Add an outbound HTTP header on the discovery + tools/list requests this command makes. Repeatable. Format: --header "Name: Value". Same semantics as on operation commands; required when a merchant gates `/.well-known/ucp` or tools/list behind auth. For bearer auth: --header "Authorization: Bearer $TOKEN".',
+        ),
       view: z
         .string()
         .optional()
@@ -275,9 +284,11 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       // fired had `meta.defaults.catalog` been set, so when it didn't, the init
       // CTA is the recovery path.
       if (businessUrl === undefined) return c.error(businessNotResolvedError())
+      const headers = await resolveCallHeaders(c.options, session, businessUrl)
       const discoverResult = await discoverImpl(businessUrl, {
         force: c.options.refresh,
         profileUrl: requireProfileUrl(session.profile.profileUrl),
+        headers,
       })
       return c.ok(applyView({ result: discoverResult }, viewState))
     },
@@ -343,6 +354,12 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       .describe(
         'Shell command to invoke when a checkout response returns result.status === "requires_escalation". Receives a compact escalation payload as JSON on stdin. Auth errors use CTA handoff guidance and do not fire this hook. Overrides UCP_ON_ESCALATION / config.yaml / hooks file. No-op in --mcp mode.',
       ),
+    header: z
+      .array(z.string())
+      .default([])
+      .describe(
+        'Add an outbound HTTP header on UCP requests. Repeatable. Format: --header "Name: Value". Overrides headers.json (default + per-business). Reserved framing headers (Content-Type, Accept, Host, etc.) are dropped silently. Values may not contain CR/LF. For bearer auth: --header "Authorization: Bearer $TOKEN".',
+      ),
     view: z
       .string()
       .optional()
@@ -400,6 +417,11 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       if (!prep.ok) return c.error(prep.error)
       const wrapped = wrapOperationInput(prep.input, bodyKey)
       const merged = mergeId(wrapped, c.args.id, idPlacement)
+      const headers = await resolveCallHeaders(
+        c.options,
+        { profile: { name: prep.profileName } },
+        prep.business,
+      )
       // Capture the trusted negotiated view via the internal side-channel.
       // Filled by `callOperation` after `discover()` resolves (BEFORE any
       // OPERATION_NOT_OFFERED throw), so CTAs on transport-layer failures
@@ -410,6 +432,7 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       const result = await helper(prep.business, merged, {
         force: prep.force,
         profileUrl: prep.profileUrl,
+        headers,
         ...(c.options.dryRun ? { dryRun: true } : {}),
         _onDiscover: (d) => {
           discovered = d
@@ -665,6 +688,7 @@ interface OperationOptions {
   inputSchema: boolean
   dryRun: boolean
   onEscalation?: string | undefined
+  header: string[]
   view?: string | undefined
 }
 
@@ -702,6 +726,8 @@ type ShoppingHelper = {
       force: boolean
       profileUrl: string
       dryRun?: boolean
+      /** Resolved outbound HTTP headers; see {@link resolveHeaders}. */
+      headers?: Record<string, string>
       /** Internal-only side-channel; see CallOperationCallerOptions._onDiscover. */
       _onDiscover?: (discovered: DiscoveredBusiness) => void
     },
@@ -766,6 +792,7 @@ type PreparedOperation =
       ok: true
       input: Record<string, unknown>
       business: string
+      profileName: string
       profileUrl: string
       force: boolean
     }
@@ -820,9 +847,26 @@ async function prepareOperation(
     ok: true,
     input,
     business,
+    profileName: session.profile.name,
     profileUrl: requireProfileUrl(session.profile.profileUrl),
     force: c.options.refresh,
   }
+}
+
+// `?? businessUrl` is defensive only: every caller has already routed the URL
+// through session resolution / parseHttpsUrl, so canonicalizeOrigin should not
+// fail here. Failing closed (throwing) would break dispatch on a non-bug; the
+// raw string is a safe last-resort origin key against headers.json.
+async function resolveCallHeaders(
+  options: { header: string[] },
+  session: { profile: { name: string } },
+  businessUrl: string,
+): Promise<HeaderMap> {
+  return resolveHeaders({
+    argFlags: options.header,
+    origin: canonicalizeOrigin(businessUrl) ?? businessUrl,
+    profile: session.profile.name,
+  })
 }
 
 // Implements `--input-schema`: short-circuit before dispatch and return the
@@ -873,10 +917,12 @@ async function inputSchemaOperation(
   }
 
   const profileUrl = requireProfileUrl(session.profile.profileUrl)
+  const headers = await resolveCallHeaders(c.options, session, businessUrl)
   const resolved = await discoverImpl(businessUrl, {
     capabilities: [helper.capability],
     profileUrl,
     force: c.options.refresh,
+    headers,
   })
   const negotiated = resolved.negotiated[helper.capability]
   const tool = negotiated?.tools[helper.toolName]

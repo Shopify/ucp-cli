@@ -14,6 +14,7 @@
 
 import { ErrorCodes, UcpError } from '../lib/errors.js'
 import type { CtaBlock } from '../lib/types.js'
+import { ucpFetch } from './http-client.js'
 import { parseHttpsUrl } from './url.js'
 import { vlog } from './verbose.js'
 
@@ -67,7 +68,6 @@ export interface McpRpcOptions {
 
 export async function mcpRpc<T = unknown>(opts: McpRpcOptions): Promise<T> {
   const endpoint = parseHttpsUrl(opts.endpoint, 'MCP endpoint').toString()
-  const fetchImpl = opts.fetch ?? fetch
   const id = opts.id ?? nextRequestId++
 
   const body: JsonRpcRequest = {
@@ -89,15 +89,14 @@ export async function mcpRpc<T = unknown>(opts: McpRpcOptions): Promise<T> {
 
   let response: Response
   try {
-    response = await fetchImpl(endpoint, {
+    response = await ucpFetch(endpoint, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        ...opts.headers,
-      },
       body: requestBody,
+      ...(opts.headers !== undefined && { headers: opts.headers }),
+      framing: { 'Content-Type': 'application/json', Accept: 'application/json' },
       signal,
+      ...(opts.fetch !== undefined && { fetch: opts.fetch }),
+      traceLabel: 'mcp',
     })
   } catch (err) {
     throw new UcpError({
