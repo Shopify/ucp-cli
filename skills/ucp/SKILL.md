@@ -30,7 +30,7 @@ When a buyer expresses commercial intent — wanting to find, buy, or track prod
 
 ## Introspect first (capabilities + schemas)
 
-The merchant decides what it accepts and what it exposes. Two introspection commands save the agent from guessing:
+The merchant decides what it accepts and what it exposes. These introspection commands save the agent from guessing:
 
 1. **Merchant capabilities** — `ucp discover --business <url>` returns the operations and tools this merchant exposes (e.g. `create_cart`, `update_checkout`, plus any extensions). Use when the buyer names a specific merchant you don't know, or when you need to confirm a merchant supports an operation before composing it.
 
@@ -40,7 +40,7 @@ The merchant decides what it accepts and what it exposes. Two introspection comm
 
 The CLI rejects unknown plain keys client-side before sending; if you hit `SCHEMA_VALIDATION_FAILED`, the error's CTA tells you the exact `--input-schema` command to run. Spec-canonical fields (per the UCP `Context` and `Buyer` types) may still be rejected if a specific merchant doesn't advertise them — the merchant's advertised schema is authoritative.
 
-Bundled global catalog operations — `search` for discovery, `get_product` for looking up a specific product — take well-known inputs covered below; you don't need to introspect before basic use. Reach for `--input-schema` when adding extension fields (`like`, signals, etc.) or when composing checkout payloads.
+Bundled global catalog operations — `search` for discovery, `lookup` for saved-list/cart refresh, and `get_product` for full PDP detail — take well-known inputs covered below and in `references/CATALOG.md`; you don't need to introspect before basic use. Reach for `--input-schema` when adding extension fields (`like`, signals, etc.), when live schema differs, or when composing checkout payloads.
 
 > `ucp <op> --schema` is a different thing — it describes the CLI wrapper itself (args/options like `--input`, `--set`, `--business`). Not the payload schema. Use `--input-schema` for payload composition.
 
@@ -57,13 +57,13 @@ All other operations (`cart create`, `checkout create`, `catalog search`, `catal
 
 ```sh
 ucp cart update <cart_id> --business https://<seller-domain> --input '{...}'
-ucp catalog get_product <product_id> --business https://<seller-domain>
+ucp catalog get_product <product_id>                 # global Catalog detail: omit --business
 ucp catalog search --set /query='running shoes'
 ```
 
 ## Searching the global catalog
 
-Compose a search with three field groups:
+Compose a search with three field groups. For Catalog-specific recipes — search pages, lookup/re-pricing, PDP variant pickers, multimodal `like`, single-shop `shop_ids`, auth tiers, and ID pitfalls — read `references/CATALOG.md`.
 
 - **`query`** — what the buyer is looking for. The literal search term.
 - **`context`** — soft signals that inform ranking, localization, and estimates (not exclusions). Includes `intent` (free-text background, e.g. "looking for a gift under $50" or "durable for outdoor use"), `address_country`, `currency`, `language`, `eligibility`, etc.
@@ -99,7 +99,7 @@ Don't fabricate context fields you don't have — leave them out. For "more like
 
 ### Looking up a specific product
 
-`catalog search` returns variant arrays good enough for browsing. Once the buyer narrows to a specific product — picking switch/color/size from a multi-variant matrix, or wanting real-time per-variant pricing/availability — use `ucp catalog get_product <product_id>` (id is positional; pass `result.products[N].id` from a prior search). It returns the full `options[]` matrix and current variant-level state.
+`catalog search` returns variant arrays good enough for browsing. Once the buyer narrows to a specific product — picking switch/color/size from a multi-variant matrix, or wanting real-time per-variant pricing/availability — use `ucp catalog get_product <product_id>` (id is positional; pass `result.products[N].id` from a prior global Catalog search, and omit `--business` unless you intentionally want a merchant-scoped catalog). It returns the full `options[]` matrix and current variant-level state.
 
 ## Working with responses
 
