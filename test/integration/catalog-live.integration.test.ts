@@ -60,37 +60,19 @@ describe.skipIf(!LIVE)('live: Shopify global catalog (UCP_LIVE_TESTS=1)', () => 
     expect(init.code).toBe(0)
 
     const search = await run(env, ['catalog', 'search', '--set', '/query=trail map'])
-    // What "working" means here is: the catalog-fallback rung dispatched to
-    // the live endpoint and we got a structured UCP envelope back. Success
-    // (dispatch identity + `result` present) is the happy path; certain
-    // upstream errors are known and not test failures (see
-    // KNOWN_UPSTREAM_ERRORS below). Anything outside that allowlist fails
-    // loudly with full context so a regression explains itself instead of
-    // just blaming the assertion.
+    // Working means: catalog-fallback rung dispatched to the live endpoint
+    // and returned a structured UCP envelope with dispatch identity
+    // (`business`) and the catalog payload (`result`). The previous
+    // MCP_INVALID_RESPONSE tolerance is gone: schema-dialect mismatches and
+    // Ruby-flavor regex defects are now handled client-side by
+    // validateOperationInput's soft-fail path, so a failure here is a real
+    // regression.
     const body = JSON.parse(search.stdout) as Record<string, unknown>
     expect(body).toBeTypeOf('object')
-
-    // As of 2026-05-10 the live endpoint publishes an `inputSchema` for
-    // search_catalog containing a Ruby/PCRE-style regex (`\Agid://shopify/p/`)
-    // that AJV/ECMAScript rejects. Captured here so the test stays green while
-    // we track the upstream fix; flip back to a hard requirement once the
-    // catalog team ships a valid schema.
-    const KNOWN_UPSTREAM_ERRORS = new Set([
-      'MCP_INVALID_RESPONSE', // schema regex incompat — see SCHEMA_REGEX_INCOMPAT_2026_05_10
-    ])
-
-    if (typeof body.business === 'string') {
-      // Success path: dispatch identity at root + `result` carries the
-      // catalog payload. No envelope-level `status` field anymore — the
-      // presence of `business`/`result` is the success discriminator.
-      expect(body.result).toBeDefined()
-      expect(body).toHaveProperty('cta')
-    } else if (typeof body.code === 'string' && KNOWN_UPSTREAM_ERRORS.has(body.code)) {
-      // Tolerated upstream defect; ensure the error envelope itself is
-      // well-formed so we'd catch a regression in *our* error path.
-      expect(body).toHaveProperty('message')
-    } else {
+    if (typeof body.business !== 'string') {
       expect.fail(`unexpected live response: ${search.stdout}\nstderr: ${search.stderr}`)
     }
+    expect(body.result).toBeDefined()
+    expect(body).toHaveProperty('cta')
   }, 30_000)
 })

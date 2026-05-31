@@ -10,13 +10,9 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import {
-  callOperation,
-  isDryRunPreview,
-  patchKnownUpstreamSchemaDefects,
-  unwrapMcpCallResult,
-} from './operation.js'
+import { callOperation, isDryRunPreview, unwrapMcpCallResult } from './operation.js'
 import type { AgentRange } from './profile.js'
+import { setVerboseWriter } from './verbose.js'
 
 const BUSINESS_URL = 'https://shop.example.invalid'
 const MCP_ENDPOINT = 'https://shop.example.invalid/ucp/mcp'
@@ -33,7 +29,11 @@ const PROFILE = {
   },
 }
 
+// Declares `$schema` so the dispatcher exercises the JSON Schema dialect
+// path real servers publish. Fixtures without `$schema` silently default to
+// draft-07 and mask validator/dialect mismatches.
 const SEARCH_SCHEMA = {
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
   type: 'object',
   required: ['meta', 'catalog'],
   properties: {
@@ -291,77 +291,6 @@ describe('callOperation', () => {
     expect(bodies.some((body) => body.method === 'tools/call')).toBe(false)
   })
 
-  it('rejects unknown plain fields before tools/call even when schema allows extensions', async () => {
-    const bodies: Record<string, unknown>[] = []
-    const fetch = vi.fn(async (url: string | URL | Request, init: RequestInit = {}) => {
-      const u = String(url)
-      const body =
-        typeof init.body === 'string'
-          ? (JSON.parse(init.body) as Record<string, unknown>)
-          : undefined
-      if (body !== undefined) bodies.push(body)
-      if (u.endsWith('/.well-known/ucp')) return jsonResponse(PROFILE)
-      return jsonResponse({
-        jsonrpc: '2.0',
-        id: body?.id,
-        result: { tools: [{ name: 'search_catalog', inputSchema: SEARCH_SCHEMA }] },
-      })
-    }) as unknown as typeof globalThis.fetch
-
-    await expect(
-      callOperation(
-        BUSINESS_URL,
-        {
-          capability: 'dev.ucp.shopping',
-          toolName: 'search_catalog',
-          input: {
-            catalog: {
-              query: 'boots',
-              context: {
-                address_country: 'US',
-                address_subdivision: 'CA',
-                address_postal_code: '94105',
-              },
-            },
-          },
-        },
-        { cacheDir, agentRange: RANGE, fetch, profileUrl: PROFILE_URL },
-      ),
-    ).rejects.toMatchObject({
-      code: 'SCHEMA_VALIDATION_FAILED',
-      layer: 'client',
-      context: {
-        unknown_fields: [
-          '/catalog/context/address_subdivision',
-          '/catalog/context/address_postal_code',
-        ],
-      },
-    })
-
-    await expect(
-      callOperation(
-        BUSINESS_URL,
-        {
-          capability: 'dev.ucp.shopping',
-          toolName: 'search_catalog',
-          input: {
-            catalog: {
-              query: 'boots',
-              context: { address_country: 'US', 'Com.Example.fulfillment_hint': 'dock' },
-            },
-          },
-        },
-        { cacheDir, agentRange: RANGE, fetch, profileUrl: PROFILE_URL },
-      ),
-    ).rejects.toMatchObject({
-      code: 'SCHEMA_VALIDATION_FAILED',
-      layer: 'client',
-      context: { unknown_fields: ['/catalog/context/Com.Example.fulfillment_hint'] },
-    })
-
-    expect(bodies.some((body) => body.method === 'tools/call')).toBe(false)
-  })
-
   it('allows reverse-DNS extension keys at open schema extension points', async () => {
     const bodies: Record<string, unknown>[] = []
     const fetch = vi.fn(async (url: string | URL | Request, init: RequestInit = {}) => {
@@ -575,7 +504,268 @@ describe('callOperation', () => {
   })
 })
 
-// TODO(upstream-fix): delete this block alongside patchKnownUpstreamSchemaDefects.
+// Tri-mode test matrix for pre-flight input validation. The dispatcher
+// distinguishes "soft" signals (uncertainty, policy opinion) from "hard"
+// signals (proven payload defect):
+//
+//   soft = schema cannot be compiled, or args carry a plain key not listed
+//          in the published schema. Default = silent + proceed; verbose =
+//          vlog trace + proceed; UCP_STRICT_SCHEMA=1 = throw.
+//
+//   hard = args fail validation against a successfully compiled schema.
+//          Always throws SCHEMA_VALIDATION_FAILED regardless of mode —
+//          local typo-catching saves a server round-trip.
+//
+// These tests pin the policy. Tweak with care: each row is a deliberate
+// trade-off between agent UX (silent fast path) and operator debuggability
+// (verbose) and contract enforcement (strict).
+describe('validateOperationInput — dialect resilience and soft signals', () => {
+  let cacheDir: string
+  let verboseLines: string[]
+
+  beforeEach(async () => {
+    cacheDir = await mkdtemp(join(tmpdir(), 'ucp-cli-dialect-test-'))
+    verboseLines = []
+    setVerboseWriter((msg) => {
+      verboseLines.push(msg)
+    })
+  })
+
+  afterEach(async () => {
+    setVerboseWriter(null)
+    delete process.env.UCP_STRICT_SCHEMA
+    await rm(cacheDir, { recursive: true, force: true })
+  })
+
+  // ── Helpers ────────────────────────────────────────────────────────────
+  // Build a fetch that records tools/call method names so tests can prove
+  // the dispatcher actually reached the wire (vs failing closed locally).
+  function buildFetch(inputSchema: unknown, calls: string[] = []): typeof globalThis.fetch {
+    return vi.fn(async (url: string | URL | Request, init: RequestInit = {}) => {
+      const u = String(url)
+      const body =
+        typeof init.body === 'string'
+          ? (JSON.parse(init.body) as Record<string, unknown>)
+          : undefined
+      if (body?.method) calls.push(body.method as string)
+      if (u.endsWith('/.well-known/ucp')) return jsonResponse(PROFILE)
+      if (body?.method === 'tools/list') {
+        return jsonResponse({
+          jsonrpc: '2.0',
+          id: body.id,
+          result: { tools: [{ name: 'search_catalog', inputSchema }] },
+        })
+      }
+      return jsonResponse({ jsonrpc: '2.0', id: body?.id, result: { products: ['ok'] } })
+    }) as unknown as typeof globalThis.fetch
+  }
+
+  // Declares a dialect Ajv2020 doesn't know — schema content is fine, only
+  // meta-schema resolution fails. Stable trigger for the compile-failure
+  // branch without depending on a real production schema shape.
+  const UNCOMPILABLE_SCHEMA = {
+    $schema: 'https://json-schema.org/draft/9999-99/schema',
+    type: 'object',
+  }
+
+  // ── Happy path ─────────────────────────────────────────────────────────
+
+  it('compiles inputSchemas declaring JSON Schema draft 2020-12', async () => {
+    // SEARCH_SCHEMA at module top declares $schema: draft/2020-12. Any
+    // regression to a draft-07-only validator surfaces here as a focused
+    // failure instead of cascading across unrelated tests.
+    const result = await callOperation(
+      BUSINESS_URL,
+      {
+        capability: 'dev.ucp.shopping',
+        toolName: 'search_catalog',
+        input: { catalog: { query: 'boots' } },
+      },
+      { cacheDir, agentRange: RANGE, fetch: buildFetch(SEARCH_SCHEMA), profileUrl: PROFILE_URL },
+    )
+    expect(result).toBeDefined()
+    // Happy path emits no validator-related verbose traces (the discover
+    // layer emits its own `discover:` lines; we assert on our own prefix).
+    expect(verboseLines.filter((l) => l.startsWith('[ucp] validate:'))).toEqual([])
+  })
+
+  // ── Soft signal: schema compile failure ────────────────────────────────
+
+  it('default mode: silently skips pre-flight when the schema cannot be compiled', async () => {
+    const calls: string[] = []
+    const result = await callOperation(
+      BUSINESS_URL,
+      {
+        capability: 'dev.ucp.shopping',
+        toolName: 'search_catalog',
+        input: { catalog: { query: 'anything' } },
+      },
+      {
+        cacheDir,
+        agentRange: RANGE,
+        fetch: buildFetch(UNCOMPILABLE_SCHEMA, calls),
+        profileUrl: PROFILE_URL,
+      },
+    )
+    // Request reached the server; no local throw.
+    expect(calls).toContain('tools/call')
+    expect(result).toBeDefined()
+  })
+
+  it('verbose mode: emits a vlog trace explaining why validation was skipped', async () => {
+    await callOperation(
+      BUSINESS_URL,
+      {
+        capability: 'dev.ucp.shopping',
+        toolName: 'search_catalog',
+        input: { catalog: { query: 'anything' } },
+      },
+      {
+        cacheDir,
+        agentRange: RANGE,
+        fetch: buildFetch(UNCOMPILABLE_SCHEMA),
+        profileUrl: PROFILE_URL,
+      },
+    )
+    const skipTrace = verboseLines.find((l) => l.includes('validate: skipped'))
+    expect(skipTrace).toBeDefined()
+    expect(skipTrace).toMatch(/"search_catalog"/)
+    expect(skipTrace).toMatch(/cannot compile published schema/)
+    expect(skipTrace).toMatch(/server will validate/)
+    // Trace attributes the failure to the client's validator, not the server.
+    expect(skipTrace).not.toMatch(/MCP_INVALID_RESPONSE/)
+    expect(skipTrace).not.toMatch(/business returned an invalid input schema/)
+  })
+
+  it('strict mode: throws MCP_INVALID_RESPONSE when the schema cannot be compiled', async () => {
+    process.env.UCP_STRICT_SCHEMA = '1'
+    let captured: unknown
+    await callOperation(
+      BUSINESS_URL,
+      {
+        capability: 'dev.ucp.shopping',
+        toolName: 'search_catalog',
+        input: { catalog: { query: 'anything' } },
+      },
+      {
+        cacheDir,
+        agentRange: RANGE,
+        fetch: buildFetch(UNCOMPILABLE_SCHEMA),
+        profileUrl: PROFILE_URL,
+      },
+    ).catch((err) => {
+      captured = err
+    })
+    const err = captured as { code: string; layer: string } | undefined
+    expect(err?.code).toBe('MCP_INVALID_RESPONSE')
+    expect(err?.layer).toBe('transport')
+  })
+
+  // ── Soft signal: unknown plain field ──────────────────────────────────
+
+  it('default mode: silently allows plain keys not listed in the published schema', async () => {
+    // address_subdivision/address_postal_code are NOT in SEARCH_SCHEMA's
+    // context. Pre-2026-05 client policy threw SCHEMA_VALIDATION_FAILED
+    // before dispatch. New policy: defer to the server, which is
+    // authoritative on whether it accepts the field.
+    const calls: string[] = []
+    const result = await callOperation(
+      BUSINESS_URL,
+      {
+        capability: 'dev.ucp.shopping',
+        toolName: 'search_catalog',
+        input: {
+          catalog: {
+            query: 'boots',
+            context: {
+              address_country: 'US',
+              address_subdivision: 'CA',
+              address_postal_code: '94105',
+            },
+          },
+        },
+      },
+      {
+        cacheDir,
+        agentRange: RANGE,
+        fetch: buildFetch(SEARCH_SCHEMA, calls),
+        profileUrl: PROFILE_URL,
+      },
+    )
+    expect(calls).toContain('tools/call')
+    expect(result).toBeDefined()
+  })
+
+  it('verbose mode: emits a vlog trace listing the plain keys the schema does not declare', async () => {
+    await callOperation(
+      BUSINESS_URL,
+      {
+        capability: 'dev.ucp.shopping',
+        toolName: 'search_catalog',
+        input: {
+          catalog: {
+            query: 'boots',
+            context: { address_country: 'US', address_subdivision: 'CA' },
+          },
+        },
+      },
+      { cacheDir, agentRange: RANGE, fetch: buildFetch(SEARCH_SCHEMA), profileUrl: PROFILE_URL },
+    )
+    const flagTrace = verboseLines.find((l) => l.includes('not listed in published schema'))
+    expect(flagTrace).toBeDefined()
+    expect(flagTrace).toMatch(/"search_catalog"/)
+    expect(flagTrace).toMatch(/\/catalog\/context\/address_subdivision/)
+    expect(flagTrace).toMatch(/server will accept or reject/)
+  })
+
+  it('strict mode: throws SCHEMA_VALIDATION_FAILED for plain keys not in the schema', async () => {
+    process.env.UCP_STRICT_SCHEMA = '1'
+    let captured: unknown
+    await callOperation(
+      BUSINESS_URL,
+      {
+        capability: 'dev.ucp.shopping',
+        toolName: 'search_catalog',
+        input: {
+          catalog: {
+            query: 'boots',
+            context: { address_country: 'US', address_subdivision: 'CA' },
+          },
+        },
+      },
+      { cacheDir, agentRange: RANGE, fetch: buildFetch(SEARCH_SCHEMA), profileUrl: PROFILE_URL },
+    ).catch((err) => {
+      captured = err
+    })
+    const err = captured as
+      | { code: string; layer: string; context: { unknown_fields: string[] } }
+      | undefined
+    expect(err?.code).toBe('SCHEMA_VALIDATION_FAILED')
+    expect(err?.layer).toBe('client')
+    expect(err?.context.unknown_fields).toContain('/catalog/context/address_subdivision')
+  })
+
+  // ── Hard signal: payload mismatch (mode-invariant) ────────────────────
+
+  it('always throws SCHEMA_VALIDATION_FAILED when the payload fails a compiled schema', async () => {
+    // Hard signal: schema compiled fine, payload structurally wrong. Local
+    // fail-fast saves a server round-trip and gives clear typo feedback.
+    // No mode changes this — strict and default both throw here.
+    let captured: unknown
+    await callOperation(
+      BUSINESS_URL,
+      // Missing the required `catalog` field.
+      { capability: 'dev.ucp.shopping', toolName: 'search_catalog', input: {} },
+      { cacheDir, agentRange: RANGE, fetch: buildFetch(SEARCH_SCHEMA), profileUrl: PROFILE_URL },
+    ).catch((err) => {
+      captured = err
+    })
+    const err = captured as { code: string; layer: string } | undefined
+    expect(err?.code).toBe('SCHEMA_VALIDATION_FAILED')
+    expect(err?.layer).toBe('client')
+  })
+})
+
 describe('unwrapMcpCallResult — structuredContent vs content[].text', () => {
   // Catalog endpoints (catalog.shopify.com) return only structuredContent, no
   // content[].text fallback. Without this branch, every catalog response would
@@ -613,64 +803,5 @@ describe('unwrapMcpCallResult — structuredContent vs content[].text', () => {
   it('returns the input unchanged when content[].text is not valid JSON', () => {
     const wire = { content: [{ type: 'text', text: 'not-json{' }] }
     expect(unwrapMcpCallResult(wire)).toBe(wire)
-  })
-})
-
-describe('patchKnownUpstreamSchemaDefects — \\A anchor stopgap', () => {
-  it('rewrites a leading \\A to ^ at the root pattern', () => {
-    const out = patchKnownUpstreamSchemaDefects({ pattern: '\\Agid://shopify/p/' })
-    expect(out).toEqual({ pattern: '^gid://shopify/p/' })
-  })
-
-  it('rewrites nested patterns (the real catalog shape: properties → oneOf → items)', () => {
-    // Path that bites in production:
-    //   properties.catalog.properties.like.items.oneOf[0].properties.id.pattern
-    const input = {
-      type: 'object',
-      properties: {
-        catalog: {
-          type: 'object',
-          properties: {
-            like: {
-              type: 'array',
-              items: {
-                oneOf: [{ properties: { id: { type: 'string', pattern: '\\Agid://shopify/p/' } } }],
-              },
-            },
-          },
-        },
-      },
-    }
-    const out = patchKnownUpstreamSchemaDefects(input) as typeof input
-    const patched = out.properties.catalog.properties.like.items.oneOf[0]?.properties.id.pattern
-    expect(patched).toBe('^gid://shopify/p/')
-  })
-
-  it('does not mutate the input schema (deep clone)', () => {
-    const input = { pattern: '\\Agid://x' }
-    patchKnownUpstreamSchemaDefects(input)
-    expect(input.pattern).toBe('\\Agid://x')
-  })
-
-  it('leaves patterns without leading \\A untouched', () => {
-    const input = { pattern: '^already-anchored', other: { pattern: '[a-z]+' } }
-    expect(patchKnownUpstreamSchemaDefects(input)).toEqual(input)
-  })
-
-  it('ignores non-string pattern values (defensive)', () => {
-    // A misshapen schema where `pattern` is not a string shouldn't crash —
-    // AJV's own error path will surface the real defect.
-    const input = { pattern: 42 }
-    expect(patchKnownUpstreamSchemaDefects(input)).toEqual(input)
-  })
-
-  it('produces a regex AJV can compile under its default (u-flag) mode', async () => {
-    const { default: Ajv } = await import('ajv')
-    const ajv = new Ajv({ strict: false })
-    const patched = patchKnownUpstreamSchemaDefects({
-      type: 'string',
-      pattern: '\\Agid://shopify/p/',
-    })
-    expect(() => ajv.compile(patched as object)).not.toThrow()
   })
 })
