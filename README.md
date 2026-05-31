@@ -260,6 +260,7 @@ There is no `--auth-bearer` flag and no `UCP_AUTH_BEARER` env var. `--header` is
 | `UCP_ON_ESCALATION` | Shell command for the escalation hook (JSON payload on stdin) |
 | `UCP_HOME` | Override the local state directory (default `~/.ucp`) |
 | `UCP_VERBOSE` | Set `1`/`true` to print trace lines to stderr |
+| `UCP_STRICT_SCHEMA` | Set `1`/`true` to make client-side input validation fail-closed: throw `MCP_INVALID_RESPONSE` when the published input schema can't be compiled, and `SCHEMA_VALIDATION_FAILED` when a payload carries plain keys not listed in the schema. Default is silent + dispatch (the server is the authoritative validator); `--verbose` surfaces these as traces. |
 
 
 ## Development

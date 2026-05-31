@@ -10,13 +10,18 @@
 
 import { randomUUID } from 'node:crypto'
 import type { AnySchema, ErrorObject } from 'ajv'
-import Ajv from 'ajv'
+// `Ajv2020` registers the JSON Schema draft 2020-12 meta-schema, which is
+// the dialect MCP servers declare in tool inputSchemas (MCP 2025-11-25 /
+// SEP-1613). Plain `Ajv` is draft-07-only and throws on the 2020-12 meta
+// URI before even looking at the schema content.
+import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 
 import { ErrorCodes, UcpError } from '../lib/errors.js'
 import { omitUndefined } from '../lib/omit-undefined.js'
 import { type DiscoveredBusiness, type DiscoverOptions, discover } from './discover.js'
 import { mcpRpc } from './mcp-client.js'
+import { vlog } from './verbose.js'
 
 export type CallOperationCallerOptions = Pick<
   DiscoverOptions,
@@ -331,47 +336,24 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-// TODO(upstream-fix): REMOVE THIS PATCHER AND ITS CALL SITE.
+// Pre-flight input validation is best-effort: the server is the authoritative
+// validator and will return SCHEMA_VALIDATION_FAILED for genuinely bad
+// payloads. The client signals it can give (compile failure, unknown plain
+// field) are uncertainty/policy preferences, not contract violations.
 //
-// Stopgap: rewrites leading `\A` start-of-string anchors to `^` in JSON Schema
-// `pattern` fields before AJV compilation.
+// Operating modes:
+//   default                  silent. Fast path for agents.
+//   --verbose / UCP_VERBOSE  emit `vlog()` traces so operators can diagnose.
+//   UCP_STRICT_SCHEMA=1      escalate soft signals to hard `UcpError` throws
+//                            (the pre-2026-05 behavior). Useful in CI and for
+//                            paranoid local development.
 //
-// Why this exists:
-//   `\A` is Ruby/PCRE syntax. JSON Schema (Draft 2020-12 §6.3.3) mandates
-//   ECMA-262 regex semantics, where `\A` is an invalid escape under the `u`
-//   flag (AJV's default). `catalog.shopify.com` ships `search_catalog.inputSchema`
-//   with `"pattern": "\\Agid://shopify/p/"`, so every JS/TS agent that
-//   AJV-compiles before dispatch errors out at the validation gate and never
-//   reaches the wire. We rewrite it client-side so global-catalog ops work
-//   during internal testing.
-//
-// Removal trigger:
-//   Upstream ships `^gid://shopify/p/` in search_catalog.inputSchema. Once fixed:
-//     1. Delete `patchKnownUpstreamSchemaDefects` + `walkPatternFields`.
-//     2. Drop the call in `validateOperationInput`.
-//     3. Drop the matching test in `operation.test.ts`.
-//     4. Flip `test/integration/catalog-live.integration.test.ts` to
-//        require `status:'ok'` (remove `MCP_INVALID_RESPONSE` from
-//        `KNOWN_UPSTREAM_ERRORS`).
-// ════════════════════════════════════════════════════════════════════════════
-export function patchKnownUpstreamSchemaDefects(schema: unknown): unknown {
-  if (typeof schema !== 'object' || schema === null) return schema
-  const cloned: unknown = structuredClone(schema)
-  walkPatternFields(cloned)
-  return cloned
-}
-
-function walkPatternFields(node: unknown): void {
-  if (Array.isArray(node)) {
-    for (const item of node) walkPatternFields(item)
-    return
-  }
-  if (!isPlainObject(node)) return
-  if (typeof node.pattern === 'string' && node.pattern.startsWith('\\A')) {
-    node.pattern = `^${node.pattern.slice(2)}`
-  }
-  for (const value of Object.values(node)) walkPatternFields(value)
+// Payload validation against a successfully compiled schema is NOT a soft
+// signal: it stays a hard throw in every mode — typos benefit from a fast
+// local failure rather than a round-trip to the server.
+function strictSchemaMode(): boolean {
+  const v = process.env.UCP_STRICT_SCHEMA
+  return v === '1' || v === 'true'
 }
 
 function validateOperationInput(opts: {
@@ -381,35 +363,38 @@ function validateOperationInput(opts: {
   schema: unknown
   args: Record<string, unknown>
 }): void {
-  const ajv = new Ajv({ allErrors: true, strict: false })
+  const ajv = new Ajv2020({ allErrors: true, strict: false })
   addFormats(ajv)
 
-  // TODO(upstream-fix): drop this patcher call once catalog.shopify.com
-  // fixes `\A` → `^`. See banner above `patchKnownUpstreamSchemaDefects`.
-  const schema = patchKnownUpstreamSchemaDefects(opts.schema)
-  rejectUnknownPlainFields({
+  flagUnknownPlainFields({
     business: opts.business,
     capability: opts.capability,
     toolName: opts.toolName,
-    schema,
+    schema: opts.schema,
     args: opts.args,
   })
   let validate: ReturnType<typeof ajv.compile>
   try {
-    validate = ajv.compile(schema as AnySchema)
+    validate = ajv.compile(opts.schema as AnySchema)
   } catch (err) {
-    throw new UcpError({
-      layer: 'transport',
-      code: ErrorCodes.MCP_INVALID_RESPONSE,
-      message: `business returned an invalid input schema for "${opts.toolName}"`,
-      cause: err as Error,
-      context: {
-        business: opts.business,
-        capability: opts.capability,
-        tool: opts.toolName,
-        schema: opts.schema,
-      },
-    })
+    if (strictSchemaMode()) {
+      throw new UcpError({
+        layer: 'transport',
+        code: ErrorCodes.MCP_INVALID_RESPONSE,
+        message: `business returned an invalid input schema for "${opts.toolName}"`,
+        cause: err as Error,
+        context: {
+          business: opts.business,
+          capability: opts.capability,
+          tool: opts.toolName,
+          schema: opts.schema,
+        },
+      })
+    }
+    vlog(
+      `validate: skipped "${opts.toolName}" — cannot compile published schema (${(err as Error).message}); server will validate`,
+    )
+    return
   }
 
   if (validate(opts.args)) return
@@ -435,7 +420,13 @@ function validateOperationInput(opts: {
   })
 }
 
-function rejectUnknownPlainFields(opts: {
+// Plain-field policy is a client opinion, not a contract gate. The server
+// owns the actual accept/reject decision — if it accepts a field we flagged,
+// the agent gets a successful response and we were wrong to nag. Default
+// behavior surfaces the policy via `--verbose` (operators debugging payload
+// shape see what got flagged) and lets the request through.
+// `UCP_STRICT_SCHEMA=1` restores the throw for CI / paranoid local use.
+function flagUnknownPlainFields(opts: {
   business: string
   capability: string
   toolName: string
@@ -445,19 +436,24 @@ function rejectUnknownPlainFields(opts: {
   const unknown = findUnknownPlainFields(opts.schema, opts.args, '')
   if (unknown.length === 0) return
 
-  throw new UcpError({
-    layer: 'client',
-    code: ErrorCodes.SCHEMA_VALIDATION_FAILED,
-    message: `operation input contains unknown field${unknown.length === 1 ? '' : 's'} for "${opts.toolName}": ${formatUnknownFields(unknown)}. The business's advertised input schema does not list this field, and per client policy only listed fields plus reverse-DNS extension keys are sent (some canonical UCP fields are still spec-valid but require explicit business support). Run \`<op> --input-schema\` to see what this business actually accepts.`,
-    context: {
-      business: opts.business,
-      capability: opts.capability,
-      tool: opts.toolName,
-      unknown_fields: unknown,
-      input: opts.args,
-      schema: opts.schema,
-    },
-  })
+  if (strictSchemaMode()) {
+    throw new UcpError({
+      layer: 'client',
+      code: ErrorCodes.SCHEMA_VALIDATION_FAILED,
+      message: `operation input contains unknown field${unknown.length === 1 ? '' : 's'} for "${opts.toolName}": ${formatUnknownFields(unknown)}. The business's advertised input schema does not list this field, and per client policy only listed fields plus reverse-DNS extension keys are sent (some canonical UCP fields are still spec-valid but require explicit business support). Run \`<op> --input-schema\` to see what this business actually accepts.`,
+      context: {
+        business: opts.business,
+        capability: opts.capability,
+        tool: opts.toolName,
+        unknown_fields: unknown,
+        input: opts.args,
+        schema: opts.schema,
+      },
+    })
+  }
+  vlog(
+    `validate: "${opts.toolName}" carries field${unknown.length === 1 ? '' : 's'} not listed in published schema: ${formatUnknownFields(unknown)} (server will accept or reject)`,
+  )
 }
 
 function formatUnknownFields(fields: string[]): string {
