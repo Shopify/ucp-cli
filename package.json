@@ -84,7 +84,7 @@
     "specBaseUrl": "https://ucp.dev",
     "protocolMin": "2026-01-23",
     "protocolMax": "2026-04-08",
-    "default_profile_url_template": "https://www.igvita.com/ucp/profile.json",
+    "default_profile_url_template": "https://shopify.dev/ucp/agent-profiles/2026-04-08/valid-with-capabilities.json",
     "default_catalog_url": "https://catalog.shopify.com"
   }
 }
