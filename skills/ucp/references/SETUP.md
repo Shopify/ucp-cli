@@ -26,16 +26,13 @@ The rest of this guide and the main SKILL.md write `ucp <command>` as shorthand 
 
 ## Profile init
 
-A local agent profile is required before any UCP operation that contacts a merchant. The bundled global catalog still works for `catalog search/lookup/get_product` against a default profile, but state-mutating ops (cart/checkout/order) require an initialized profile.
+A local agent profile is required for any UCP operation, including the bundled global catalog (`catalog search/lookup/get_product`). Run `ucp profile init --name <name>` once before issuing any UCP command. The init is idempotent (no-op if the profile already exists, exit 0), so call it unconditionally at the start of a session rather than tracking state.
 
 ```sh
-# Health-check first; if active-profile is missing, init.
-ucp doctor
-
-# Idempotent: no-op if a profile with this name already exists.
+# Idempotent; safe to run unconditionally. No-op if a profile with this name already exists.
 ucp profile init --name <name>
 
-# Re-verify.
+# Optional: verify install + active profile.
 ucp doctor
 ```
 
