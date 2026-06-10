@@ -54,7 +54,7 @@ ucp catalog lookup --input '{
     "gid://shopify/p/abc123",
     "gid://shopify/ProductVariant/456?shop=789"
   ],
-  "filters": { "available": true },
+  "filters": { "available": false },
   "context": { "address_country": "US", "currency": "USD" }
 }' \
   --view 'result.{products: products[*].{id: id, title: title, variants: variants[*].{id: id, seller_domain: seller.domain, price: price.amount, currency: price.currency, available: availability.available, pdp: url, buy: checkout_url}}, messages: messages}'
@@ -63,20 +63,23 @@ ucp catalog lookup --input '{
 Rules:
 
 - `ids` accepts up to 50 Catalog product IDs or variant IDs.
+- `filters.available` defaults to `true` — only available items in the response. To distinguish OOS items from delisted ones (both absent under the default), pass `false`; the response then includes unavailable items, and you read per-variant `availability.available` to identify them.
 - Missing IDs are omitted from `result.products[]`; the response may also include `result.messages[]` with `not_found` info. Diff the requested IDs against returned `products[].id` and `products[].variants[].id`.
 - Do not depend on a per-input echo such as `variants[].input`; it may be absent or null.
 - Variant IDs must be passed verbatim, including any `?shop=` suffix.
 
 ## 3. Build a PDP with a variant picker
 
-Initial render:
+Initial render returns the full product detail and option matrix:
 
 ```sh
 ucp catalog get_product 'gid://shopify/p/abc123' \
   --view 'result.product.{id: id, title: title, description: description.plain, media: media[*].url, options: options, variants: variants[*].{id: id, title: title, price: price.amount, currency: price.currency, available: availability.available, seller_domain: seller.domain, pdp: url, buy: checkout_url}}'
 ```
 
-On each buyer option selection, re-call `get_product` with `selected`:
+The `options[].values[]` array carries `available` and `exists` flags computed against the catalog. Use this matrix directly to render the option picker on first render — no follow-up call needed.
+
+As the buyer narrows their choice, re-call `get_product` with `selected` to anchor the featured variant and refine the matrix relative to that selection:
 
 ```sh
 ucp catalog get_product 'gid://shopify/p/abc123' --input '{
@@ -84,14 +87,16 @@ ucp catalog get_product 'gid://shopify/p/abc123' --input '{
 }'
 ```
 
-Do not traverse every variant client-side to recompute the matrix. Let `get_product` return the current `options[]` and variants after each selection.
+The response always carries `result.product.selected` reflecting the current selection — defaulted by the server on initial render, echoed when you pass `selected` as input. `variants[]` contains every variant matching that selection: one entry when all axes are fully resolved (your featured variant), multiple candidates when selection is partial.
+
+Do not traverse every variant client-side to recompute the matrix. Let `get_product` return `options[]` and the chosen variant after each selection.
 
 Option value semantics:
 
 | Field state | UI treatment |
 |---|---|
-| `exists: false` | Hide the option value; no SKU exists for this combo. |
-| `available: false` | Show disabled; SKU exists but is out of stock/unavailable. |
+| `exists: false` | Hide the option value; no variant matches this combo. |
+| `available: false` | Show disabled; variant exists but is out of stock. |
 | field absent | Treat as available/existing unless the response says otherwise. |
 
 The field is `available`, not `availableForSale`. Lightweight search responses may only include option labels; call `get_product` for the full PDP matrix.
@@ -140,20 +145,20 @@ Use filters only for hard constraints; use `context.intent` for buyer goals that
 
 ## 6. Single-shop browse through the global Catalog
 
-Use `filters.shop_ids` only when you have Shopify numeric shop IDs and you intentionally want to restrict global Catalog results to those shops.
+Use `filters.shop_ids` only when you intentionally want to restrict global Catalog results to specific shops. Reuse the GID format that `variants[*].seller.id` returns (e.g. `gid://shopify/Shop/12345`); bare numeric IDs as strings (`"12345"`) are also accepted.
 
 ```sh
 ucp catalog search --input '{
   "query": "tops",
   "filters": {
-    "shop_ids": ["12345"],
+    "shop_ids": ["gid://shopify/Shop/12345"],
     "available": true
   },
   "pagination": { "limit": 10 }
 }'
 ```
 
-Live global Catalog behavior expects **bare numeric shop IDs as strings** (`"12345"`). Do not pass `gid://shopify/Shop/12345`; that shape may validate but returns zero products. A non-empty `query` is required unless the API supplies a saved-catalog query; to browse without a precise term, send a broad category word such as `"apparel"` or `"home"`.
+A non-empty `query` is required unless the API supplies a saved-catalog query; to browse without a precise term, send a broad category word such as `"apparel"` or `"home"`.
 
 ## 7. Streaming shopping assistant pattern
 
@@ -180,7 +185,7 @@ All filters live under the Catalog payload's `filters` object.
 | `ships_to` | `{ country, region?, postal_code? }` | Object, not string. Country is ISO alpha-2. Treat as a filter; response may not include structured shipping proof. |
 | `ships_from` | `{ country }` | Object, not string. |
 | `categories` | `string[]` | Taxonomy/category IDs. Discovery/verification may be limited; nonsense IDs can return zero products silently. |
-| `shop_ids` | `string[]` | Bare numeric shop IDs as strings for global Catalog. Do not use Shop GIDs. |
+| `shop_ids` | `string[]` | Shopify Shop IDs as GIDs (`gid://shopify/Shop/...`) or bare numeric strings; reuse the GID form from `variants[*].seller.id`. |
 | `safe_search` / `verification` | schema-advertised only | These may require partner authorization and may be omitted from the live input schema. The CLI rejects unknown plain keys; run `--input-schema` before using them. |
 
 ## Response fields and data model
@@ -199,6 +204,7 @@ product.media[].url                       CDN image/video URL
 product.options[].values[].label          buyer-facing option value
 product.options[].values[].available      option availability when present
 product.options[].values[].exists         option combination existence when present
+product.selected[].name/label             current selection (server-defaulted on initial, echoed on re-call); filters variants[] to matching subset
 product.variants[].id                     variant ID; pass verbatim into cart/checkout
 product.variants[].price.amount           integer minor units
 product.variants[].price.currency         ISO 4217
@@ -218,7 +224,7 @@ Read seller identity from the variant, not the product. The same Catalog product
 | Catalog product ID / UPID | `gid://shopify/p/{id}` | `catalog lookup`, `catalog get_product` |
 | Variant ID | `gid://shopify/ProductVariant/{id}?shop={shop}` | `catalog lookup`, cart/checkout line item `item.id` |
 | Admin Product ID | `gid://shopify/Product/{id}` | Not a Catalog ID; do not use with global Catalog. |
-| Shop ID filter | `"12345"` | `filters.shop_ids`; bare numeric string only. |
+| Shop ID filter | `gid://shopify/Shop/{id}` or `"{id}"` | `filters.shop_ids`; reuse `variants[*].seller.id` (returns GID form). |
 
 There is no general Admin Product ID → Catalog UPID lookup. Source UPIDs from Catalog search/lookup responses.
 
