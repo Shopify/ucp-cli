@@ -4,7 +4,15 @@
     title: title,
     price: price_range.min.amount,
     currency: price_range.min.currency,
+    rating: rating.value,
+    rating_count: rating.count,
+    features: metadata.top_features,
     variant: variants[0].id,
+    seller: variants[0].seller.name,
+    seller_domain: variants[0].seller.domain,
+    native_checkout: variants[0].eligible.native_checkout,
+    running_low: variants[0].availability.running_low,
+    requires_shipping: variants[0].requires.shipping,
     buy: variants[0].checkout_url
   }
 }

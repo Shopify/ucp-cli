@@ -44,7 +44,7 @@ The merchant decides what it accepts and what it exposes. These introspection co
 
 The CLI rejects unknown plain keys client-side before sending; if you hit `SCHEMA_VALIDATION_FAILED`, the error's CTA tells you the exact `--input-schema` command to run. Spec-canonical fields (per the UCP `Context` and `Buyer` types) may still be rejected if a specific merchant doesn't advertise them — the merchant's advertised schema is authoritative.
 
-Bundled global catalog operations — `search` for discovery, `lookup` for refreshing saved or bookmarked product/variant IDs (carts, wish lists, deep links), and `get_product` for full PDP detail — take well-known inputs covered below and in `references/CATALOG.md`; you don't need to introspect before basic use. Reach for `--input-schema` when adding extension fields (`like`, signals, etc.), when live schema differs, or when composing checkout payloads.
+Bundled global catalog operations — `search` for discovery, `lookup` for refreshing saved or bookmarked product/variant IDs (carts, wish lists, deep links), and `get_product` for full PDP detail — take well-known inputs covered below and in `references/CATALOG.md`; you don't need to introspect before basic use. Reach for `--input-schema` when adding Shopify-specific extension fields (`like`, `saved_catalog_slug`, server-side `view`, taxonomy attributes, rating, price tier, etc.), when live schema differs, or when composing checkout payloads.
 
 > `ucp <op> --schema` is a different thing — it describes the CLI wrapper itself (args/options like `--input`, `--set`, `--business`). Not the payload schema. Use `--input-schema` for payload composition.
 
@@ -55,7 +55,7 @@ Ops that act on an existing resource take its id as the first positional argumen
 - `cart get/update/cancel <cart_id>`
 - `checkout get/update/complete/cancel <checkout_id>`
 - `order get <order_id>`
-- `catalog get_product <product_id>` (pass `result.products[N].id` from a prior search)
+- `catalog get_product <product_or_variant_id>` (pass a Catalog UPID or returned variant ID from prior search/lookup)
 
 All other operations (`cart create`, `checkout create`, `catalog search`, `catalog lookup`, `discover`) take no positional; their full payload goes in `--input`/`--set`. Cart-to-checkout conversion accepts `cart_id` in the `checkout create` body and requires `line_items`, which can be empty for conversion.
 
@@ -67,12 +67,14 @@ ucp catalog search --set /query='running shoes'
 
 ## Searching the global catalog
 
-Compose a search with three field groups. For Catalog-specific recipes — search pages, lookup/re-pricing, PDP variant pickers, multimodal `like`, single-shop `shop_ids`, auth tiers, and ID pitfalls — read `references/CATALOG.md`.
+Compose a search with these field groups. For Catalog-specific recipes — search pages, saved catalogs, lookup/re-pricing, PDP variant pickers, multimodal `like`, single-shop `shop_ids`, taxonomy/rating/price-tier filters, auth tiers, and ID pitfalls — read `references/CATALOG.md`.
 
 - **`query`** — what the buyer is looking for. The literal search term.
-- **`context`** — soft signals that inform ranking, localization, and estimates (not exclusions). Includes `intent` (free-text background, e.g. "looking for a gift under $50" or "durable for outdoor use"), `address_country`, `currency`, `language`, `eligibility`, etc.
-- **`filters`** — hard exclusions. Results that don't satisfy these are dropped (price ranges, availability, shipping constraints, condition).
-- **`pagination`** — `limit` to bound the page size.
+- **`saved_catalog_slug`** — optional saved catalog boundary from the Dev Dashboard; saved query prefixes combine with the request query.
+- **`context`** — soft signals that inform ranking, localization, and estimates (not exclusions). Includes `intent` (free-text background, e.g. "looking for a gift under $50" or "durable for outdoor use"), `address_country`, `address_region`, `postal_code`, `currency`, `language`, `eligibility`, etc.
+- **`filters`** — hard exclusions. Results that don't satisfy these are dropped (price ranges, availability, shipping constraints, condition, taxonomy attributes, ratings, price tiers).
+- **`view`** — optional server-side response shape such as `"offer"` for comparison shopping. This is distinct from CLI `--view` JMESPath projection.
+- **`pagination`** — `limit` to bound the page size; max 50 for Global Catalog search.
 
 ```sh
 ucp catalog search --input '{
@@ -86,26 +88,31 @@ ucp catalog search --input '{
   "filters": {
     "price":     { "max": 15000 },
     "available": true,
-    "ships_to":  { "country": "US" }
+    "ships_to":  { "country": "US" },
+    "ships_from": [{ "country": "US" }, { "country": "CA" }],
+    "attributes": [{ "name": "Size", "values": ["10", "10.5"] }],
+    "rating": { "variant": { "min": 4.5, "min_count": 10 } },
+    "price_tier": ["low", "medium"]
   },
+  "view": "offer",
   "pagination": { "limit": 10 }
 }' \
-  --view 'result.products[*].{title: title, seller_domain: variants[0].seller.domain, seller_url: variants[0].seller.url, price_from: price_range.min.amount, currency: price_range.min.currency, variant_id: variants[0].id, pdp: variants[0].url, buy: variants[0].checkout_url, rating: rating.value}'
+  --view 'result.products[*].{title: title, seller_domain: variants[0].seller.domain, seller_url: variants[0].seller.url, seller_id: variants[0].seller.id, price_from: price_range.min.amount, currency: price_range.min.currency, variant_id: variants[0].id, pdp: variants[0].url, buy: variants[0].checkout_url, rating: rating.value, rating_count: rating.count, features: metadata.top_features, running_low: variants[0].availability.running_low, native_checkout: variants[0].eligible.native_checkout, requires_shipping: variants[0].requires.shipping}'
 ```
 
 `--view '<JMESPath>'` projects the response down to the fields you actually need (title/seller/price/routing/handoff URLs in this case) instead of dragging the full variant tree into context. The `cta` survives the projection, so next-step recommendations remain available. Keep `variants[M].id` and `variants[M].seller.domain` in the projection whenever a cart or checkout step might follow. Use `--view :compact` only when a display-only title/price/variant/buy table is enough; use an inline or `@<path>` projection when routing fields must survive. See **Working with responses** below for the projection pattern across cart, checkout, and order responses.
 
 When the buyer mentioned a brand or store name, **read seller identity from `variants[*].seller.domain`, not the brand in `title`**. The same brand can appear from first-party stores and third-party resellers in the same result set; only `seller.domain` distinguishes them.
 
-Don't fabricate context fields you don't have — leave them out. For "more like this" or visual similarity, use `--input '{"like": ...}'` and check `--input-schema` for the exact `like` fields supported.
+Don't fabricate context fields you don't have — leave them out. For "more like this" or visual similarity, use `--input '{"like": ...}'`; image-only `like` is visual similarity, while image plus `query` is multimodal search. Check `--input-schema` for the exact `like` fields supported.
 
 ### Pagination — vary the query first
 
-`catalog search` is the only paginated operation. The response carries `result.pagination` when more pages exist, and the CTA includes the fetch-next command. **Pagination gives more of the same ranking.** When results miss the buyer's intent, vary the query first — try synonyms, broader/narrower terms, brand names — then paginate only if the new query confirms the result set is what you want. Cursors are opaque and may be invalidated as inventory changes; don't hand-roll cursor calls, follow the CTA.
+`catalog search` is the only paginated operation. The response carries `result.pagination.cursor`, `has_next_page`, and estimated `total_count` when pagination is available, and the CTA includes the fetch-next command. `limit` can be up to 50 and pagination goes up to 1,000 results; do not use `total_count` for exact page counts. **Pagination gives more of the same ranking.** When results miss the buyer's intent, vary the query first — try synonyms, broader/narrower terms, brand names — then paginate only if the new query confirms the result set is what you want. Cursors are opaque and may be invalidated as inventory changes; don't hand-roll cursor calls, follow the CTA.
 
 ### Looking up a specific product
 
-`catalog search` is the right tool for browsing. When the buyer narrows to a specific product — picking switch/color/size from a multi-variant matrix, or wanting real-time per-variant pricing/availability — use `ucp catalog get_product <product_id>` (id is positional; pass `result.products[N].id` from a prior global Catalog search, and omit `--business` unless you intentionally want a merchant-scoped catalog). The response is `result.product` (singular, not `products[]`) and contains the full `options[]` matrix and current variant-level state.
+`catalog search` is the right tool for browsing. When the buyer narrows to a specific product — picking switch/color/size from a multi-variant matrix, or wanting real-time per-variant pricing/availability — use `ucp catalog get_product <product_or_variant_id>` (id is positional; pass a Catalog UPID or returned variant ID from a prior global Catalog search/lookup, and omit `--business` unless you intentionally want a merchant-scoped catalog). The response is `result.product` (singular, not `products[]`) and contains the full `options[]` matrix, `selected`, and current variant-level state. Pass `selected` for option narrowing and `preferences` to control relaxation priority when an exact combination is unavailable.
 
 **`get_product` vs `lookup`**: a single pasted link the buyer wants to *open* (PDP + variant picker) → `get_product`. A batch of saved IDs the buyer wants to *refresh* (prices, stock, validity) → `lookup`.
 
@@ -140,14 +147,14 @@ Common JMESPath patterns (filters, sort, multi-select, slicing) are in `referenc
 
 ### Key response fields and conventions
 
-- **`result.products[N]`** — each product carries `id`, `title`, `description`, `rating`, `options[]` (variant axes like color/size), `price_range` (`{min, max}` across variants — prefer over `variants[0].price` for buyer-facing display), `variants[M]`.
-- **`result.products[N].variants[M]`** — each variant carries `id` (merchant-specific format; pass verbatim into cart/checkout — don't reconstruct from URLs), `title`, `url` (PDP — the canonical browse target), `checkout_url` (merchant-hosted buy-now), `price` (object `{amount, currency}`), `availability` (object `{available, ...}` — check `.available`), `seller` (object `{name, domain, url}` — `domain` is the safe key for `--business`; `url` is the homepage for buyer-facing display).
-- **`seller.url` is the seller's homepage, NOT a buyer-handoff target.** For handoff use `variants[M].url` (PDP) or `variants[M].checkout_url` (buy-now).
+- **`result.products[N]`** — each product carries `id`, `title`, `description`, `url`, `categories`, `rating`, `media[]`, `options[]` (variant axes like color/size), `metadata` (ML-inferred attributes, technical specs, top features, unique selling points), `price_range` (`{min, max}` across variants — prefer over `variants[0].price` for buyer-facing display), `variants[M]`.
+- **`result.products[N].variants[M]`** — each variant carries `id` (pass verbatim into cart/checkout — don't reconstruct from URLs or add/remove suffixes), `title`, `url` (PDP — the canonical browse target), `checkout_url` (merchant-hosted buy-now), `price` (object `{amount, currency}`), `condition`, `eligible.native_checkout`, `availability` (object `{available, status, running_low}` — check `.available`), `requires` (`shipping`, `selling_plan`, `components`), and `seller` (object `{id, name, domain, url, links}` — `domain` is the safe key for `--business`; `url` is the homepage for buyer-facing display).
+- **`seller.url` is the seller's homepage, NOT a buyer-handoff target.** For handoff use `variants[M].url` (PDP) or `variants[M].checkout_url` (buy-now). Surface `availability.running_low` only when the variant is available. Prefer native checkout when `eligible.native_checkout` is true. If `requires.components` is true, do not present the variant as a simple standalone purchase without checking merchant checkout behavior.
 - **Minor currency units** apply to every amount in the response. `15000` = $150.00 USD; `4998` = $49.98 USD. Always check the corresponding `currency` field before formatting for the buyer.
 - **Cart/checkout responses** carry pricing in `result.totals[]` (itemized; one `subtotal` + one `total` guaranteed), `result.currency` (resolved ISO 4217), and per-line `result.line_items[N].item.price`. Cart fulfillment lines are estimates; checkout fulfillment lines are the final pre-completion numbers. There is no `result.cost` field.
 - **Line identity vs item identity** — `result.line_items[N].id` is the targetable existing line id for updates and fulfillment targeting; `result.line_items[N].item.id` is the underlying item/variant id. Net-new create lines do not have a line id yet — do not invent one.
 
-To get the most up-to-date price, availability, and merchant-specific cart totals, add the product to a cart.
+To get the most up-to-date price, availability, and merchant-specific cart totals, add the product to a cart. Buyer-linked personalized search is coming soon; when available, use a buyer-linked token with the `dev.ucp.shopping.catalog.search:read` scope rather than prompt-only personalization.
 
 ### Fulfillment and line items — quick model
 
