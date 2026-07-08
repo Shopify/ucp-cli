@@ -86,6 +86,8 @@ ucp catalog get_product 'gid://shopify/p/abc123' \
 
 The `options[].values[]` array carries `available` and `exists` flags computed against the catalog. Use this matrix directly to render the option picker on first render — no follow-up call needed.
 
+A Catalog UPID aggregates offers from **multiple sellers**. A bare `get_product` returns a server-chosen featured variant that may belong to a *different* seller than the one you found in `search` — the `seller.domain`/`seller.url` and variant `id` can change between the search hit and the `get_product` default. If the buyer picked a specific seller or variant, carry that `variant.id` forward and re-read `variants[*].seller` after narrowing rather than trusting the default featured variant.
+
 As the buyer narrows their choice, re-call `get_product` with `selected` to anchor the featured variant and refine the matrix relative to that selection:
 
 ```sh
@@ -188,7 +190,7 @@ Top-level Catalog payload fields (inside the `catalog` object on the wire):
 | Field | Operation | Notes |
 |---|---|---|
 | `query` | search | Free-text search query. Required unless a saved catalog supplies enough query context. |
-| `saved_catalog_slug` | search | Dev Dashboard saved catalog boundary. Request filters inside the boundary narrow results; outside-boundary values fall back to the saved value. Saved query prefixes are prepended to `query`. |
+| `saved_catalog_slug` | search | Dev Dashboard saved catalog boundary. Request filters inside the boundary narrow results; outside-boundary values fall back to the saved value. Saved query prefixes are prepended to `query`. Server-supported but **not listed in `--input-schema`** (accepted as an extra key), so introspection won't surface it; a bad slug returns `messages[]` `not_found`. |
 | `like` | search | Product/variant reference or inline image for similarity. Image-only means visual similarity; image + `query` means multimodal search. |
 | `context` | search/lookup/get_product | Soft localization/ranking signals: `address_country`, `address_region`, `postal_code`, `language`, `currency`, `intent`. Not a hard shipping or price guarantee. |
 | `filters` | search/lookup/get_product | Hard constraints; see below. Search supports the broadest filter set. |
@@ -234,7 +236,7 @@ product.metadata.attributes[]             ML-inferred attributes, e.g. Material/
 product.metadata.tech_specs[]             ML-inferred technical specifications
 product.metadata.top_features[]           ML-inferred top product features
 product.metadata.unique_selling_points[]  ML-inferred unique selling propositions
-product.rating.value/scale_max/count      product rating data when present
+product.rating.value/scale_max/count      product-level aggregate across variants (which may have different ratings)
 product.options[].values[].label          buyer-facing option value
 product.options[].values[].available      option availability when present
 product.options[].values[].exists         option combination existence when present
@@ -242,24 +244,29 @@ product.selected[].name/label             current selection (server-defaulted on
 product.variants[].id                     variant ID; pass verbatim into cart/checkout
 product.variants[].price.amount           integer minor units
 product.variants[].price.currency         ISO 4217
+product.variants[].rating.value/count     per-variant rating (product-level rating is an aggregate that can span variants with different ratings)
 product.variants[].condition[]            condition labels such as new/secondhand
 product.variants[].availability.available boolean
 product.variants[].availability.status    inventory status when present
 product.variants[].availability.running_low inventory urgency signal; only meaningful when available=true
-product.variants[].eligible.native_checkout whether native in-protocol checkout is supported
+product.variants[].eligible.native_checkout whether checkout can be FINALIZED via the API; false still allows in-protocol cart/checkout — finalizing needs escalation (buyer review/approval) via continue_url
 product.variants[].requires.shipping      whether a shipping address is needed
 product.variants[].requires.selling_plan  whether a selling plan is required
 product.variants[].requires.components    whether bundle components are required; do not treat as standalone child purchase
 product.variants[].seller.name            seller display name
 product.variants[].seller.id              Shopify Shop GID
-product.variants[].seller.domain          safe value for --business in cart/checkout
-product.variants[].seller.url             seller storefront/homepage
+product.variants[].seller.domain          permanent handle for addressing the API; use for --business (NOT a brand signal)
+product.variants[].seller.url             buyer-facing storefront domain; identify a buyer-named brand/first-party store here (may not be API-addressable)
 product.variants[].seller.links[]         seller policy/reference links
 product.variants[].url                    merchant PDP URL
 product.variants[].checkout_url           merchant-hosted buy-now URL
 ```
 
-Read seller identity from the variant, not the product. The same Catalog product can appear through multiple merchants with different prices, stock, and checkout URLs. Surface `availability.running_low` only when `availability.available` is true. Prefer native/in-protocol checkout when `eligible.native_checkout` is true; otherwise use the checkout/PDP handoff URL that the response provides. If `requires.components` is true, the variant may be purchasable only as part of a bundle/component flow; do not present it as a simple standalone purchase without checking merchant checkout behavior.
+Read seller identity from the variant, not the product — the same Catalog product appears through multiple merchants with different prices, stock, and checkout URLs. Identify a buyer-named brand or first-party store on `seller.url` (the buyer-facing storefront domain); use `seller.domain` (the permanent handle) to address the API for `--business` — the buyer-facing `url` may not be API-addressable, and `domain` rarely resembles the brand name, so it is not a brand signal. Catalog exposes seller *identity*, not authorization or authenticity — infer trust from other signals rather than implying "official"/"authorized" status.
+
+`eligible.native_checkout` indicates whether the checkout can be *finalized via the API*, not whether checkout is possible. A `native_checkout: false` seller still supports constructing and negotiating a cart/checkout in-protocol (real totals, currency, fulfillment); finalizing requires escalation — the merchant needs the buyer to review/approve/interact before the order completes — so construct the checkout and hand off to the buyer via the checkout `continue_url` (or the variant `checkout_url`) to finalize. Surface `availability.running_low` only when `availability.available` is true. If `requires.components` is true, the variant may be purchasable only as part of a bundle/component flow; do not present it as a simple standalone purchase without checking merchant checkout behavior.
+
+**Prices come back in each seller's market presentment currency, set from `context.address_country`/geo — not necessarily one uniform currency.** Set `context.address_country` to localize; each seller returns its market presentment currency (Shopify Markets: real FX conversion + rounding, sometimes with per-market price overrides), and sellers that don't serve the buyer's market fall back to their own currency or drop out. So a result set can mix currencies: always read each item's `price_range.min.currency` (and per-variant `price.currency`), and treat `context.currency` as a soft signal, not a guarantee — the merchant determines final currency.
 
 ### ID formats
 
@@ -274,7 +281,7 @@ There is no general Admin Product ID → Catalog UPID lookup. Source UPIDs from 
 
 ## Auth tiers and headers
 
-Global Catalog works tokenless for prototypes and low-RPS use once the CLI has a local agent profile (`ucp profile init --name agent`). That local profile is CLI identity setup, not merchant onboarding and not a [[Catalog API]] key.
+Global Catalog works tokenless for prototypes and low-RPS use once the CLI has a local agent profile (`ucp profile init --name agent`). That local profile is CLI identity setup, not merchant onboarding and not a Catalog API key.
 
 When you need production attribution, higher rate limits, authenticated pagination, or future buyer-linked personalization, pass a Catalog token as a normal UCP header:
 
