@@ -92,12 +92,14 @@ As the buyer narrows their choice, re-call `get_product` with `selected` to anch
 
 ```sh
 ucp catalog get_product 'gid://shopify/p/abc123' --input '{
-  "selected": [{ "name": "Color", "label": "Red" }],
-  "preferences": ["Color", "Size"]
+  "selected": [{ "name": "Color", "label": "Black/White - Volt" }, { "name": "Shoe size", "label": "us 10" }],
+  "preferences": ["Color", "Shoe size"]
 }'
 ```
 
-The response always carries `result.product.selected` reflecting the current selection — defaulted by the server on initial render, echoed when you pass `selected` as input. `variants[]` contains every variant matching that selection: one entry when all axes are fully resolved (your featured variant), multiple candidates when selection is partial. Use `preferences` to tell the server which option names to relax last/first when an exact combination is unavailable; options are dropped from the end of the list first.
+Copy `selected[].name` and `selected[].label` **verbatim** from the product's `options[].name` / `options[].values[].label` — never a normalized guess — so the selection is applied correctly. Labels are frequently compound or localized (the axis may be `"Shoe size"` not `"Size"`, the value `"us 10"` not `"10"`, a color `"Black/White - Volt"` not `"black"`), so read the exact strings from the response's `options[]`.
+
+`result.product.selected` reflects the server-**resolved** selection (defaulted on initial render; the matched subset after you pass `selected`), and `variants[]` contains every variant matching it: one when all axes are resolved (your featured variant), several when partial. Use `preferences` to tell the server which option names to relax first/last when an exact combination is unavailable; options are dropped from the end of the list first.
 
 Do not traverse every variant client-side to recompute the matrix. Let `get_product` return `options[]` and the chosen variant after each selection.
 
@@ -212,9 +214,15 @@ All filters live under the Catalog payload's `filters` object.
 | `ships_from` | `{ country }[]` | Array of origin-country objects, OR'd. Digital products that do not require shipping can still match. |
 | `categories` | `string[]` | Shopify taxonomy category IDs/GIDs. Multiple values are OR'd; verify exact accepted shape with `--input-schema` if uncertain. |
 | `shop_ids` | `string[]` | Shopify Shop IDs as GIDs (`gid://shopify/Shop/...`) or bare numeric strings; reuse the GID form from `variants[*].seller.id`. Up to 1000 shop IDs. |
-| `attributes` | `{ name, values[] }[]` | Search only. Supported names include `Color`, `Size`, and `Target gender`. Entries are AND'd; values within one entry are OR'd. Unsupported names are ignored and returned in `messages[]`. |
+| `attributes` | `{ name, values[] }[]` | Search only. Names/values are **Shopify Standard Product Taxonomy** entries (a name like `Color`/`Red`, or a GID); matching is case-insensitive. Entries AND'd; values within one entry OR'd. Which attributes exist and what values they accept are **defined by the taxonomy and vary by product category** (a footwear `Size` differs from apparel). See the taxonomy note below. |
 | `rating` | `{ variant: { min?, min_count? } }` | Search only. Matches products with at least one variant whose rating satisfies the 0-5 `min` and review-count `min_count` thresholds. |
 | `price_tier` | `string[]` | Search only. Relative price tier within category: `low`, `medium`, `high`; multiple values are OR'd. Unsupported values are ignored and returned in `messages[]`. |
+
+### `filters.attributes` and the Shopify taxonomy
+
+`filters.attributes` matches against **Shopify's Standard Product Taxonomy** — a public, versioned vocabulary of categories, attributes, and values with stable GIDs — which is distinct from a product's seller-defined `options[]` (variant axes) and its ML-inferred `metadata.attributes[]` (descriptive tags). Learn and browse it at **https://github.com/Shopify/product-taxonomy** (interactive explorer: **https://shopify.github.io/product-taxonomy/**); the filter accepts either the canonical value name (`Red`) or its GID (`gid://shopify/TaxonomyValue/...`).
+
+Which attributes exist and what values they accept are **defined by the taxonomy and vary by product category** — a footwear `Size` is a different attribute/value set than an apparel `Size`. Use the taxonomy above to look up the correct attribute and value(s) for the category you're filtering, and pass them verbatim (canonical name or GID) rather than inventing values.
 
 ## Response fields and data model
 
