@@ -1,6 +1,6 @@
 {
   "name": "@shopify/ucp-cli",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Reference CLI + MCP server for the Universal Commerce Protocol",
   "type": "module",
   "license": "MIT",

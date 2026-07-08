@@ -1,5 +1,13 @@
 # @shopify/ucp-cli
 
+## 0.6.2
+
+### Patch Changes
+
+- 72a84f3: Point the baked-in default agent profile URL at the canonical shopify.dev
+  version (`/ucp/agent-profiles/2026-04-08/valid-with-capabilities.json`).
+- d18c3ed: Expand the bundled UCP agent skill with a dedicated Shopify Global Catalog reference, including search, lookup/re-pricing, PDP variant selection, multimodal search, single-shop filtering, auth tiers, ID formats, and Catalog-specific recovery guidance.
+
 ## 0.6.1
 
 ### Patch Changes
