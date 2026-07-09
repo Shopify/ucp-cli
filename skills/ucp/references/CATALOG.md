@@ -86,6 +86,8 @@ ucp catalog get_product 'gid://shopify/p/abc123' \
 
 The `options[].values[]` array carries `available` and `exists` flags computed against the catalog. Use this matrix directly to render the option picker on first render — no follow-up call needed.
 
+`options` may be `null` or absent even when the product has several `variants[]`: some sellers don't expose a structured matrix, and those variants often share a single title and carry no option labels — so you cannot build a size/color picker from the response. When there's no matrix, don't re-call or hunt for one: use the featured variant, or hand the buyer to the product/variant `url` (the seller's PDP) to choose there.
+
 A Catalog UPID aggregates offers from **multiple sellers**. A bare `get_product` returns a server-chosen featured variant that may belong to a *different* seller than the one you found in `search` — the `seller.domain`/`seller.url` and variant `id` can change between the search hit and the `get_product` default. If the buyer picked a specific seller or variant, carry that `variant.id` forward and re-read `variants[*].seller` after narrowing rather than trusting the default featured variant.
 
 As the buyer narrows their choice, re-call `get_product` with `selected` to anchor the featured variant and refine the matrix relative to that selection:
