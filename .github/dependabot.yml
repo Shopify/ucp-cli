@@ -1,0 +1,31 @@
+version: 2
+updates:
+  # npm dependencies. Minor/patch land as two grouped weekly PRs (prod vs dev)
+  # to cut noise; majors come as individual PRs so breaking upgrades (e.g. a
+  # TypeScript major) get reviewed and validated on their own.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    # Mirror the 7-day floor enforced by .npmrc `minimum-release-age`: don't
+    # propose a version until it has aged, to blunt compromised-release risk.
+    cooldown:
+      default-days: 7
+    groups:
+      production-minor-patch:
+        dependency-type: "production"
+        update-types: ["minor", "patch"]
+      development-minor-patch:
+        dependency-type: "development"
+        update-types: ["minor", "patch"]
+
+  # Keep the CI matrix's SHA-pinned actions from drifting.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns: ["*"]

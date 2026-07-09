@@ -20,7 +20,10 @@
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
-    "noEmit": true
+    "noEmit": true,
+    // tsup's DTS builder injects a (now-deprecated) `baseUrl` in TS 6.0; this
+    // bridges the 6.0->7.0 deprecation window until tsup stops setting it.
+    "ignoreDeprecations": "6.0"
   },
   "include": ["src/**/*", "test/**/*", "scripts/**/*", "tsup.config.ts", "vitest.config.ts"],
   "exclude": ["node_modules", "dist"]
