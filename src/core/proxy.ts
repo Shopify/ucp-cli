@@ -25,16 +25,18 @@
 // read.
 
 /**
- * Vars whose presence installs the dispatcher. Case variants are listed
- * because presence detection is ours; precedence between them is undici's.
+ * Logical variable names, matched case-insensitively against the actual env
+ * keys — never probed as fixed-name properties. Windows env vars are
+ * case-insensitive on property access, so checking `https_proxy` and
+ * `HTTPS_PROXY` separately reports one OS variable twice; enumerating real
+ * keys reports each variable exactly once with the casing the user set, on
+ * every platform. Precedence between variants is undici's job.
+ *
+ * `no_proxy` is reported for context but never a trigger on its own — with
+ * no proxy configured it has nothing to exclude.
  */
-const TRIGGER_VARS = ['https_proxy', 'HTTPS_PROXY', 'http_proxy', 'HTTP_PROXY'] as const
-
-/**
- * Reported for context but never a trigger on their own — `no_proxy` with no
- * proxy configured has nothing to exclude.
- */
-const CONTEXT_VARS = ['no_proxy', 'NO_PROXY'] as const
+const TRIGGER_NAMES = ['https_proxy', 'http_proxy'] as const
+const PROXY_NAMES = [...TRIGGER_NAMES, 'no_proxy'] as const
 
 export type ProxyStatus = 'inactive' | 'active' | 'error'
 
@@ -174,7 +176,27 @@ export function describeProxyState(): string {
  * not become a total outage.
  */
 function hasProxyConfigured(): boolean {
-  return TRIGGER_VARS.some((name) => (process.env[name] ?? '').trim() !== '')
+  return proxyEnvEntries().some(
+    ([key, value]) =>
+      (TRIGGER_NAMES as readonly string[]).includes(key.toLowerCase()) && value.trim() !== '',
+  )
+}
+
+/**
+ * Actual proxy-related env entries, each underlying variable exactly once
+ * (see {@link PROXY_NAMES}). Sorted by logical name then lowercase-first so
+ * rendered output is deterministic regardless of env-block order.
+ */
+function proxyEnvEntries(): Array<[string, string]> {
+  const rank = (key: string): number => PROXY_NAMES.indexOf(key.toLowerCase() as never)
+  // Within one logical name, exact-lowercase sorts first — that is the
+  // variant undici actually prefers, so display order mirrors precedence.
+  const caseRank = (key: string): number => (key === key.toLowerCase() ? 0 : 1)
+  return Object.entries(process.env)
+    .filter(
+      (entry): entry is [string, string] => rank(entry[0]) !== -1 && typeof entry[1] === 'string',
+    )
+    .sort(([a], [b]) => rank(a) - rank(b) || caseRank(a) - caseRank(b))
 }
 
 /** Reset for tests. Restores the pre-install state; installs nothing. */
@@ -184,13 +206,7 @@ export function resetProxyStateForTests(): void {
 
 /** Redacted `name=value` for each proxy-related var present in the env. */
 function describeProxyVars(): string[] {
-  const described: string[] = []
-  for (const name of [...TRIGGER_VARS, ...CONTEXT_VARS]) {
-    const value = process.env[name]
-    if (value === undefined) continue
-    described.push(`${name}=${redactProxyValue(value)}`)
-  }
-  return described
+  return proxyEnvEntries().map(([key, value]) => `${key}=${redactProxyValue(value)}`)
 }
 
 /**
