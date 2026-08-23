@@ -23,6 +23,7 @@ import {
   readActive,
   readUserProfile,
 } from '../core/profile-store.js'
+import { describeProxyState, proxyState } from '../core/proxy.js'
 
 export interface DoctorDeps {
   homeDir?: string
@@ -74,7 +75,14 @@ export async function runDoctor(deps: DoctorDeps = {}): Promise<DoctorResult> {
   const profileName = env.UCP_PROFILE ?? active.profile
   checks.push(await checkProfile(profileName, storeOpts))
 
-  // 4. Profile hosting URL reachable. HEAD is best-effort: warn (not fail) on
+  // 4. Outbound network configuration. Reports the proxy decision made at
+  // boot, catching the otherwise-invisible state: proxy env present but
+  // unusable, which looks exactly like an unreachable merchant. Ordered
+  // before the network probe so a proxy misconfiguration reads as the cause
+  // of the probe's failure.
+  checks.push(checkProxy())
+
+  // 5. Profile hosting URL reachable. HEAD is best-effort: warn (not fail) on
   // failure since a missing-yet-managed profile URL is a legitimate intermediate state
   // and a network blip shouldn't fail `doctor` for a perfectly valid setup.
   if (deps.skipNetwork !== true) {
@@ -83,6 +91,17 @@ export async function runDoctor(deps: DoctorDeps = {}): Promise<DoctorResult> {
 
   const ok = checks.every((c) => c.status !== 'fail')
   return { ok, checks }
+}
+
+// Proxy env we could not act on is a `fail`: every outbound request silently
+// bypasses the proxy and times out, a broken install even though nothing
+// local is wrong. `inactive` is the common, healthy path.
+function checkProxy(): Check {
+  return {
+    id: 'proxy',
+    status: proxyState().status === 'error' ? 'fail' : 'ok',
+    detail: describeProxyState(),
+  }
 }
 
 async function checkWritable(id: string, path: string): Promise<Check> {

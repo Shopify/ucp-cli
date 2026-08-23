@@ -27,6 +27,7 @@ import {
 import { canonicalizeOrigin, type HeaderMap, resolveHeaders } from './core/headers.js'
 import { isDryRunPreview } from './core/operation.js'
 import { DEFAULT_AGENT_CAPABILITY_IDS } from './core/profile.js'
+import { describeProxyState } from './core/proxy.js'
 import { acceptsHttpsUrl, parseHttpsUrl } from './core/url.js'
 import { setVerboseWriter, vlog } from './core/verbose.js'
 import { ErrorCodes, UcpError } from './lib/errors.js'
@@ -1223,6 +1224,10 @@ export async function runUcpCli(argv = process.argv.slice(2)): Promise<void> {
       process.stderr.write(msg)
     })
   }
+  // The proxy decision is made in bin.ts before the verbose writer exists,
+  // so it is traced here instead. It leads the trace because "are we proxying
+  // at all" is the first question when debugging a corporate-network stall.
+  vlog(`proxy: ${describeProxyState()}`)
   const serveArgv = argv.filter((a) => a !== '--verbose')
   // Intercept `ucp skills add` so we can prune incur's auto-generated
   // per-command sub-skills after the sync. Help, list, and bare `skills`

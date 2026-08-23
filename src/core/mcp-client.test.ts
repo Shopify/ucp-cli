@@ -4,9 +4,10 @@
 // what JSON-RPC request we send and how the narrow MCP adapter maps the
 // response or failure into UCP errors.
 
-import { describe, expect, it, vi } from 'vitest'
-
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { clearProxyEnv } from '../test-utils.js'
 import { mcpRpc } from './mcp-client.js'
+import { installProxyDispatcher, resetProxyStateForTests } from './proxy.js'
 
 const ENDPOINT = 'https://shop.example.invalid/ucp/mcp'
 
@@ -325,5 +326,57 @@ describe('mcpRpc — error mapping', () => {
     ).rejects.toThrowError(
       expect.objectContaining({ code: 'INVALID_INPUT', layer: 'client' }) as unknown as Error,
     )
+  })
+})
+
+// Transport failures must name a configured proxy in the MESSAGE: incur's
+// error envelope is {code, message, retryable} and drops `context`, so this is
+// the only channel a human or agent actually reads. Without it, "the proxy
+// refused us" and "the merchant is down" look identical.
+describe('mcpRpc — proxy annotation on transport failures', () => {
+  beforeEach(() => {
+    clearProxyEnv(vi.stubEnv)
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    resetProxyStateForTests()
+  })
+
+  const rejectingFetch = () =>
+    vi.fn(async () => {
+      throw new Error('ECONNREFUSED')
+    }) as unknown as typeof globalThis.fetch
+
+  it('names the proxy in the message when one is configured', async () => {
+    vi.stubEnv('https_proxy', 'http://proxy.example:3128')
+    await installProxyDispatcher()
+    await expect(
+      mcpRpc({ endpoint: ENDPOINT, method: 'tools/list', fetch: rejectingFetch() }),
+    ).rejects.toMatchObject({
+      code: 'TRANSPORT_NETWORK_ERROR',
+      message: expect.stringContaining('proxy: enabled'),
+    })
+  })
+
+  it('flags a failed proxy install as the reason requests went direct', async () => {
+    vi.stubEnv('https_proxy', 'not-a-url')
+    await installProxyDispatcher()
+    await expect(
+      mcpRpc({ endpoint: ENDPOINT, method: 'tools/list', fetch: rejectingFetch() }),
+    ).rejects.toMatchObject({
+      code: 'TRANSPORT_NETWORK_ERROR',
+      message: expect.stringContaining('set but unusable'),
+    })
+  })
+
+  it('adds nothing to the message when no proxy is configured', async () => {
+    await installProxyDispatcher()
+    await expect(
+      mcpRpc({ endpoint: ENDPOINT, method: 'tools/list', fetch: rejectingFetch() }),
+    ).rejects.toMatchObject({
+      code: 'TRANSPORT_NETWORK_ERROR',
+      message: expect.not.stringContaining('proxy'),
+    })
   })
 })

@@ -91,3 +91,28 @@ export function captureSaves(
     },
   }
 }
+
+// Proxy-env isolation for tests.
+//
+// All six vars must be cleared, not just the four triggers: NO_PROXY/no_proxy
+// change the rendered proxy summary by their mere presence, so a test that
+// clears less passes on a clean laptop and fails on a proxied CI runner — the
+// exact environment the proxy feature serves.
+//
+// Cleanup must call `resetProxyStateForTests()`, never the installer: running
+// `installProxyDispatcher()` after `vi.unstubAllEnvs()` would install the
+// developer's real corporate proxy as the process-global dispatcher for the
+// rest of the worker.
+export const PROXY_ENV_VARS = [
+  'http_proxy',
+  'HTTP_PROXY',
+  'https_proxy',
+  'HTTPS_PROXY',
+  'no_proxy',
+  'NO_PROXY',
+] as const
+
+/** Clear every proxy var so assertions do not depend on the host env. */
+export function clearProxyEnv(stubEnv: (name: string, value: undefined) => void): void {
+  for (const name of PROXY_ENV_VARS) stubEnv(name, undefined)
+}

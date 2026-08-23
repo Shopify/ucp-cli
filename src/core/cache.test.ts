@@ -11,6 +11,7 @@ import { z } from 'incur'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { UcpError } from '../lib/errors.js'
+import { clearProxyEnv } from '../test-utils.js'
 import {
   type CacheEntry,
   cacheCompute,
@@ -20,6 +21,7 @@ import {
   parseMaxAge,
   ucpHomeDir,
 } from './cache.js'
+import { installProxyDispatcher, resetProxyStateForTests } from './proxy.js'
 
 describe('originToFilename', () => {
   it.each([
@@ -384,5 +386,96 @@ describe('cacheCompute', () => {
       () => false,
     )
     expect(exists).toBe(false)
+  })
+})
+
+// The message is the only field incur's error envelope surfaces (it emits
+// {code, message, retryable} and drops `context`), so a configured proxy has
+// to be named there. Profile discovery is the first network call in any flow,
+// which makes this the most likely place a proxy failure shows up — and
+// without the annotation it is indistinguishable from a dead merchant.
+describe('fetchCached — proxy annotation on transport failure', () => {
+  let cacheDir: string
+
+  beforeEach(async () => {
+    cacheDir = await mkdtemp(join(tmpdir(), 'ucp-cli-cache-proxy-test-'))
+    clearProxyEnv(vi.stubEnv)
+  })
+
+  afterEach(async () => {
+    await rm(cacheDir, { recursive: true, force: true })
+    vi.unstubAllEnvs()
+    resetProxyStateForTests()
+  })
+
+  const rejectingFetch = () =>
+    vi.fn(async () => {
+      throw new Error('network down')
+    }) as unknown as typeof globalThis.fetch
+
+  it('names the proxy in the message when one is configured', async () => {
+    vi.stubEnv('https_proxy', 'http://proxy.example:3128')
+    await installProxyDispatcher()
+    await expect(
+      fetchCached('https://example.com/x', {
+        cacheDir,
+        errorCodes: codes,
+        fetch: rejectingFetch(),
+      }),
+    ).rejects.toMatchObject({
+      code: 'TEST_FETCH_FAILED',
+      message: expect.stringContaining('proxy: enabled'),
+      retryable: true,
+    })
+  })
+
+  it('annotates a filtering-proxy block page returned as an HTTP error', async () => {
+    // Zscaler/Squid answer on the merchant's behalf with their own 403. The
+    // status is the proxy's, so attributing it to the merchant is a misread.
+    vi.stubEnv('https_proxy', 'http://proxy.example:3128')
+    await installProxyDispatcher()
+    const blocked = vi.fn(
+      async () => new Response('<html>blocked by policy</html>', { status: 403 }),
+    ) as unknown as typeof globalThis.fetch
+    await expect(
+      fetchCached('https://example.com/x', { cacheDir, errorCodes: codes, fetch: blocked }),
+    ).rejects.toMatchObject({
+      code: 'TEST_FETCH_FAILED',
+      message: expect.stringContaining('proxy: enabled'),
+    })
+  })
+
+  it('annotates a captive-portal HTML page served with HTTP 200', async () => {
+    // The likeliest symptom of all, and the one that looks least like a proxy
+    // problem: 200 OK, bytes on the wire, HTML where JSON was expected.
+    vi.stubEnv('https_proxy', 'http://proxy.example:3128')
+    await installProxyDispatcher()
+    const captive = vi.fn(
+      async () =>
+        new Response('<html>sign in to continue</html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+        }),
+    ) as unknown as typeof globalThis.fetch
+    await expect(
+      fetchCached('https://example.com/x', { cacheDir, errorCodes: codes, fetch: captive }),
+    ).rejects.toMatchObject({
+      code: 'TEST_INVALID_JSON',
+      message: expect.stringContaining('proxy: enabled'),
+    })
+  })
+
+  it('adds nothing to the message when no proxy is configured', async () => {
+    await installProxyDispatcher()
+    await expect(
+      fetchCached('https://example.com/x', {
+        cacheDir,
+        errorCodes: codes,
+        fetch: rejectingFetch(),
+      }),
+    ).rejects.toMatchObject({
+      code: 'TEST_FETCH_FAILED',
+      message: expect.not.stringContaining('proxy'),
+    })
   })
 })
