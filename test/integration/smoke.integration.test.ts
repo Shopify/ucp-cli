@@ -262,6 +262,34 @@ describe('smoke: --mcp stdio', () => {
     return env
   }
 
+  // Regression pin for the incur 0.4.x 'progressive' discovery default flip,
+  // which silently replaced the per-command tool surface with four
+  // search/inspect/execute meta-tools. The per-command names below are the
+  // published agent contract; cli.ts pins discovery: 'direct' to keep it.
+  // If this fails with ~4 tools, an incur bump flipped the default again.
+  it('exposes one tool per command under tools/list (direct discovery)', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'ucp-mcp-tools-'))
+    await mkdir(home, { recursive: true })
+    const env = envFor(home)
+    await execFileAsync('node', [CLI_PATH, 'profile', 'init', '--name', 'agent'], { env })
+
+    const mcp = launch(env)
+    try {
+      await initialize(mcp)
+      mcp.send({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
+      const response = (await mcp.waitForResponseId(1)) as {
+        result: { tools: { name: string }[] }
+      }
+      const names = response.result.tools.map((t) => t.name)
+      for (const expected of ['catalog_search', 'cart_create', 'checkout_complete', 'discover']) {
+        expect(names).toContain(expected)
+      }
+      expect(names.length).toBeGreaterThanOrEqual(20)
+    } finally {
+      await mcp.close()
+    }
+  })
+
   // The single user-facing promise of `--mcp`: an agent that has already run
   // `ucp use <url>` doesn't have to re-supply `business` on every tool call.
   // If session resolution silently broke under MCP, agents would
