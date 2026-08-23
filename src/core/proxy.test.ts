@@ -219,6 +219,29 @@ describe('installProxyDispatcher — conditional load', () => {
     })
     expect(state.status).toBe('error')
     expect(state.error).toContain('ERR_MODULE_NOT_FOUND')
+    // On a supported Node the version hint must NOT appear — it would point
+    // users at an upgrade that cannot help them.
+    expect(state.error).not.toContain('requires Node')
+  })
+
+  it('names the Node version when a load failure happens below the engines floor', async () => {
+    // Field report from a Node 18 box: undici 7's import throws "File is not
+    // defined", which does not name the actual problem — the runtime is below
+    // our engines floor. The annotation is version-based, not global-sniffing,
+    // so it covers whatever undici happens to trip over on old Node.
+    vi.stubEnv('https_proxy', 'http://proxy.example:3128')
+    const descriptor = Object.getOwnPropertyDescriptor(process.versions, 'node')
+    Object.defineProperty(process.versions, 'node', { ...descriptor, value: '18.19.1' })
+    try {
+      const state = await installProxyDispatcher({
+        load: () => Promise.reject(new ReferenceError('File is not defined')),
+      })
+      expect(state.status).toBe('error')
+      expect(state.error).toContain('File is not defined')
+      expect(state.error).toContain('(Node v18.19.1; ucp requires Node >= 22)')
+    } finally {
+      Object.defineProperty(process.versions, 'node', descriptor as PropertyDescriptor)
+    }
   })
 
   it('records an error instead of throwing when the proxy URL is malformed', async () => {

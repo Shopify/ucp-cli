@@ -114,7 +114,18 @@ export async function installProxyDispatcher(opts: ProxyInstallOptions = {}): Pr
   } catch (err) {
     // Redact the failure text too: it reaches doctor output and error
     // envelopes, and undici embedding the proxy URI someday must not leak.
-    state = { status: 'error', vars, error: redactProxyValue((err as Error).message) }
+    //
+    // Below the engines floor the failure is the import itself — undici 7
+    // references globals older Node lacks — and the raw error ("File is not
+    // defined") does not name the actual problem. Annotate with the version
+    // rather than pre-checking specific globals, which would couple us to
+    // undici's internals.
+    const nodeVersion = process.versions.node
+    const versionHint =
+      Number(nodeVersion.split('.', 1)[0]) < __MIN_NODE_MAJOR__
+        ? ` (Node v${nodeVersion}; ucp requires Node >= ${__MIN_NODE_MAJOR__})`
+        : ''
+    state = { status: 'error', vars, error: redactProxyValue((err as Error).message) + versionHint }
   }
   return state
 }

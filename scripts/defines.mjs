@@ -32,5 +32,9 @@ export function buildDefines() {
     __DEFAULT_CATALOG_URL__: JSON.stringify(pkg.ucp.default_catalog_url),
     __PROTOCOL_MIN__: JSON.stringify(pkg.ucp.protocolMin),
     __PROTOCOL_MAX__: JSON.stringify(pkg.ucp.protocolMax),
+    // Major-version floor parsed from engines. npm only *warns* on engines at
+    // install time, so the CLI checks this itself (doctor `runtime` check,
+    // proxy load-failure hint) — package.json stays the single source.
+    __MIN_NODE_MAJOR__: JSON.stringify(Number(pkg.engines.node.match(/\d+/)[0])),
   }
 }

@@ -210,6 +210,32 @@ describe('runDoctor — proxy check', () => {
     resetProxyStateForTests()
   })
 
+  it('reports the running Node version as a passing runtime check', async () => {
+    const result = await runDoctor({ homeDir, skipNetwork: true, env: {} })
+    const check = findCheck(result, 'runtime')
+    expect(check.status).toBe('ok')
+    expect(check.detail).toBe(`Node v${process.versions.node}`)
+  })
+
+  it('fails the runtime check below the engines floor', async () => {
+    // npm engines is warning-only, so an unsupported Node still installs and
+    // mostly runs; doctor is where that state gets caught deliberately
+    // instead of as a cryptic dependency error (field-reported: undici 7 on
+    // Node 18 dies with "File is not defined").
+    const descriptor = Object.getOwnPropertyDescriptor(process.versions, 'node')
+    Object.defineProperty(process.versions, 'node', { ...descriptor, value: '18.19.1' })
+    try {
+      const result = await runDoctor({ homeDir, skipNetwork: true, env: {} })
+      const check = findCheck(result, 'runtime')
+      expect(check.status).toBe('fail')
+      expect(check.detail).toContain('Node v18.19.1')
+      expect(check.detail).toContain('requires Node >= 22')
+      expect(result.ok).toBe(false)
+    } finally {
+      Object.defineProperty(process.versions, 'node', descriptor as PropertyDescriptor)
+    }
+  })
+
   it('reports direct connections when no proxy env is set', async () => {
     await installProxyDispatcher()
     const result = await runDoctor({ homeDir, skipNetwork: true, env: {} })
