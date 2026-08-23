@@ -22,6 +22,7 @@ import { type ErrorCode, UcpError } from '../lib/errors.js'
 import type { ErrorLayer } from '../lib/types.js'
 import { formatZodIssues } from '../lib/zod-format.js'
 import { ucpFetch } from './http-client.js'
+import { proxyErrorContext, proxyErrorNote } from './proxy.js'
 import { vlog } from './verbose.js'
 
 /**
@@ -183,20 +184,29 @@ export async function fetchCached<T = unknown>(
       traceLabel: 'cache',
     })
   } catch (err) {
+    // Profile discovery is the first network call in every flow, so it is where
+    // an ignored or broken proxy surfaces first. Annotate so the envelope can't
+    // be misread as "merchant unreachable". Absent entirely when no proxy is
+    // configured. See core/proxy.ts.
+    const proxy = proxyErrorContext()
     throw new UcpError({
       layer,
       code: options.errorCodes.fetchFailed,
-      message: `fetch failed: request to ${url} could not be completed`,
+      message: `fetch failed: request to ${url} could not be completed${proxyErrorNote()}`,
       cause: err as Error,
       retryable: true,
+      ...(proxy !== undefined && { context: proxy }),
     })
   }
 
   if (!response.ok) {
+    // A filtering proxy answers on the merchant's behalf: Zscaler and Squid
+    // return their own 403 policy page. Without the annotation that reads as
+    // "the merchant rejected us", and the operator debugs the wrong system.
     throw new UcpError({
       layer,
       code: options.errorCodes.fetchFailed,
-      message: `fetch failed: HTTP ${response.status} from ${url}`,
+      message: `fetch failed: HTTP ${response.status} from ${url}${proxyErrorNote()}`,
       http_status: response.status,
       retryable: response.status >= 500,
     })
@@ -206,10 +216,14 @@ export async function fetchCached<T = unknown>(
   try {
     raw = await response.json()
   } catch (err) {
+    // The highest-probability proxy symptom of all: a TLS-inspecting or
+    // captive proxy serves an HTML sign-in or block page with HTTP 200, and
+    // JSON parsing is where it lands. "Bytes came back" does not mean the
+    // merchant answered — it means *something* answered.
     throw new UcpError({
       layer,
       code: options.errorCodes.invalidJson,
-      message: `response body is not valid JSON: ${url}`,
+      message: `response body is not valid JSON: ${url}${proxyErrorNote()}`,
       cause: err as Error,
     })
   }

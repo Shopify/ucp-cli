@@ -23,6 +23,7 @@ import {
   readActive,
   readUserProfile,
 } from '../core/profile-store.js'
+import { describeProxyState, proxyState } from '../core/proxy.js'
 
 export interface DoctorDeps {
   homeDir?: string
@@ -54,7 +55,13 @@ export async function runDoctor(deps: DoctorDeps = {}): Promise<DoctorResult> {
   const storeOpts: ProfileStoreOptions = deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}
   const checks: Check[] = []
 
-  // 1. ~/.ucp home + cache + profiles dirs writable. Side-effect: mkdir
+  // 1. Supported runtime. npm `engines` is warning-only at install time, so
+  // an out-of-contract Node still installs and mostly runs — until a
+  // dependency trips over a missing global with a cryptic error. Checked
+  // first because it explains every downstream failure.
+  checks.push(checkRuntime())
+
+  // 2. ~/.ucp home + cache + profiles dirs writable. Side-effect: mkdir
   // recursive so a clean install passes (matches what readActive/saveUserProfile
   // do on first write). Failure here means the rest of the CLI is broken too.
   const home = profileStoreHome(storeOpts)
@@ -62,19 +69,26 @@ export async function runDoctor(deps: DoctorDeps = {}): Promise<DoctorResult> {
   checks.push(await checkWritable('profiles-dir', profilesRoot(storeOpts)))
   checks.push(await checkWritable('cache-dir', join(home, 'cache')))
 
-  // 2. active.yaml resolves (degraded-empty allowed; readActive never throws).
+  // 3. active.yaml resolves (degraded-empty allowed; readActive never throws).
   // The check exists so a corrupt file shows up explicitly rather than silently
   // collapsing the session to defaults.
   const activeCheck = await checkActive(storeOpts)
   checks.push(activeCheck)
 
-  // 3. Active local profile parses from disk. Profile init is required; there
+  // 4. Active local profile parses from disk. Profile init is required; there
   // is no synthetic runtime profile for operations.
   const active = await readActive(storeOpts)
   const profileName = env.UCP_PROFILE ?? active.profile
   checks.push(await checkProfile(profileName, storeOpts))
 
-  // 4. Profile hosting URL reachable. HEAD is best-effort: warn (not fail) on
+  // 5. Outbound network configuration. Reports the proxy decision made at
+  // boot, catching the otherwise-invisible state: proxy env present but
+  // unusable, which looks exactly like an unreachable merchant. Ordered
+  // before the network probe so a proxy misconfiguration reads as the cause
+  // of the probe's failure.
+  checks.push(checkProxy())
+
+  // 6. Profile hosting URL reachable. HEAD is best-effort: warn (not fail) on
   // failure since a missing-yet-managed profile URL is a legitimate intermediate state
   // and a network blip shouldn't fail `doctor` for a perfectly valid setup.
   if (deps.skipNetwork !== true) {
@@ -83,6 +97,33 @@ export async function runDoctor(deps: DoctorDeps = {}): Promise<DoctorResult> {
 
   const ok = checks.every((c) => c.status !== 'fail')
   return { ok, checks }
+}
+
+// Below the engines floor is a `fail`, not a warn: the contract is declared,
+// the runtime is EOL, and breakage arrives as cryptic dependency errors (on
+// Node 18 the proxy dispatcher dies with "File is not defined"). A CI gate
+// going red on an unsupported runtime is the check working as intended.
+function checkRuntime(): Check {
+  const version = process.versions.node
+  const supported = Number(version.split('.', 1)[0]) >= __MIN_NODE_MAJOR__
+  return {
+    id: 'runtime',
+    status: supported ? 'ok' : 'fail',
+    detail: supported
+      ? `Node v${version}`
+      : `Node v${version} — ucp requires Node >= ${__MIN_NODE_MAJOR__}`,
+  }
+}
+
+// Proxy env we could not act on is a `fail`: every outbound request silently
+// bypasses the proxy and times out, a broken install even though nothing
+// local is wrong. `inactive` is the common, healthy path.
+function checkProxy(): Check {
+  return {
+    id: 'proxy',
+    status: proxyState().status === 'error' ? 'fail' : 'ok',
+    detail: describeProxyState(),
+  }
 }
 
 async function checkWritable(id: string, path: string): Promise<Check> {

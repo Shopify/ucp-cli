@@ -15,6 +15,7 @@
 import { ErrorCodes, UcpError } from '../lib/errors.js'
 import type { CtaBlock } from '../lib/types.js'
 import { ucpFetch } from './http-client.js'
+import { proxyErrorContext, proxyErrorNote } from './proxy.js'
 import { parseHttpsUrl } from './url.js'
 import { vlog } from './verbose.js'
 
@@ -102,9 +103,13 @@ export async function mcpRpc<T = unknown>(opts: McpRpcOptions): Promise<T> {
     throw new UcpError({
       layer: 'transport',
       code: ErrorCodes.TRANSPORT_NETWORK_ERROR,
-      message: `MCP request to ${endpoint} failed: ${(err as Error).message}`,
+      message: `MCP request to ${endpoint} failed: ${(err as Error).message}${proxyErrorNote()}`,
       cause: err as Error,
-      context: { endpoint, method: opts.method },
+      // An ignored or broken proxy is indistinguishable from an unreachable
+      // merchant at this layer, and an agent reading this envelope would
+      // otherwise report "merchant is down". Spreads to nothing when no proxy
+      // is configured.
+      context: { endpoint, method: opts.method, ...proxyErrorContext() },
     })
   }
 
@@ -124,12 +129,16 @@ export async function mcpRpc<T = unknown>(opts: McpRpcOptions): Promise<T> {
         body: { raw_body: truncate(responseText) },
       })
     }
+    // Annotated for the same reason as the transport failure above, even
+    // though bytes came back: a captive or TLS-inspecting proxy answers 200
+    // with an HTML sign-in page, so unparseable JSON is one of the *likeliest*
+    // proxy symptoms rather than evidence the merchant was reached.
     throw new UcpError({
       layer: 'transport',
       code: ErrorCodes.TRANSPORT_INVALID_JSON,
-      message: `MCP response body is not valid JSON: ${endpoint}`,
+      message: `MCP response body is not valid JSON: ${endpoint}${proxyErrorNote()}`,
       cause: err as Error,
-      context: { endpoint, method: opts.method },
+      context: { endpoint, method: opts.method, ...proxyErrorContext() },
     })
   }
 

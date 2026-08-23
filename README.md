@@ -261,6 +261,22 @@ There is no `--auth-bearer` flag and no `UCP_AUTH_BEARER` env var. `--header` is
 | `UCP_HOME` | Override the local state directory (default `~/.ucp`) |
 | `UCP_VERBOSE` | Set `1`/`true` to print trace lines to stderr |
 | `UCP_STRICT_SCHEMA` | Set `1`/`true` to make client-side input validation fail-closed: throw `MCP_INVALID_RESPONSE` when the published input schema can't be compiled, and `SCHEMA_VALIDATION_FAILED` when a payload carries plain keys not listed in the schema. Default is silent + dispatch (the server is the authoritative validator); `--verbose` surfaces these as traces. |
+| `HTTPS_PROXY` / `HTTP_PROXY` | Route outbound requests through a proxy. Honored automatically — see [Proxies and TLS inspection](#proxies-and-tls-inspection). Lowercase variants work too. |
+| `NO_PROXY` | Hosts to reach directly, bypassing the proxy. Comma-separated; leading dots, wildcards, and ports supported — CIDR blocks are not. |
+| `NODE_EXTRA_CA_CERTS` | Path to a PEM bundle of extra trusted CAs, for TLS-inspecting proxies. Handled by Node itself, *appended* to the built-in trust store. |
+
+### Proxies and TLS inspection
+
+If `HTTPS_PROXY` (or `https_proxy`) is set, `ucp` routes through it automatically — no flag, no config, same environment contract as curl, git, and pip:
+
+```sh
+export HTTPS_PROXY=http://proxy.corp.example:3128
+export NO_PROXY=.internal.example,localhost
+ucp doctor          # `proxy` check: what was picked up (credentials redacted); fails if the value is unusable
+ucp --verbose ...   # `[ucp] proxy: ...` trace line on stderr
+```
+
+Behind a TLS-inspecting proxy (Zscaler, CrowdStrike, BlueCoat), trust its root CA the standard Node way: point `NODE_EXTRA_CA_CERTS` at the PEM file, or install it in the OS store and set `NODE_USE_SYSTEM_CA=1` (Node ≥ 22.19 / ≥ 24.6). Divergences from curl, should you hit them: `ALL_PROXY` is not read, `NO_PROXY` matches names rather than CIDR blocks, the proxy URL must include its scheme, and `socks5://` is untested. Anything else — a proxy that is down, misconfigured, blocking, or serving a sign-in page — shows up named in the error message and in `ucp doctor`, not as a silent stall.
 
 
 ## Development

@@ -7,6 +7,8 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PlatformProfile } from '../core/profile.js'
 import { saveUserProfile, writeActive } from '../core/profile-store.js'
+import { installProxyDispatcher, resetProxyStateForTests } from '../core/proxy.js'
+import { clearProxyEnv } from '../test-utils.js'
 import { runDoctor } from './doctor.js'
 
 const SAMPLE_BODY: PlatformProfile = {
@@ -192,5 +194,71 @@ describe('runDoctor — network probe', () => {
   it('skipNetwork omits the profile-url check', async () => {
     const result = await runDoctor({ homeDir, skipNetwork: true, env: {} })
     expect(result.checks.find((c) => c.id === 'profile-url')).toBeUndefined()
+  })
+})
+
+describe('runDoctor — proxy check', () => {
+  let homeDir: string
+
+  beforeEach(async () => {
+    homeDir = await mkdtemp(join(tmpdir(), 'ucp-cli-doctor-test-'))
+    clearProxyEnv(vi.stubEnv)
+  })
+  afterEach(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+    vi.unstubAllEnvs()
+    resetProxyStateForTests()
+  })
+
+  it('reports the running Node version as a passing runtime check', async () => {
+    const result = await runDoctor({ homeDir, skipNetwork: true, env: {} })
+    const check = findCheck(result, 'runtime')
+    expect(check.status).toBe('ok')
+    expect(check.detail).toBe(`Node v${process.versions.node}`)
+  })
+
+  it('fails the runtime check below the engines floor', async () => {
+    // npm engines is warning-only, so an unsupported Node still installs and
+    // mostly runs; doctor is where that state gets caught deliberately
+    // instead of as a cryptic dependency error (field-reported: undici 7 on
+    // Node 18 dies with "File is not defined").
+    const descriptor = Object.getOwnPropertyDescriptor(process.versions, 'node')
+    Object.defineProperty(process.versions, 'node', { ...descriptor, value: '18.19.1' })
+    try {
+      const result = await runDoctor({ homeDir, skipNetwork: true, env: {} })
+      const check = findCheck(result, 'runtime')
+      expect(check.status).toBe('fail')
+      expect(check.detail).toContain('Node v18.19.1')
+      expect(check.detail).toContain('requires Node >= 22')
+      expect(result.ok).toBe(false)
+    } finally {
+      Object.defineProperty(process.versions, 'node', descriptor as PropertyDescriptor)
+    }
+  })
+
+  it('reports direct connections when no proxy env is set', async () => {
+    await installProxyDispatcher()
+    const result = await runDoctor({ homeDir, skipNetwork: true, env: {} })
+    expect(findCheck(result, 'proxy').status).toBe('ok')
+    expect(findCheck(result, 'proxy').detail).toBe('none configured; connecting directly')
+  })
+
+  it('reports the active proxy without leaking credentials', async () => {
+    vi.stubEnv('https_proxy', 'http://alice:s3cret@proxy.example:3128')
+    await installProxyDispatcher()
+    const check = findCheck(await runDoctor({ homeDir, skipNetwork: true, env: {} }), 'proxy')
+    expect(check.status).toBe('ok')
+    expect(check.detail).toContain('proxy.example:3128')
+    expect(check.detail).not.toContain('s3cret')
+  })
+
+  it('fails when proxy env is present but the dispatcher could not be installed', async () => {
+    // The state that is otherwise invisible: requests silently go direct and
+    // time out, which reads as an unreachable merchant.
+    vi.stubEnv('https_proxy', 'not-a-url')
+    await installProxyDispatcher()
+    const check = findCheck(await runDoctor({ homeDir, skipNetwork: true, env: {} }), 'proxy')
+    expect(check.status).toBe('fail')
+    expect(check.detail).toContain('Invalid URL')
   })
 })
