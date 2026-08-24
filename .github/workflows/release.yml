@@ -39,8 +39,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - uses: changesets/action@198f833dd7d863100ea6e28967bc9a9fdefadb0a # v2.1.0
         with:
-          version: pnpm version-packages
-          publish: pnpm release
+          version-script: pnpm version-packages
+          publish-script: pnpm release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
