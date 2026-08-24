@@ -67,7 +67,7 @@
   "devDependencies": {
     "@apidevtools/json-schema-ref-parser": "^15.4.0",
     "@biomejs/biome": "^2.5.2",
-    "@changesets/cli": "^2.31.0",
+    "@changesets/cli": "^3.0.0",
     "@types/node": "^26.1.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
