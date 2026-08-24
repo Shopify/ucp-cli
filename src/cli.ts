@@ -143,6 +143,14 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
     description: CLI_DESCRIPTION,
     format: 'json',
     version: __CLI_VERSION__,
+    mcp: {
+      // incur 0.5 defaults MCP tool discovery to 'progressive' (search /
+      // inspect / execute meta-tools). Pin 'direct': one tool per command
+      // (catalog_search, cart_create, ...) is this CLI's published agent
+      // contract, and a dependency default must not rewrite it. Moving to
+      // progressive discovery is a product decision with its own migration.
+      tools: { discovery: 'direct' },
+    },
     sync: {
       // 'skills/*' surfaces every hand-written skills/<dir>/SKILL.md. The bin
       // entrypoint intercepts `skills add` and post-prunes everything else
