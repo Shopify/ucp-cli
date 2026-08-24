@@ -1,5 +1,15 @@
 # @shopify/ucp-cli
 
+## 0.7.0
+
+### Minor Changes
+
+- 3ef5367: Honor standard proxy environment variables. When `HTTPS_PROXY`/`https_proxy`/`HTTP_PROXY`/`http_proxy` is set, the CLI routes requests through the proxy (respecting `NO_PROXY`) instead of silently ignoring it and stalling until the request timeout. Adds a `proxy` check to `ucp doctor`, a `--verbose` trace line, and names the proxy in transport, HTTP, and invalid-body error messages so a proxy failure can't be misread as an unreachable merchant. Credentials are redacted everywhere. Implemented via undici's `EnvHttpProxyAgent`, loaded only when a proxy variable is set.
+
+### Patch Changes
+
+- 2d93b97: Restore the per-command MCP tool surface (`catalog_search`, `cart_create`, ...). a later incur 0.4.x release flipped its MCP tool discovery default to 'progressive', which replaced this CLI's published tools with four search/inspect/execute meta-tools on any fresh install resolving a newer incur. Tool discovery is now pinned to 'direct' and covered by an integration test, and the locked incur is aligned with what fresh installs resolve (0.4.26).
+
 ## 0.6.3
 
 ### Patch Changes
