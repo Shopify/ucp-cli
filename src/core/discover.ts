@@ -12,6 +12,7 @@
 //
 // Cache layout:
 //   <ucpHome>/cache/businesses/<origin>.json
+//   <ucpHome>/cache/businesses/<version>/<origin>.json   (supported_versions)
 //   <ucpHome>/cache/toolslist/<origin>/<capability-or-hash>.json
 
 import { createHash } from 'node:crypto'
@@ -28,7 +29,8 @@ import {
   AGENT_PROTOCOL_RANGE,
   type AgentRange,
   type BusinessProfile,
-  fetchBusinessProfile,
+  fetchCompatibleBusinessProfile,
+  isVersionInRange,
 } from './profile.js'
 import { parseHttpsUrl } from './url.js'
 import { vlog } from './verbose.js'
@@ -120,8 +122,10 @@ export async function discover(
   const profileCacheDir = join(cacheRoot, 'businesses')
   const toolsListCacheRoot = join(cacheRoot, 'toolslist', originToFilename(normalizedBusiness))
 
-  const profile = await fetchBusinessProfile(normalizedBusiness.origin, {
+  const agentRange = options.agentRange ?? AGENT_PROTOCOL_RANGE
+  const resolved = await fetchCompatibleBusinessProfile(normalizedBusiness.origin, {
     cacheDir: profileCacheDir,
+    agentRange,
     ...omitUndefined({
       fetch: options.fetch,
       signal: options.signal,
@@ -129,6 +133,12 @@ export async function discover(
       headers: options.headers,
     }),
   })
+  const { profile } = resolved
+  if (resolved.fromSupportedVersions) {
+    vlog(
+      `discover: /.well-known/ucp is outside agent range [${agentRange.min}..${agentRange.max}]; using supported_versions[${resolved.version}] → ${resolved.profileUrl}`,
+    )
+  }
 
   const services = profile.ucp.services as Record<string, unknown> | undefined
   const requested =
@@ -139,7 +149,7 @@ export async function discover(
     const negotiation = negotiateService({
       profile,
       capability,
-      agentRange: options.agentRange ?? AGENT_PROTOCOL_RANGE,
+      agentRange,
       ...omitUndefined({ acceptableTransports: options.acceptableTransports }),
     })
     const endpoint = negotiation.entry.endpoint
@@ -252,10 +262,11 @@ function profileParams(profileUrl: string): {
 //
 // What this is NOT:
 //
-//   • Profile-level `supported_versions` handling. That's pre-flight: if
-//     the business profile is rendered at a version we can't parse,
-//     `supported_versions[<our pick>]` lets us re-fetch a different
-//     rendering. That's handled before we get here.
+//   • Profile-level `supported_versions` handling. That's pre-flight: when
+//     the top-level profile's `ucp.version` is outside our range,
+//     `fetchCompatibleBusinessProfile` (profile.ts) re-fetches the most
+//     recent in-range rendering before we get here. The `profile` passed
+//     in is already the rendering we negotiate against.
 //
 //   • Endpoint validation. `services[cap][n]` already passed
 //     `businessProfileSchema`, which rejects mcp/rest entries without
@@ -363,9 +374,4 @@ export function negotiateService(options: NegotiateOptions): NegotiatedService {
     transport: candidate.transport,
     entry: candidate,
   }
-}
-
-function isVersionInRange(version: string | undefined, range: AgentRange): boolean {
-  if (version === undefined) return false
-  return version >= range.min && version <= range.max
 }

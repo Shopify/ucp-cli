@@ -42,8 +42,18 @@ export const ErrorCodes = {
   PROFILE_INVALID_JSON: 'PROFILE_INVALID_JSON',
   /** Business profile body parsed as JSON but failed schema validation. */
   PROFILE_SCHEMA_INVALID: 'PROFILE_SCHEMA_INVALID',
-  /** Business + CLI protocol ranges don't intersect. */
+  /**
+   * Business + CLI protocol ranges don't intersect: neither the top-level
+   * profile's `ucp.version` nor any `supported_versions` key is in range, or
+   * the selected rendering has no service entry in range.
+   */
   PROTOCOL_VERSION_INCOMPATIBLE: 'PROTOCOL_VERSION_INCOMPATIBLE',
+  /**
+   * A `supported_versions` document declares a different `ucp.version` than
+   * the key that linked to it. The spec says the platform MUST NOT use such a
+   * document, so discovery stops here instead of negotiating against it.
+   */
+  PROFILE_VERSION_MISMATCH: 'PROFILE_VERSION_MISMATCH',
   /** Business profile parses cleanly but does not advertise the requested capability. */
   CAPABILITY_NOT_OFFERED: 'CAPABILITY_NOT_OFFERED',
   /** Business negotiated a capability but did not expose the requested operation/tool. */
