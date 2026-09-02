@@ -135,6 +135,9 @@ export function localAgentProfileBody(): PlatformProfile {
             schema: `${spec}/schemas/shopping/order.json`,
           },
         ],
+        // Spec URLs for the Shopify extensions are the ones Shopify advertises in
+        // its published agent profile and in live storefront profiles
+        // (`.../catalog/storefront-catalog`, not the `-extension` doc pages).
         'dev.shopify.catalog': [
           {
             version: __PROTOCOL_MAX__,
