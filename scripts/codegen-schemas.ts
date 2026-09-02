@@ -52,10 +52,26 @@ type Manifest = {
 
 type JsonNode = unknown
 
+// `def` is the `$defs` key inside the spec's profile.json (renamed from
+// `*_profile` to `*_schema` in 2026-08-25); `out` is the generated filename,
+// kept stable so importers never churn when the spec renames its internals.
 const BRANCHES = [
-  { def: 'platform_profile', export: 'platformProfileSchema', type: 'PlatformProfile' },
-  { def: 'business_profile', export: 'businessProfileSchema', type: 'BusinessProfile' },
+  {
+    def: 'platform_schema',
+    out: 'platform_profile',
+    export: 'platformProfileSchema',
+    type: 'PlatformProfile',
+  },
+  {
+    def: 'business_schema',
+    out: 'business_profile',
+    export: 'businessProfileSchema',
+    type: 'BusinessProfile',
+  },
 ] as const
+
+/** Recursive `$requestConstraints` grammar; stubbed in the resolver (see below). */
+const CONSTRAINT_EXPRESSION_RE = /\/common\/types\/constraint_expression\.json$/
 
 main().catch((err) => {
   console.error('codegen-schemas failed:', err)
@@ -69,7 +85,8 @@ async function main() {
   // for staging, air-gapped mirrors, or local spec preview.
   const specBaseUrl = (process.env.UCP_SPEC_BASE_URL ?? pkg.ucp.specBaseUrl).replace(/\/$/, '')
 
-  const entryUrl = `${specBaseUrl}/${specVersion}/schemas/discovery/profile.json`
+  // 2026-08-25 moved the profile schema from `schemas/discovery/` to `schemas/`.
+  const entryUrl = `${specBaseUrl}/${specVersion}/schemas/profile.json`
 
   console.log(`▸ spec version: ${specVersion}`)
   console.log(`▸ spec base:    ${specBaseUrl}`)
@@ -87,6 +104,14 @@ async function main() {
         order: 1,
         canRead: /^https?:/i,
         async read(file: { url: string }) {
+          // `$requestConstraints` (2026-08-25) is a genuinely recursive schema
+          // (constraint_expression -> and/or -> constraint_expression). It is
+          // only reachable through the response_* defs, which we never emit,
+          // so serve an open stub instead of relaxing `circular: false` for
+          // the whole tree.
+          if (CONSTRAINT_EXPRESSION_RE.test(file.url)) {
+            return JSON.stringify({ type: 'object', additionalProperties: true })
+          }
           return await fetchText(file.url)
         },
       },
@@ -113,9 +138,9 @@ async function main() {
       name: branch.export,
       type: branch.type,
     })
-    const out = resolve(OUT_DIR, `${branch.def}.zod.ts`)
+    const out = resolve(OUT_DIR, `${branch.out}.zod.ts`)
     await writeFile(out, `${banner(entryUrl, specVersion, transformsApplied)}\n${body}\n`)
-    console.log(`✓ ${branch.def} → ${out} (${body.length.toLocaleString()} bytes)`)
+    console.log(`✓ ${branch.out} → ${out} (${body.length.toLocaleString()} bytes)`)
   }
 }
 
