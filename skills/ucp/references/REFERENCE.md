@@ -35,6 +35,8 @@ Branch on `code` first; CTAs (when present) carry recovery suggestions.
 | `OPERATION_NOT_OFFERED` | Merchant doesn't expose this operation | `ucp discover --business <url>` to see what's offered |
 | `INVALID_INPUT` | CLI-side parse/validation error (bad JSON, missing required positional, malformed URL) | Check the message; usually self-explanatory |
 | `PROFILE_FETCH_FAILED` | Merchant doesn't speak UCP (or `.well-known/ucp` is unreachable) | Surface to buyer; offer non-UCP fallback (other tools, navigation, alternate merchants with consent) |
+| `PROTOCOL_VERSION_INCOMPATIBLE` | Merchant's `/.well-known/ucp` version and every `supported_versions` entry fall outside this CLI's range (see `context.supportedVersions`) | Upgrade the CLI (`npm i -g @shopify/ucp-cli@latest`); if already current, the merchant is ahead of the spec release this CLI ships |
+| `PROFILE_VERSION_MISMATCH` | A `supported_versions` document declares a different `ucp.version` than the key linking to it; spec forbids using it | Merchant-side bug; surface to buyer and treat like `PROFILE_FETCH_FAILED` |
 | `PROFILE_NOT_FOUND` | No active agent profile | `ucp profile init --name <name>` (see `references/SETUP.md`) |
 | `AUTH_REQUIRED` | Merchant requires authentication (HTTP 401) | This CLI doesn't implement merchant-specific auth (JWT, OAuth, API key). Handoff using the best prior URL: checkout/cart `continue_url`, then `variant.checkout_url`, then variant/product `url`, then `seller.url`, then `--business` URL or `https://<seller.domain>`. |
 | `INSUFFICIENT_PERMISSIONS` | Authenticated but lacks required scope (HTTP 403) | Same recovery as `AUTH_REQUIRED` — handoff using the same URL priority. |

@@ -52,6 +52,11 @@ interface MockFetchOpts {
   profileCacheControl?: string
   /** Body returned for the JSON-RPC POST (defaults to SAMPLE_TOOLS_LIST). */
   toolsList?: object
+  /**
+   * Bodies served at `/.well-known/ucp/<version>` (the `supported_versions`
+   * leaves), keyed by version. Unlisted versions 404.
+   */
+  versionedProfiles?: Record<string, object>
 }
 
 function mockFetch(opts: MockFetchOpts = {}): {
@@ -69,6 +74,15 @@ function mockFetch(opts: MockFetchOpts = {}): {
           'content-type': 'application/json',
           'cache-control': opts.profileCacheControl ?? 'max-age=300',
         },
+      })
+    }
+    const versioned = /\/\.well-known\/ucp\/([^/]+)$/.exec(u)
+    if (versioned !== null) {
+      const body = opts.versionedProfiles?.[versioned[1] as string]
+      if (body === undefined) return new Response('not found', { status: 404 })
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json', 'cache-control': 'max-age=300' },
       })
     }
     const requestBody =
@@ -311,5 +325,176 @@ describe('discover — error propagation', () => {
     const entries = await readdir(toolsDir)
     expect(entries).toHaveLength(1)
     expect(entries[0]).toMatch(/^[a-f0-9]{64}\.json$/)
+  })
+})
+
+// ─── supported_versions fallback ────────────────────────────────────────
+//
+// Spec "Protocol Version": when `/.well-known/ucp` is rendered at a version
+// outside our range, pick the most recent in-range `supported_versions` key,
+// fetch its document, and verify the document's `ucp.version` matches the key.
+
+describe('discover — supported_versions fallback', () => {
+  let cacheDir: string
+
+  beforeEach(async () => {
+    cacheDir = await mkdtemp(join(tmpdir(), 'ucp-discover-sv-'))
+  })
+
+  afterEach(async () => {
+    await rm(cacheDir, { recursive: true, force: true })
+  })
+
+  const FUTURE = '2027-01-01'
+  /** Most recent version inside RANGE; the rendering the fallback must select. */
+  const LEAF = RANGE.max
+  const LEAF_URL = `${BUSINESS_URL}/.well-known/ucp/${LEAF}`
+
+  /** Top-level profile rendered one release ahead of RANGE.max. */
+  const AHEAD_PROFILE = {
+    ucp: {
+      version: FUTURE,
+      supported_versions: {
+        [LEAF]: LEAF_URL,
+        '2026-01-23': `${BUSINESS_URL}/.well-known/ucp/2026-01-23`,
+      },
+      services: {
+        'dev.ucp.shopping': [{ version: FUTURE, transport: 'mcp', endpoint: MCP_ENDPOINT }],
+      },
+      payment_handlers: {},
+    },
+  }
+
+  it('uses the most recent in-range supported_versions rendering when the top-level version is ahead of the agent range', async () => {
+    const { fetch, calls } = mockFetch({
+      profile: AHEAD_PROFILE,
+      versionedProfiles: {
+        [LEAF]: SAMPLE_PROFILE,
+        '2026-01-23': { ...SAMPLE_PROFILE, ucp: { ...SAMPLE_PROFILE.ucp, version: '2026-01-23' } },
+      },
+    })
+    const result = await discover(BUSINESS_URL, { cacheDir, agentRange: RANGE, fetch })
+
+    expect(result.profile.ucp.version).toBe(LEAF)
+    expect(result.negotiated['dev.ucp.shopping']?.version).toBe(LEAF)
+    expect(result.negotiated['dev.ucp.shopping']?.endpoint).toBe(MCP_ENDPOINT)
+
+    const gets = calls.filter((c) => c.method === 'GET').map((c) => c.url)
+    expect(gets).toEqual([`${BUSINESS_URL}/.well-known/ucp`, LEAF_URL])
+  })
+
+  it('does not consult supported_versions when the top-level version is already in range', async () => {
+    const profile = {
+      ...SAMPLE_PROFILE,
+      ucp: { ...SAMPLE_PROFILE.ucp, supported_versions: { '2026-01-23': LEAF_URL } },
+    }
+    const { fetch, calls } = mockFetch({ profile })
+    await discover(BUSINESS_URL, { cacheDir, agentRange: RANGE, fetch })
+
+    const gets = calls.filter((c) => c.method === 'GET').map((c) => c.url)
+    expect(gets).toEqual([`${BUSINESS_URL}/.well-known/ucp`])
+  })
+
+  it('caches the versioned rendering separately from the top-level document', async () => {
+    const { fetch, calls } = mockFetch({
+      profile: AHEAD_PROFILE,
+      versionedProfiles: { [LEAF]: SAMPLE_PROFILE },
+    })
+    await discover(BUSINESS_URL, { cacheDir, agentRange: RANGE, fetch })
+    const firstPass = calls.length
+
+    const top = JSON.parse(
+      await readFile(join(cacheDir, 'businesses', 'shop.example.invalid.json'), 'utf8'),
+    ) as { body: { ucp: { version: string } } }
+    const leaf = JSON.parse(
+      await readFile(join(cacheDir, 'businesses', LEAF, 'shop.example.invalid.json'), 'utf8'),
+    ) as { body: { ucp: { version: string } } }
+    expect(top.body.ucp.version).toBe(FUTURE)
+    expect(leaf.body.ucp.version).toBe(LEAF)
+
+    await discover(BUSINESS_URL, { cacheDir, agentRange: RANGE, fetch })
+    expect(calls.length).toBe(firstPass)
+  })
+
+  it('throws PROTOCOL_VERSION_INCOMPATIBLE listing supported_versions when nothing is in range', async () => {
+    const profile = {
+      ...AHEAD_PROFILE,
+      ucp: { ...AHEAD_PROFILE.ucp, supported_versions: { '2026-12-01': LEAF_URL } },
+    }
+    const { fetch } = mockFetch({ profile })
+    await expect(
+      discover(BUSINESS_URL, { cacheDir, agentRange: RANGE, fetch }),
+    ).rejects.toMatchObject({
+      code: 'PROTOCOL_VERSION_INCOMPATIBLE',
+      layer: 'transport',
+      context: { version: FUTURE, supportedVersions: ['2026-12-01'] },
+    })
+  })
+
+  it('throws PROTOCOL_VERSION_INCOMPATIBLE when the top-level version is ahead and supported_versions is absent', async () => {
+    const { supported_versions: _omit, ...ucp } = AHEAD_PROFILE.ucp
+    const { fetch } = mockFetch({ profile: { ucp } })
+    await expect(
+      discover(BUSINESS_URL, { cacheDir, agentRange: RANGE, fetch }),
+    ).rejects.toMatchObject({
+      code: 'PROTOCOL_VERSION_INCOMPATIBLE',
+      context: { supportedVersions: [] },
+    })
+  })
+
+  it('refuses a versioned rendering whose ucp.version does not match its supported_versions key', async () => {
+    const { fetch } = mockFetch({
+      profile: AHEAD_PROFILE,
+      versionedProfiles: {
+        [LEAF]: { ...SAMPLE_PROFILE, ucp: { ...SAMPLE_PROFILE.ucp, version: RANGE.min } },
+      },
+    })
+    await expect(
+      discover(BUSINESS_URL, { cacheDir, agentRange: RANGE, fetch }),
+    ).rejects.toMatchObject({
+      code: 'PROFILE_VERSION_MISMATCH',
+      layer: 'transport',
+      context: { expected: LEAF, actual: RANGE.min, url: LEAF_URL },
+    })
+  })
+
+  it('reads supported_versions even when the top-level document no longer fits the full profile schema', async () => {
+    // A future release could reshape the profile envelope. The fallback must
+    // still be reachable, otherwise it cannot do the one job it exists for.
+    const profile = { ...AHEAD_PROFILE, ucp: { ...AHEAD_PROFILE.ucp, services: 'reshaped' } }
+    const { fetch } = mockFetch({ profile, versionedProfiles: { [LEAF]: SAMPLE_PROFILE } })
+    const result = await discover(BUSINESS_URL, { cacheDir, agentRange: RANGE, fetch })
+    expect(result.negotiated['dev.ucp.shopping']?.version).toBe(LEAF)
+  })
+
+  it('still validates an in-range top-level document against the full profile schema', async () => {
+    const profile = { ...SAMPLE_PROFILE, ucp: { ...SAMPLE_PROFILE.ucp, services: 'reshaped' } }
+    const { fetch } = mockFetch({ profile })
+    await expect(
+      discover(BUSINESS_URL, { cacheDir, agentRange: RANGE, fetch }),
+    ).rejects.toMatchObject({ code: 'PROFILE_SCHEMA_INVALID', layer: 'transport' })
+  })
+
+  it('surfaces a failed versioned fetch as PROFILE_FETCH_FAILED', async () => {
+    const { fetch } = mockFetch({ profile: AHEAD_PROFILE, versionedProfiles: {} })
+    await expect(
+      discover(BUSINESS_URL, { cacheDir, agentRange: RANGE, fetch }),
+    ).rejects.toMatchObject({ code: 'PROFILE_FETCH_FAILED' })
+  })
+
+  it('rejects a non-https supported_versions URL as PROFILE_SCHEMA_INVALID', async () => {
+    const profile = {
+      ...AHEAD_PROFILE,
+      ucp: {
+        ...AHEAD_PROFILE.ucp,
+        supported_versions: {
+          [LEAF]: `http://shop.example.invalid/.well-known/ucp/${LEAF}`,
+        },
+      },
+    }
+    const { fetch } = mockFetch({ profile })
+    await expect(
+      discover(BUSINESS_URL, { cacheDir, agentRange: RANGE, fetch }),
+    ).rejects.toMatchObject({ code: 'PROFILE_SCHEMA_INVALID', layer: 'transport' })
   })
 })
