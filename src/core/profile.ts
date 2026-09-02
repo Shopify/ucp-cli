@@ -65,6 +65,10 @@ export const DEFAULT_CATALOG_URL: string = __DEFAULT_CATALOG_URL__
  * fresh object so callers can mutate safely.
  */
 export function localAgentProfileBody(): PlatformProfile {
+  // Mirrors the agent profile Shopify publishes for this spec release
+  // (`DEFAULT_PROFILE_URL`), minus capabilities this CLI does not drive.
+  const spec = `https://ucp.dev/${__SPEC_VERSION__}`
+  const shopifySchemas = `https://shopify.dev/ucp/schemas/${__SPEC_VERSION__}`
   return {
     ucp: {
       version: __PROTOCOL_MAX__,
@@ -72,10 +76,10 @@ export function localAgentProfileBody(): PlatformProfile {
       services: {
         'dev.ucp.shopping': [
           {
-            version: '2026-01-23',
-            spec: 'https://ucp.dev/2026-04-08/specification/overview',
+            version: __PROTOCOL_MAX__,
+            spec: `${spec}/specification/overview`,
             transport: 'mcp',
-            schema: 'https://ucp.dev/2026-04-08/services/shopping/mcp.openrpc.json',
+            schema: `${spec}/services/shopping/mcp.openrpc.json`,
           },
         ],
       },
@@ -83,74 +87,76 @@ export function localAgentProfileBody(): PlatformProfile {
         'dev.ucp.shopping.checkout': [
           {
             version: __PROTOCOL_MAX__,
-            spec: 'https://ucp.dev/2026-04-08/specification/checkout',
-            schema: 'https://ucp.dev/2026-04-08/schemas/shopping/checkout.json',
+            spec: `${spec}/specification/checkout`,
+            schema: `${spec}/schemas/shopping/checkout.json`,
           },
         ],
         'dev.ucp.shopping.cart': [
           {
             version: __PROTOCOL_MAX__,
-            spec: 'https://ucp.dev/2026-04-08/specification/cart',
-            schema: 'https://ucp.dev/2026-04-08/schemas/shopping/cart.json',
+            spec: `${spec}/specification/cart`,
+            schema: `${spec}/schemas/shopping/cart.json`,
           },
         ],
         'dev.ucp.shopping.fulfillment': [
           {
             version: __PROTOCOL_MAX__,
-            spec: 'https://ucp.dev/2026-04-08/specification/fulfillment',
-            schema: 'https://ucp.dev/2026-04-08/schemas/shopping/fulfillment.json',
+            spec: `${spec}/specification/fulfillment`,
+            schema: `${spec}/schemas/shopping/fulfillment.json`,
             extends: ['dev.ucp.shopping.checkout', 'dev.ucp.shopping.cart'],
           },
         ],
         'dev.ucp.shopping.discount': [
           {
             version: __PROTOCOL_MAX__,
-            spec: 'https://ucp.dev/2026-04-08/specification/discount',
-            schema: 'https://ucp.dev/2026-04-08/schemas/shopping/discount.json',
+            spec: `${spec}/specification/discount`,
+            schema: `${spec}/schemas/shopping/discount.json`,
             extends: ['dev.ucp.shopping.checkout', 'dev.ucp.shopping.cart'],
           },
         ],
         'dev.ucp.shopping.catalog.search': [
           {
             version: __PROTOCOL_MAX__,
-            spec: 'https://ucp.dev/2026-04-08/specification/catalog',
-            schema: 'https://ucp.dev/2026-04-08/schemas/shopping/catalog_search.json',
+            spec: `${spec}/specification/catalog/search`,
+            schema: `${spec}/schemas/shopping/catalog_search.json`,
           },
         ],
         'dev.ucp.shopping.catalog.lookup': [
           {
             version: __PROTOCOL_MAX__,
-            spec: 'https://ucp.dev/2026-04-08/specification/catalog',
-            schema: 'https://ucp.dev/2026-04-08/schemas/shopping/catalog_lookup.json',
+            spec: `${spec}/specification/catalog/lookup`,
+            schema: `${spec}/schemas/shopping/catalog_lookup.json`,
           },
         ],
         'dev.ucp.shopping.order': [
           {
             version: __PROTOCOL_MAX__,
-            spec: 'https://ucp.dev/2026-04-08/specs/shopping/order',
-            schema: 'https://ucp.dev/2026-04-08/schemas/shopping/order.json',
+            spec: `${spec}/specification/order`,
+            schema: `${spec}/schemas/shopping/order.json`,
           },
         ],
         'dev.shopify.catalog': [
           {
             version: __PROTOCOL_MAX__,
-            spec: 'https://shopify.dev/docs/agents/catalog/storefront-catalog-extension',
-            schema: 'https://shopify.dev/ucp/schemas/2026-04-08/shopify_catalog.json',
+            spec: 'https://shopify.dev/docs/agents/catalog/storefront-catalog',
+            schema: `${shopifySchemas}/shopify_catalog.json`,
             extends: ['dev.ucp.shopping.catalog.search', 'dev.ucp.shopping.catalog.lookup'],
           },
         ],
         'dev.shopify.catalog.global': [
           {
             version: __PROTOCOL_MAX__,
-            spec: 'https://shopify.dev/docs/agents/catalog/global-catalog-extension',
-            schema: 'https://shopify.dev/ucp/schemas/2026-04-08/shopify_catalog_global.json',
+            spec: 'https://shopify.dev/docs/agents/catalog/global-catalog',
+            schema: `${shopifySchemas}/shopify_catalog_global.json`,
             extends: ['dev.ucp.shopping.catalog.search', 'dev.ucp.shopping.catalog.lookup'],
           },
         ],
       },
       payment_handlers: {},
     },
-    signing_keys: [],
+    // JWK Set (`keys[]`, 2026-08-25; formerly `signing_keys[]`). Empty until
+    // request signing lands — see profile-store.ts header.
+    keys: [],
   }
 }
 

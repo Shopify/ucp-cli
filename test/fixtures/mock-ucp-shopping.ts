@@ -478,7 +478,7 @@ export async function startMockUcpShopping(): Promise<MockUcpShopping> {
   // Profile served at /.well-known/ucp — must pass parsePlatformProfile zod validation.
   const profile = {
     ucp: {
-      version: '2026-04-08',
+      version: '2026-08-25',
       status: 'success',
       services: {
         'dev.ucp.shopping': [
@@ -493,7 +493,7 @@ export async function startMockUcpShopping(): Promise<MockUcpShopping> {
       },
       payment_handlers: {},
     },
-    signing_keys: [],
+    keys: [],
   }
 
   mock.setRoute('GET', '/.well-known/ucp', (_req, res) => {

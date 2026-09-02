@@ -20,7 +20,7 @@ import type { ProfileCliDependencies } from './profile.js'
 
 const META: ProfileMeta = {
   created_at: '2026-05-01T00:00:00.000Z',
-  protocol_versions: { min: '2026-01-23', max: '2026-04-08' },
+  protocol_versions: { min: '2026-01-23', max: '2026-08-25' },
   defaults: { catalog: 'https://catalog.shopify.com/api/ucp/mcp' },
   profile_url: 'https://example.com/.well-known/ucp',
 }

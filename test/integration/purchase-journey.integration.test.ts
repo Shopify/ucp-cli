@@ -62,12 +62,12 @@ async function setupJourney(): Promise<Journey> {
     join(profileDir, 'profile.json'),
     JSON.stringify({
       ucp: {
-        version: '2026-04-08',
+        version: '2026-08-25',
         status: 'success',
         services: {},
         payment_handlers: {},
       },
-      signing_keys: [],
+      keys: [],
     }),
     'utf-8',
   )

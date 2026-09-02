@@ -10,15 +10,15 @@ import { resolveSession } from './session.js'
 
 const SAMPLE_BODY: PlatformProfile = {
   ucp: {
-    version: '2026-04-08',
+    version: '2026-08-25',
     status: 'success',
     services: {},
     payment_handlers: {},
   },
-  // signing_keys is the published JWK material a counterparty would use to
+  // `keys` is the published JWK Set a counterparty would use to
   // verify signatures. We carry one so fixtures look realistic, but v0.1 does
   // not exercise signing — see session.ts header.
-  signing_keys: [
+  keys: [
     {
       kid: 'agent-key-1',
       kty: 'EC',
@@ -33,7 +33,7 @@ const SAMPLE_BODY: PlatformProfile = {
 const SAMPLE_META = {
   created_at: '2026-05-05T12:00:00Z',
   profile_url: 'https://mybot.example.com/.well-known/ucp',
-  protocol_versions: { min: '2026-01-11', max: '2026-04-08' },
+  protocol_versions: { min: '2026-01-11', max: '2026-08-25' },
 }
 
 async function seedUserProfile(homeDir: string, name = 'prod'): Promise<void> {

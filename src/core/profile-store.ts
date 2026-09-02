@@ -14,8 +14,9 @@
 // Local key material is intentionally absent: the spec mandates RFC 9421 + ECDSA
 // (P-256) over JWK keys for both REST and MCP transports, and we add that
 // in v0.1.1 once the implementation has its own conformance harness against
-// the RFC's canonical vectors. Until then `signing_keys[]` in user-authored
-// profile bodies is allowed but unused on the client side.
+// the RFC's canonical vectors. Until then `keys[]` (the profile's JWK Set;
+// `signing_keys[]` before spec 2026-08-25) in user-authored profile bodies is
+// allowed but unused on the client side.
 //
 // CRUD primitives only — user-facing verbs (`init`, `list`, `show`, `publish`,
 // `use`) are layered on top.

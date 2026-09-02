@@ -12,13 +12,13 @@ import type { PlatformProfile } from './core/profile.js'
 import type { ActiveSession, UserProfile } from './core/profile-store.js'
 
 const BLANK_BODY: PlatformProfile = {
-  ucp: { version: '2026-04-08', status: 'success', services: {}, payment_handlers: {} },
-  signing_keys: [],
+  ucp: { version: '2026-08-25', status: 'success', services: {}, payment_handlers: {} },
+  keys: [],
 }
 
 const BLANK_META = {
   created_at: '2026-05-01T00:00:00.000Z',
-  protocol_versions: { min: '2026-01-23', max: '2026-04-08' },
+  protocol_versions: { min: '2026-01-23', max: '2026-08-25' },
 }
 
 export function userProfile(name: string, overrides: Partial<UserProfile> = {}): UserProfile {

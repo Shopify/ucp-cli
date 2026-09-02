@@ -30,6 +30,10 @@ export function buildDefines() {
     // requiring `ucp profile init --catalog`. Runtime source of truth is the
     // synthetic profile; this define is the build-time provenance.
     __DEFAULT_CATALOG_URL__: JSON.stringify(pkg.ucp.default_catalog_url),
+    // Spec release the generated schemas and the local agent-profile template
+    // are pinned to. Spec/schema URLs in the template are built from this so a
+    // version bump is a package.json edit, not a search-and-replace.
+    __SPEC_VERSION__: JSON.stringify(pkg.ucp.specVersion),
     __PROTOCOL_MIN__: JSON.stringify(pkg.ucp.protocolMin),
     __PROTOCOL_MAX__: JSON.stringify(pkg.ucp.protocolMax),
     // Major-version floor parsed from engines. npm only *warns* on engines at

@@ -33,7 +33,7 @@ import { applyView, resolveView } from './view.js'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const VIEWS = resolve(HERE, '../../skills/ucp/views')
 
-const UCP = { version: '2026-04-08', status: 'ok' }
+const UCP = { version: '2026-08-25', status: 'ok' }
 
 describe('skills/ucp/views/*.jmespath — package-local view artifacts', () => {
   describe('catalog.compact.jmespath', () => {

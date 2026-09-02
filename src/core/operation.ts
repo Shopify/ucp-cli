@@ -522,12 +522,13 @@ function isAllowedUnknownExtensionKey(path: string, key: string): boolean {
 
 function isReverseDnsKey(key: string): boolean {
   // Mirrors UCP spec `reverse_domain_name` exactly
-  // (https://ucp.dev/2026-04-08/schemas/shopping/types/reverse_domain_name.json):
-  // first segment [a-z][a-z0-9]*, one or more `.segment` where later segments
-  // also allow `_`. Hyphens are not permitted by the spec; allowing them here
-  // would let invalid keys pass our pre-flight guard only to be rejected by
-  // the business's `propertyNames` validator at submission time.
-  return /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)+$/.test(key)
+  // (https://ucp.dev/2026-08-25/schemas/common/types/reverse_domain_name.json):
+  // first segment is letters/digits with optional interior hyphens (punycode
+  // TLDs), then one or more `.segment` that may start with a digit and may
+  // contain interior `-`/`_`. Anything looser would let invalid keys pass our
+  // pre-flight guard only to be rejected by the business's `propertyNames`
+  // validator at submission time.
+  return /^[a-z](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9_-]*[a-z0-9_])?)+$/.test(key)
 }
 
 function joinJsonPath(base: string, segment: string | number): string {

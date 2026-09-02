@@ -111,11 +111,11 @@ function makeMockFetch(responses: MockResponseInit[]): MockFetch {
 
 const SAMPLE_PROFILE: BusinessProfile = {
   ucp: {
-    version: '2026-04-08',
+    version: '2026-08-25',
     status: 'success',
     services: {
       'dev.ucp.shopping': [
-        { version: '2026-04-08', transport: 'rest', endpoint: 'https://shop.example.com/api/ucp' },
+        { version: '2026-08-25', transport: 'rest', endpoint: 'https://shop.example.com/api/ucp' },
       ],
     },
     payment_handlers: {},
@@ -142,13 +142,13 @@ describe('fetchBusinessProfile', () => {
       fetch: mock.fn,
     })
 
-    expect(profile.ucp.version).toBe('2026-04-08')
+    expect(profile.ucp.version).toBe('2026-08-25')
     expect(mock.calls[0]?.url).toBe('https://shop.example.com/.well-known/ucp')
 
     const cached = JSON.parse(
       await readFile(join(cacheDir, 'shop.example.com.json'), 'utf-8'),
     ) as CacheEntry<BusinessProfile>
-    expect(cached.body.ucp.version).toBe('2026-04-08')
+    expect(cached.body.ucp.version).toBe('2026-08-25')
   })
 
   it('throws PROFILE_FETCH_FAILED on HTTP 4xx (retryable=false) with layer=transport', async () => {
@@ -181,7 +181,7 @@ describe('fetchBusinessProfile', () => {
     // services.<key> must be an array; passing a number trips zod, not JSON.parse
     const mock = makeMockFetch([
       {
-        body: { ucp: { version: '2026-04-08', services: { 'dev.ucp.shopping': 42 } } },
+        body: { ucp: { version: '2026-08-25', services: { 'dev.ucp.shopping': 42 } } },
         headers: { 'cache-control': 'max-age=60' },
       },
     ])

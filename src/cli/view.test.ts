@@ -198,7 +198,7 @@ describe('applyView — envelope-level projection', () => {
     business: 'https://shop.example.com',
     endpoint: 'https://shop.example.com/api/ucp/mcp',
     transport: 'mcp+jsonrpc',
-    ucp: { version: '2026-04-08', status: 'ok' },
+    ucp: { version: '2026-08-25', status: 'ok' },
     result: {
       products: [
         { id: 'p1', title: 'Boots', price: 100 },
@@ -228,7 +228,7 @@ describe('applyView — envelope-level projection', () => {
     })
     const out = applyView(envelope, view)
     expect(out).toEqual({
-      ucp: { version: '2026-04-08', status: 'ok' },
+      ucp: { version: '2026-08-25', status: 'ok' },
       result: ['Boots', 'Hat'],
     })
   })

@@ -368,12 +368,12 @@ describe('smoke: mock business fixture', () => {
       mock.setRoute('GET', '/.well-known/ucp', (_req, res) => {
         res.statusCode = 200
         res.setHeader('content-type', 'application/json')
-        res.end(JSON.stringify({ schema_version: '2026-04-08', services: {} }))
+        res.end(JSON.stringify({ schema_version: '2026-08-25', services: {} }))
       })
       const response = await fetch(`${mock.url}/.well-known/ucp`)
       expect(response.status).toBe(200)
       const body = (await response.json()) as { schema_version: string }
-      expect(body.schema_version).toBe('2026-04-08')
+      expect(body.schema_version).toBe('2026-08-25')
     } finally {
       await mock.close()
     }

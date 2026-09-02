@@ -12,8 +12,8 @@ import { clearProxyEnv } from '../test-utils.js'
 import { runDoctor } from './doctor.js'
 
 const SAMPLE_BODY: PlatformProfile = {
-  ucp: { version: '2026-04-08', status: 'success', services: {}, payment_handlers: {} },
-  signing_keys: [],
+  ucp: { version: '2026-08-25', status: 'success', services: {}, payment_handlers: {} },
+  keys: [],
 }
 
 const SAMPLE_META = {
