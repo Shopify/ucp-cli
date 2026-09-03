@@ -21,18 +21,18 @@ import {
 
 const SAMPLE_BODY: PlatformProfile = {
   ucp: {
-    version: '2026-04-08',
+    version: '2026-08-25',
     status: 'success',
     services: {},
     payment_handlers: {},
   },
-  signing_keys: [],
+  keys: [],
 }
 
 const SAMPLE_META = {
   created_at: '2026-05-05T12:00:00Z',
   profile_url: 'https://mybot.example.com/.well-known/ucp',
-  protocol_versions: { min: '2026-01-11', max: '2026-04-08' },
+  protocol_versions: { min: '2026-01-11', max: '2026-08-25' },
 }
 
 describe('path helpers', () => {
@@ -102,7 +102,7 @@ describe('profile CRUD', () => {
     expect(await profileExists('prod', { homeDir })).toBe(true)
 
     const read = await readUserProfile('prod', { homeDir })
-    expect(read.body.ucp.version).toBe('2026-04-08')
+    expect(read.body.ucp.version).toBe('2026-08-25')
     expect(read.meta.profile_url).toBe('https://mybot.example.com/.well-known/ucp')
   })
 

@@ -40,7 +40,7 @@ describe('createUcpCli', () => {
         return {
           business: args[0],
           profile: {
-            ucp: { version: '2026-04-08', status: 'success', services: {}, payment_handlers: {} },
+            ucp: { version: '2026-08-25', status: 'success', services: {}, payment_handlers: {} },
           },
           negotiated: {},
         }
@@ -478,7 +478,7 @@ describe('createUcpCli — catalog fallback (meta.defaults.catalog)', () => {
           business: args[0] ?? '',
           profile: {
             ucp: {
-              version: '2026-04-08',
+              version: '2026-08-25',
               status: 'success' as const,
               services: {},
               payment_handlers: {},
@@ -487,7 +487,7 @@ describe('createUcpCli — catalog fallback (meta.defaults.catalog)', () => {
           negotiated: {
             'dev.ucp.shopping': {
               capability: 'dev.ucp.shopping',
-              version: '2026-04-08',
+              version: '2026-08-25',
               transport: 'mcp' as const,
               endpoint: args[0] ?? '',
               tools: {
@@ -682,12 +682,12 @@ describe('createUcpCli — extension-hint pipeline (negotiated → allowlist →
   // published at /.well-known/ucp).
   function discoveredWithExtension(extensions: string[]) {
     const capabilities: Record<string, unknown[]> = {}
-    for (const ext of extensions) capabilities[ext] = [{ version: '2026-04-08' }]
+    for (const ext of extensions) capabilities[ext] = [{ version: '2026-08-25' }]
     return {
       business: 'https://shop.example.com',
       profile: {
         ucp: {
-          version: '2026-04-08',
+          version: '2026-08-25',
           status: 'success' as const,
           services: {},
           payment_handlers: {},
@@ -779,7 +779,7 @@ describe('createUcpCli — --input-schema', () => {
         business: _args[0] ?? '',
         profile: {
           ucp: {
-            version: '2026-04-08',
+            version: '2026-08-25',
             status: 'success' as const,
             services: {},
             payment_handlers: {},
@@ -788,7 +788,7 @@ describe('createUcpCli — --input-schema', () => {
         negotiated: {
           'dev.ucp.shopping': {
             capability: 'dev.ucp.shopping',
-            version: '2026-04-08',
+            version: '2026-08-25',
             transport: 'mcp' as const,
             endpoint: 'https://shop.example.com/mcp',
             tools,
@@ -840,7 +840,7 @@ describe('createUcpCli — --input-schema', () => {
       endpoint: 'https://shop.example.com/mcp',
       result: {
         capability: 'dev.ucp.shopping',
-        version: '2026-04-08',
+        version: '2026-08-25',
         tool: {
           name: 'search_catalog',
           description: 'Search a catalog',
@@ -1376,7 +1376,7 @@ describe('createUcpCli — --view projection', () => {
       // Wire payload carries `ucp` per the UCP spec; hoistUcp lifts it to a
       // sibling of `result` before applyView runs.
       searchCatalog: async () => ({
-        ucp: { version: '2026-04-08', status: 'ok' },
+        ucp: { version: '2026-08-25', status: 'ok' },
         ...fixtureResult,
       }),
     })
@@ -1397,7 +1397,7 @@ describe('createUcpCli — --view projection', () => {
     // merged into the rendered payload by incur (proving the contract that
     // CTAs survive any envelope reshape).
     expect(body).toMatchObject({
-      ucp: { version: '2026-04-08', status: 'ok' },
+      ucp: { version: '2026-08-25', status: 'ok' },
       result: ['Boots', 'Hat'],
     })
     // Dispatch identity intentionally absent — the view didn't re-emit it.
@@ -1437,7 +1437,7 @@ describe('createUcpCli — --view projection', () => {
     const cli = createUcpCli({
       resolveSession: passthroughSession,
       searchCatalog: async () => ({
-        ucp: { version: '2026-04-08', status: 'ok' },
+        ucp: { version: '2026-08-25', status: 'ok' },
         products: [
           {
             title: 'Birdbath',
@@ -1468,7 +1468,7 @@ describe('createUcpCli — --view projection', () => {
     expect(exitCode).toBe(0)
     const body = JSON.parse(output)
     expect(body).toMatchObject({
-      ucp: { version: '2026-04-08', status: 'ok' },
+      ucp: { version: '2026-08-25', status: 'ok' },
       result: [
         {
           title: 'Birdbath',
@@ -1484,7 +1484,7 @@ describe('createUcpCli — --view projection', () => {
     const cli = createUcpCli({
       resolveSession: passthroughSession,
       createCart: async () => ({
-        ucp: { version: '2026-04-08', status: 'ok' },
+        ucp: { version: '2026-08-25', status: 'ok' },
         id: 'cart_1',
         currency: 'USD',
         line_items: [{ item: { id: 'v1' }, quantity: 1 }],
@@ -1506,7 +1506,7 @@ describe('createUcpCli — --view projection', () => {
     ])
     expect(exitCode).toBe(0)
     expect(JSON.parse(output)).toMatchObject({
-      ucp: { version: '2026-04-08', status: 'ok' },
+      ucp: { version: '2026-08-25', status: 'ok' },
       result: {
         id: 'cart_1',
         items: 1,
@@ -1597,12 +1597,12 @@ describe('createUcpCli — --view projection', () => {
         ({
           business: _args[0],
           profile: {
-            ucp: { version: '2026-04-08', status: 'success', services: {}, payment_handlers: {} },
+            ucp: { version: '2026-08-25', status: 'success', services: {}, payment_handlers: {} },
           },
           negotiated: {
             'dev.ucp.shopping': {
               capability: 'dev.ucp.shopping',
-              version: '2026-04-08',
+              version: '2026-08-25',
               transport: 'mcp',
               endpoint: 'https://shop.example.com/mcp',
               tools: {
@@ -1715,12 +1715,12 @@ describe('createUcpCli — --view projection', () => {
         ({
           business: _args[0] ?? '',
           profile: {
-            ucp: { version: '2026-04-08', status: 'success', services: {}, payment_handlers: {} },
+            ucp: { version: '2026-08-25', status: 'success', services: {}, payment_handlers: {} },
           },
           negotiated: {
             'dev.ucp.shopping': {
               capability: 'dev.ucp.shopping',
-              version: '2026-04-08',
+              version: '2026-08-25',
               transport: 'mcp',
               endpoint: 'https://shop.example.com/mcp',
               tools: {

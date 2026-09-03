@@ -16,13 +16,13 @@ import type { AgentRange } from './profile.js'
 
 const BUSINESS_URL = 'https://shop.example.invalid'
 const MCP_ENDPOINT = 'https://shop.example.invalid/ucp/mcp'
-const RANGE: AgentRange = { min: '2026-01-23', max: '2026-04-08' }
+const RANGE: AgentRange = { min: '2026-01-23', max: '2026-08-25' }
 
 const SAMPLE_PROFILE = {
   ucp: {
-    version: '2026-04-08',
+    version: '2026-08-25',
     services: {
-      'dev.ucp.shopping': [{ version: '2026-04-08', transport: 'mcp', endpoint: MCP_ENDPOINT }],
+      'dev.ucp.shopping': [{ version: '2026-08-25', transport: 'mcp', endpoint: MCP_ENDPOINT }],
     },
     payment_handlers: {},
   },
@@ -105,11 +105,11 @@ describe('discover — composition', () => {
     const result = await discover(BUSINESS_URL, { cacheDir, agentRange: RANGE, fetch })
 
     expect(result.business).toBe('https://shop.example.invalid')
-    expect(result.profile.ucp.version).toBe('2026-04-08')
+    expect(result.profile.ucp.version).toBe('2026-08-25')
 
     const shopping = result.negotiated['dev.ucp.shopping']
     if (shopping === undefined) throw new Error('expected shopping capability')
-    expect(shopping.version).toBe('2026-04-08')
+    expect(shopping.version).toBe('2026-08-25')
     expect(shopping.transport).toBe('mcp')
     expect(shopping.endpoint).toBe(MCP_ENDPOINT)
     expect(Object.keys(shopping.tools).sort()).toEqual(['get_product', 'search_catalog'])
@@ -134,12 +134,12 @@ describe('discover — composition', () => {
   it('respects an explicit capability filter', async () => {
     const profile = {
       ucp: {
-        version: '2026-04-08',
+        version: '2026-08-25',
         services: {
-          'dev.ucp.shopping': [{ version: '2026-04-08', transport: 'mcp', endpoint: MCP_ENDPOINT }],
+          'dev.ucp.shopping': [{ version: '2026-08-25', transport: 'mcp', endpoint: MCP_ENDPOINT }],
           'dev.ucp.checkout': [
             {
-              version: '2026-04-08',
+              version: '2026-08-25',
               transport: 'mcp',
               endpoint: 'https://shop.example.invalid/ucp/checkout-mcp',
             },
@@ -231,9 +231,9 @@ describe('discover — error propagation', () => {
   it('throws SERVICE_ENDPOINT_MISSING when the negotiated entry has no endpoint', async () => {
     const profile = {
       ucp: {
-        version: '2026-04-08',
+        version: '2026-08-25',
         services: {
-          'dev.ucp.shopping': [{ version: '2026-04-08', transport: 'mcp' }],
+          'dev.ucp.shopping': [{ version: '2026-08-25', transport: 'mcp' }],
         },
         payment_handlers: {},
       },
@@ -293,9 +293,9 @@ describe('discover — error propagation', () => {
     const unsafeCapability = '../bad'
     const profile = {
       ucp: {
-        version: '2026-04-08',
+        version: '2026-08-25',
         services: {
-          [unsafeCapability]: [{ version: '2026-04-08', transport: 'mcp', endpoint: MCP_ENDPOINT }],
+          [unsafeCapability]: [{ version: '2026-08-25', transport: 'mcp', endpoint: MCP_ENDPOINT }],
         },
         payment_handlers: {},
       },

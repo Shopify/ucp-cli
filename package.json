@@ -87,11 +87,11 @@
     }
   },
   "ucp": {
-    "specVersion": "2026-04-08",
+    "specVersion": "2026-08-25",
     "specBaseUrl": "https://ucp.dev",
     "protocolMin": "2026-01-23",
-    "protocolMax": "2026-04-08",
-    "default_profile_url_template": "https://shopify.dev/ucp/agent-profiles/2026-04-08/valid-with-capabilities.json",
+    "protocolMax": "2026-08-25",
+    "default_profile_url_template": "https://shopify.dev/ucp/agent-profiles/2026-08-25/valid-with-capabilities.json",
     "default_catalog_url": "https://catalog.shopify.com"
   }
 }

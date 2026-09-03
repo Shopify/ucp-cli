@@ -17,13 +17,13 @@ import { setVerboseWriter } from './verbose.js'
 const BUSINESS_URL = 'https://shop.example.invalid'
 const MCP_ENDPOINT = 'https://shop.example.invalid/ucp/mcp'
 const PROFILE_URL = 'https://agent.example.com/.well-known/ucp'
-const RANGE: AgentRange = { min: '2026-01-23', max: '2026-04-08' }
+const RANGE: AgentRange = { min: '2026-01-23', max: '2026-08-25' }
 
 const PROFILE = {
   ucp: {
-    version: '2026-04-08',
+    version: '2026-08-25',
     services: {
-      'dev.ucp.shopping': [{ version: '2026-04-08', transport: 'mcp', endpoint: MCP_ENDPOINT }],
+      'dev.ucp.shopping': [{ version: '2026-08-25', transport: 'mcp', endpoint: MCP_ENDPOINT }],
     },
     payment_handlers: {},
   },
@@ -772,14 +772,14 @@ describe('unwrapMcpCallResult — structuredContent vs content[].text', () => {
   // leave the UCP envelope buried under `result.structuredContent.ucp` instead
   // of hoisted to envelope root.
   it('peels structuredContent when present (catalog shape)', () => {
-    const payload = { ucp: { version: '2026-04-08' }, products: [{ id: 'gid://shopify/p/1' }] }
+    const payload = { ucp: { version: '2026-08-25' }, products: [{ id: 'gid://shopify/p/1' }] }
     expect(unwrapMcpCallResult({ structuredContent: payload })).toEqual(payload)
   })
 
   // Storefront endpoints return the JSON-stringified envelope in content[].text.
   // This is the original code path; pinning so a regression doesn't go silent.
   it('parses content[].text when structuredContent is absent (storefront shape)', () => {
-    const payload = { ucp: { version: '2026-04-08' }, id: 'cart_123' }
+    const payload = { ucp: { version: '2026-08-25' }, id: 'cart_123' }
     const wire = { content: [{ type: 'text', text: JSON.stringify(payload) }] }
     expect(unwrapMcpCallResult(wire)).toEqual(payload)
   })

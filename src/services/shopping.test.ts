@@ -43,13 +43,13 @@ import {
 const BUSINESS_URL = 'https://shop.example.invalid'
 const MCP_ENDPOINT = 'https://shop.example.invalid/ucp/mcp'
 const PROFILE_URL = 'https://agent.example.com/.well-known/ucp'
-const RANGE: AgentRange = { min: '2026-01-23', max: '2026-04-08' }
+const RANGE: AgentRange = { min: '2026-01-23', max: '2026-08-25' }
 
 const PROFILE = {
   ucp: {
-    version: '2026-04-08',
+    version: '2026-08-25',
     services: {
-      'dev.ucp.shopping': [{ version: '2026-04-08', transport: 'mcp', endpoint: MCP_ENDPOINT }],
+      'dev.ucp.shopping': [{ version: '2026-08-25', transport: 'mcp', endpoint: MCP_ENDPOINT }],
     },
     payment_handlers: {},
   },
