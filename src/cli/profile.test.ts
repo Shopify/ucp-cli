@@ -1,14 +1,14 @@
 // Profile CLI command-tree tests.
 //
-// Pins the local profile UX: small command surface, implicit managed init,
-// HTTPS-only explicit profile URLs, default catalog inheritance, and the
-// mocked managed upload seam. Hosting service behavior lives outside this
-// test suite.
+// Pins the local profile UX: small command surface, HTTPS-only explicit
+// profile URLs, and default catalog inheritance. There is no upload verb —
+// ucp-cli never writes to a profile URL, so hosting is entirely the user's.
 
 import { describe, expect, it } from 'vitest'
 
 import { createUcpCli } from '../cli.js'
 import type { ProfileMeta } from '../core/profile-store.js'
+import { LATEST, RELEASES, SUPPORTED_VERSIONS } from '../core/releases.js'
 import {
   captureSaves,
   captureWrites,
@@ -20,7 +20,6 @@ import type { ProfileCliDependencies } from './profile.js'
 
 const META: ProfileMeta = {
   created_at: '2026-05-01T00:00:00.000Z',
-  protocol_versions: { min: '2026-01-23', max: '2026-08-25' },
   defaults: { catalog: 'https://catalog.shopify.com/api/ucp/mcp' },
   profile_url: 'https://example.com/.well-known/ucp',
 }
@@ -166,58 +165,103 @@ describe('ucp profile init', () => {
     expect(output).toMatch(/unexpected|argument|name/i)
   })
 
-  it('creates an implicit managed profile and accepts an empty upload seam result', async () => {
+  it('writes the release default URL when no --profile-url is given', async () => {
     const { saves, saveUserProfile } = captureSaves()
-    const uploads: string[] = []
-    const cli = makeCli({
-      saveUserProfile,
-      uploadProfile: async (input) => {
-        uploads.push(input.name)
-        return {}
-      },
-    })
+    const cli = makeCli({ saveUserProfile })
     const { output, exitCode } = await serveCli(cli, ['profile', 'init', '--name', 'fresh'])
     expect(exitCode).toBe(0)
-    expect(uploads).toEqual(['fresh'])
-    expect(saves[0]).toMatchObject({
-      name: 'fresh',
-      meta: {},
-    })
-    expect(saves[0]?.meta.profile_url).toBeUndefined()
+    // `profile_url` is ALWAYS written now — it is the whole of version
+    // selection, so leaving it undefined would put the version decision in an
+    // implicit session-resolution fallback instead of on disk where `doctor`
+    // and the user can see it.
+    expect(saves[0]?.meta.profile_url).toBe(RELEASES[LATEST].defaultAgentProfileUrl)
     expect(JSON.parse(output)).toMatchObject({ name: 'fresh' })
   })
 
-  it('stores flat upload metadata when the upload seam returns a profile URL', async () => {
+  // ── --version ─────────────────────────────────────────────────
+  //
+  // `--version` is load-bearing exactly once: it picks `meta.profile_url`.
+
+  it('defaults to LATEST: writes that release’s snapshot and its published URL', async () => {
     const { saves, saveUserProfile } = captureSaves()
-    const cli = makeCli({
-      saveUserProfile,
-      uploadProfile: async () => ({
-        profileUrl: 'https://profiles.ucp.dev/p/abc/profile.json',
-        profileId: 'abc',
-        etag: '"123"',
-        publishedAt: '2026-05-02T00:00:00.000Z',
-      }),
-    })
-    const { exitCode } = await serveCli(cli, ['profile', 'init', '--name', 'fresh'])
+    const cli = makeCli({ saveUserProfile })
+    const { output, exitCode } = await serveCli(cli, ['profile', 'init', '--name', 'fresh'])
+
     expect(exitCode).toBe(0)
-    expect(saves[0]).toMatchObject({
-      meta: {
-        profile_url: 'https://profiles.ucp.dev/p/abc/profile.json',
-        profile_id: 'abc',
-        etag: '"123"',
-        published_at: '2026-05-02T00:00:00.000Z',
-      },
-    })
+    expect(saves[0]?.meta.profile_url).toBe(RELEASES[LATEST].defaultAgentProfileUrl)
+    // profile.json is the VERBATIM published document, not a hand-written
+    // template: byte-identity with what the URL serves is what makes
+    // `ucp doctor`'s drift diff mean something.
+    expect(saves[0]?.body).toStrictEqual(JSON.parse(RELEASES[LATEST].agentProfileJson))
+    expect(JSON.parse(output)).toMatchObject({ name: 'fresh', version: LATEST })
   })
 
-  it('does not call upload when --profile-url is provided', async () => {
-    const { saveUserProfile } = captureSaves()
-    const uploads: string[] = []
+  it('--version 2026-04-08 selects that release’s URL and snapshot', async () => {
+    const { saves, saveUserProfile } = captureSaves()
+    const cli = makeCli({ saveUserProfile })
+    const { output, exitCode } = await serveCli(cli, [
+      'profile',
+      'init',
+      '--name',
+      'agent-0408',
+      '--version',
+      '2026-04-08',
+    ])
+
+    expect(exitCode).toBe(0)
+    expect(saves[0]?.meta.profile_url).toBe(RELEASES['2026-04-08'].defaultAgentProfileUrl)
+    expect(saves[0]?.body).toStrictEqual(JSON.parse(RELEASES['2026-04-08'].agentProfileJson))
+    expect((saves[0]?.body as { ucp: { version: string } }).ucp.version).toBe('2026-04-08')
+    expect(JSON.parse(output)).toMatchObject({ version: '2026-04-08' })
+  })
+
+  it('rejects an unsupported --version and lists the supported set', async () => {
+    const { saves, saveUserProfile } = captureSaves()
+    const cli = makeCli({ saveUserProfile })
+    // 2026-01-23 is a REAL spec release the CLI cannot speak (its MCP binding
+    // was never published). A well-formed date is exactly as unusable here as
+    // a typo.
+    const { output, exitCode } = await serveCli(cli, [
+      'profile',
+      'init',
+      '--name',
+      'old',
+      '--version',
+      '2026-01-23',
+    ])
+
+    expect(exitCode).toBe(1)
+    for (const v of SUPPORTED_VERSIONS) expect(output).toContain(v)
+    expect(saves).toHaveLength(0)
+  })
+
+  it('self-hosting overrides the release default URL but keeps the snapshot', async () => {
+    // The version still picks WHICH snapshot to author from; the URL decides
+    // whose document is the identity. Self-hosting is the only way to
+    // advertise a custom capability set — there is no signing, so whoever
+    // controls the URL controls what this agent claims.
+    const { saves, saveUserProfile } = captureSaves()
+    const cli = makeCli({ saveUserProfile })
+    const { exitCode } = await serveCli(cli, [
+      'profile',
+      'init',
+      '--name',
+      'mine',
+      '--version',
+      '2026-04-08',
+      '--profile-url',
+      'https://you.example/agent.json',
+    ])
+
+    expect(exitCode).toBe(0)
+    expect(saves[0]?.meta.profile_url).toBe('https://you.example/agent.json')
+    expect(saves[0]?.body).toStrictEqual(JSON.parse(RELEASES['2026-04-08'].agentProfileJson))
+  })
+
+  it('rejects --protocol-min / --protocol-max', async () => {
     const cli = makeCli({
-      saveUserProfile,
-      uploadProfile: async (input) => {
-        uploads.push(input.name)
-        return { profileUrl: 'https://profiles.ucp.dev/p/abc/profile.json' }
+      saveUserProfile: async () => {
+        throw new Error('should not be called')
       },
     })
     const { exitCode } = await serveCli(cli, [
@@ -225,11 +269,25 @@ describe('ucp profile init', () => {
       'init',
       '--name',
       'fresh',
-      '--profile-url',
-      'https://example.com/.well-known/ucp',
+      '--protocol-min',
+      '2026-01-23',
     ])
+    expect(exitCode).toBe(1)
+  })
+
+  // `meta` is built and written directly — nothing between the template and
+  // disk. The deleted upload seam used to sit here and stamp a (always empty)
+  // service response over it on every default init.
+  it('writes only the fields init derives; no hosting metadata is invented', async () => {
+    const { saves, saveUserProfile } = captureSaves()
+    const cli = makeCli({ saveUserProfile })
+    const { exitCode } = await serveCli(cli, ['profile', 'init', '--name', 'fresh'])
     expect(exitCode).toBe(0)
-    expect(uploads).toEqual([])
+    expect(Object.keys(saves[0]?.meta ?? {}).sort()).toEqual([
+      'created_at',
+      'profile_url',
+      'updated_at',
+    ])
   })
 
   it('returns no-op output when the profile already exists', async () => {
@@ -278,90 +336,6 @@ describe('ucp profile init', () => {
       meta: { created_at: PRIOR_CREATED },
       overwrite: true,
     })
-  })
-})
-
-describe('ucp profile publish', () => {
-  it('returns manual upload instructions for non-managed profile URLs', async () => {
-    const cli = makeCli({
-      readActive: async () => ({ profile: 'alpha' }),
-      readUserProfile: async (name) => userProfile(name, { meta: META }),
-    })
-    const { output, exitCode } = await serveCli(cli, ['profile', 'publish'])
-    expect(exitCode).toBe(0)
-    const parsed = JSON.parse(output)
-    expect(parsed).toMatchObject({
-      profile: 'alpha',
-      published: false,
-      profile_url: 'https://example.com/.well-known/ucp',
-      cta: { commands: expect.any(Array) },
-    })
-    expect(parsed.cta.description).toMatch(/Upload profile\.json/)
-  })
-
-  it('allows publishing a local profile named default', async () => {
-    const cli = makeCli({
-      readActive: async () => ({ profile: 'default' }),
-      readUserProfile: async (name) =>
-        userProfile(name, { meta: { ...META, profile_url: undefined } }),
-      uploadProfile: async () => ({}),
-    })
-    const { output, exitCode } = await serveCli(cli, ['profile', 'publish'])
-    expect(exitCode).toBe(0)
-    expect(JSON.parse(output)).toMatchObject({
-      profile: 'default',
-      published: false,
-      upload: 'not_configured',
-    })
-  })
-
-  it('returns not_configured when managed upload seam returns empty', async () => {
-    const cli = makeCli({
-      readActive: async () => ({ profile: 'alpha' }),
-      readUserProfile: async (name) =>
-        userProfile(name, { meta: { ...META, profile_url: undefined } }),
-      uploadProfile: async () => ({}),
-    })
-    const { output, exitCode } = await serveCli(cli, ['profile', 'publish'])
-    expect(exitCode).toBe(0)
-    expect(JSON.parse(output)).toMatchObject({
-      profile: 'alpha',
-      published: false,
-      upload: 'not_configured',
-    })
-  })
-
-  it('updates managed metadata when upload returns a URL', async () => {
-    const { saves, saveUserProfile } = captureSaves()
-    const cli = makeCli({
-      readUserProfile: async (name) =>
-        userProfile(name, { meta: { ...META, profile_url: undefined } }),
-      saveUserProfile,
-      uploadProfile: async () => ({ profileUrl: 'https://profiles.ucp.dev/p/abc/profile.json' }),
-    })
-    const { output, exitCode } = await serveCli(cli, ['profile', 'publish', 'alpha'])
-    expect(exitCode).toBe(0)
-    expect(saves[0]).toMatchObject({
-      name: 'alpha',
-      meta: { profile_url: 'https://profiles.ucp.dev/p/abc/profile.json' },
-      overwrite: true,
-    })
-    expect(JSON.parse(output)).toMatchObject({ published: true })
-  })
-
-  it('treats known managed origins as publishable', async () => {
-    const { saves, saveUserProfile } = captureSaves()
-    const cli = makeCli({
-      readUserProfile: async (name) =>
-        userProfile(name, {
-          meta: { ...META, profile_url: 'https://profiles.ucp.dev/p/abc/profile.json' },
-        }),
-      saveUserProfile,
-      uploadProfile: async () => ({ profileUrl: 'https://profiles.ucp.dev/p/abc/profile.json' }),
-    })
-    const { exitCode } = await serveCli(cli, ['profile', 'publish', 'alpha'])
-    expect(exitCode).toBe(0)
-    expect(saves).toHaveLength(1)
   })
 })
 

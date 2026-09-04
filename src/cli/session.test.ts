@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { PlatformProfile } from '../core/profile.js'
 import { saveUserProfile, writeActive } from '../core/profile-store.js'
+import { LATEST, RELEASES } from '../core/releases.js'
 import { resolveSession } from './session.js'
 
 const SAMPLE_BODY: PlatformProfile = {
@@ -33,7 +34,6 @@ const SAMPLE_BODY: PlatformProfile = {
 const SAMPLE_META = {
   created_at: '2026-05-05T12:00:00Z',
   profile_url: 'https://mybot.example.com/.well-known/ucp',
-  protocol_versions: { min: '2026-01-11', max: '2026-08-25' },
 }
 
 async function seedUserProfile(homeDir: string, name = 'prod'): Promise<void> {
@@ -92,10 +92,9 @@ describe('resolveSession — user profile branch', () => {
     })
   })
 
-  it('temporarily falls back to DEFAULT_PROFILE_URL when meta.profile_url is absent', async () => {
-    // TODO(profile-upload): this fallback disappears once managed upload returns
-    // per-profile URLs. It keeps local managed profiles usable while the upload
-    // seam is a no-op.
+  it("falls back to the latest release's published agent profile when meta.profile_url is absent", async () => {
+    // The fallback must be a REACHABLE document: the business GETs this URL on
+    // every call and negotiates against what it serves, and so does the CLI.
     await saveUserProfile(
       {
         name: 'managed-local',
@@ -106,7 +105,7 @@ describe('resolveSession — user profile branch', () => {
     )
     const session = await resolveSession({ homeDir, env: {}, profile: 'managed-local' })
     expect(session.profile.name).toBe('managed-local')
-    expect(session.profile.profileUrl).toMatch(/^https:\/\/[\w.-]+\/.+\.json/)
+    expect(session.profile.profileUrl).toBe(RELEASES[LATEST].defaultAgentProfileUrl)
   })
 
   it('--profile-url override fills in for a local profile without profile_url', async () => {

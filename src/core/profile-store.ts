@@ -5,7 +5,21 @@
 //   profiles/
 //     <name>/
 //       profile.json   — agent profile body (the artifact the user hosts)
-//       meta.json      — { profile_url?, defaults?, created_at?, protocol_versions? }
+//       meta.json      — { profile_url?, defaults?, created_at? }
+//
+// Role split, load-bearing (see src/core/agent.ts). `meta.profile_url` is the
+// URL every request advertises; `profile.json` is the document that URL is
+// supposed to serve. Which of them ucp-cli negotiates from depends on who
+// owns the URL:
+//   - a release default → the bundled copy of that published document, which
+//     CI pins byte-identical to what the URL serves. profile.json is then a
+//     redundant local copy, and editing it changes nothing merchants can see;
+//   - a URL you own → profile.json IS the declaration ucp-cli negotiates with,
+//     read fresh per invocation, because it is the only copy the CLI has.
+//     Uploading it to that URL is what makes the merchant agree; until then
+//     the two sides read different documents and `doctor` is what says so.
+// Nothing here fetches, and nothing here uploads: the request path never
+// reads the wire, and no ucp-cli command ever writes to a profile URL.
 //
 // Plus the session-state pair:
 //
@@ -18,8 +32,8 @@
 // `signing_keys[]` before spec 2026-08-25) in user-authored profile bodies is
 // allowed but unused on the client side.
 //
-// CRUD primitives only — user-facing verbs (`init`, `list`, `show`, `publish`,
-// `use`) are layered on top.
+// CRUD primitives only — user-facing verbs (`init`, `list`, `show`, `use`)
+// are layered on top.
 //
 // Naming rule: profile names must match `^[a-z0-9][a-z0-9._-]*$`. Same
 // charset as cache filenames (PROTOCOL §7) so cross-platform behavior
@@ -57,15 +71,11 @@ export const profileMetaSchema = z
     // session.ts supplies runtime fallbacks where appropriate.
     created_at: z.string().optional(),
     updated_at: z.string().optional(),
-    // Optional because a freshly-created local profile may be intended for
-    // managed hosting before the upload service exists. Supplying a URL means
-    // either the user hosts profile.json themselves or the managed service has
-    // returned its canonical URL; publish infers which by URL origin.
+    // Optional for forward/backward compatibility: `profile init` always
+    // writes it now (it is the whole of version selection), but a profile
+    // authored by an older CLI may omit it, in which case session resolution
+    // falls back to the latest release default.
     profile_url: httpsUrlSchema.optional(),
-    profile_id: z.string().optional(),
-    etag: z.string().optional(),
-    published_at: z.string().optional(),
-    protocol_versions: z.object({ min: z.string(), max: z.string() }).optional(),
     // `defaults.catalog` is the business URL catalog ops fall back to when
     // no business is resolved. Discovery hits `<catalog>/.well-known/ucp`
     // through the normal `discover()` path — no bypass. `.loose()` for

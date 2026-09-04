@@ -30,16 +30,21 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
+import { RELEASES } from '../../src/core/releases.js'
 import {
   MOCK_CART_ID,
   MOCK_CHECKOUT_ID,
+  MOCK_CURRENT_VERSION,
   MOCK_ESCALATION_URL,
   MOCK_VARIANT_ID,
+  type MockUcpShoppingOptions,
   startMockUcpShopping,
 } from '../fixtures/mock-ucp-shopping.js'
 
 const execFileAsync = promisify(execFile)
 const CLI = fileURLToPath(new URL('../../dist/bin.js', import.meta.url))
+/** The document the mock serves at `agentProfileUrl` — and the local copy of it. */
+const AGENT_PROFILE_JSON = RELEASES[MOCK_CURRENT_VERSION].agentProfileJson
 
 interface Journey {
   businessUrl: string
@@ -51,31 +56,26 @@ interface Journey {
   close(): Promise<void>
 }
 
-async function setupJourney(): Promise<Journey> {
-  const mock = await startMockUcpShopping()
+async function setupJourney(options: MockUcpShoppingOptions = {}): Promise<Journey> {
+  const mock = await startMockUcpShopping(options)
   const ucpHome = await mkdtemp(join(tmpdir(), 'ucp-eval-'))
 
-  // Minimal agent profile so the CLI can resolve a profileUrl.
+  // The self-hosted agent profile, exactly as `ucp profile init` writes it:
+  // the release's verbatim published document. This file IS the identity on
+  // the self-hosted path — the CLI reads it to learn what it declares and
+  // never fetches `profile_url` — so a stub with `services: {}` would
+  // negotiate nothing.
   const profileDir = join(ucpHome, 'profiles', 'eval')
   await (await import('node:fs/promises')).mkdir(profileDir, { recursive: true })
-  await writeFile(
-    join(profileDir, 'profile.json'),
-    JSON.stringify({
-      ucp: {
-        version: '2026-08-25',
-        status: 'success',
-        services: {},
-        payment_handlers: {},
-      },
-      keys: [],
-    }),
-    'utf-8',
-  )
+  await writeFile(join(profileDir, 'profile.json'), AGENT_PROFILE_JSON, 'utf-8')
+  // `profile_url` is what goes on the wire, and the mock serves the same
+  // document there — which is what a correctly published profile looks like
+  // (and what `ucp doctor` checks). The CLI itself makes no request to it.
   await writeFile(
     join(profileDir, 'meta.json'),
     JSON.stringify({
       created_at: new Date().toISOString(),
-      profile_url: 'https://eval-agent.example.com/.well-known/ucp',
+      profile_url: mock.agentProfileUrl,
     }),
     'utf-8',
   )
@@ -355,5 +355,49 @@ describe('eval: introspect → craft → submit pattern', () => {
     const cta = envelope.cta as { commands: Array<{ command: string }> } | undefined
     // The recovery CTA must point at --input-schema so agent can self-correct.
     expect(cta?.commands?.some((c) => (c.command as string).includes('--input-schema'))).toBe(true)
+  })
+})
+
+// ─── The fixture's deliberately-defective renderings ────────────────────────
+//
+// The mock's DEFAULT state is conformant, so the journey above tests the
+// journey rather than the CLI's defect tolerance. These two cases opt into the
+// merchant defects the fixture can serve, and pin what an agent actually sees
+// for each — end to end, through the real binary.
+
+describe('eval: merchant renderings that contradict themselves', () => {
+  it('stale off-version entry: negotiates anyway, and says what it ignored', async () => {
+    // Live Shopify storefront shape: a valid mcp entry at the rendering's own
+    // version plus a leftover `embedded@2026-04-08`. Not a negotiation
+    // failure — the CLI picks the matching entry and vlogs the rest.
+    const j = await setupJourney({ serviceEntries: 'stale-entry' })
+    try {
+      const { json, code, stderr } = await j.run(['catalog', 'search', '--set', '/query=map'], {
+        UCP_VERBOSE: '1',
+      })
+      expect(code).toBe(0)
+      const inner = (json as Record<string, unknown>).result as Record<string, unknown>
+      expect(Array.isArray(inner.products)).toBe(true)
+      expect(stderr).toContain('ignoring dev.ucp.shopping entries at [2026-04-08]')
+    } finally {
+      await j.close()
+    }
+  })
+
+  it("no entry at the rendering's own version: PROFILE_VERSION_MISMATCH, merchant-side", async () => {
+    // An 08-25 rendering advertising `dev.ucp.shopping` only at 2026-01-23.
+    const j = await setupJourney({ serviceEntries: 'mixed-versions' })
+    try {
+      const { json, code } = await j.run(['catalog', 'search', '--set', '/query=map'])
+      expect(code).toBe(1)
+      const envelope = json as Record<string, unknown>
+      expect(envelope.code).toBe('PROFILE_VERSION_MISMATCH')
+      // Merchant-side, not ours: the agent must not be told to edit its own
+      // profile for a document it does not control.
+      expect(envelope.code).not.toBe('AGENT_PROFILE_VERSION_MISMATCH')
+      expect(envelope.message).toContain('2026-01-23')
+    } finally {
+      await j.close()
+    }
   })
 })

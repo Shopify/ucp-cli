@@ -123,11 +123,13 @@ function safeArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : []
 }
 
-// Per-extension hint copy. Keyed by reverse-domain capability id; only ids
-// advertised by `localAgentProfileBody()` (i.e. members of
-// `DEFAULT_AGENT_CAPABILITY_IDS`) need an entry here. Missing entries silently
-// no-op — `buildExtensionHints` simply drops them. When the bundled profile
-// adds a new capability, add a hint here in the same change.
+// Per-extension hint copy. Keyed by reverse-domain capability id. The input
+// set is `allowlistedExtensions()` in cli.ts — the ACTIVE agent profile's
+// declared capabilities intersected with the business's, so a self-hosted
+// profile declaring `com.acme.loyalty` can reach here. Missing entries
+// silently no-op: `buildExtensionHints` drops any id with no copy, which is
+// the correct default for a third-party capability this CLI has nothing
+// specific to say about.
 const EXTENSION_HINTS: Record<string, string> = {
   'dev.shopify.catalog.global':
     'global catalog active — variants carry `seller.domain` (for `--business`), `url` (PDP), and `checkout_url` (buy-now) for cross-business routing; the seller identity lives at `variants[*].seller.domain`; run --input-schema to see the full accepted catalog payload, including `like`, context, filters, and extension fields',
@@ -144,11 +146,10 @@ const EXTENSION_HINTS: Record<string, string> = {
 // hint copy registered). Builders prepend the returned string to their
 // description so the hint travels alongside the call-specific guidance.
 //
-// Defense-in-depth note: the caller (cli.ts `allowlistedExtensions`) has
-// already filtered against the build-time allowlist, so this function trusts
-// every entry in `extensions`. The `EXTENSION_HINTS` map is the second
-// safeguard — even if a non-allowlisted name somehow reached us, it would
-// produce no hint copy and silently drop.
+// Note on trust: entries reach here only if BOTH the active agent profile and
+// the business declared them (cli.ts `allowlistedExtensions`), so a merchant
+// cannot inject an id. `EXTENSION_HINTS` is a lookup, not a second filter —
+// an unrecognized id yields no copy and drops.
 export function buildExtensionHints(extensions: readonly string[] | undefined): string {
   if (extensions === undefined || extensions.length === 0) return ''
   const hints: string[] = []
@@ -199,8 +200,7 @@ function detectGlobalCatalog(result: unknown): GlobalCatalogShape {
     // catalog.shopify.com responses (Reebok variant page with ?variant=<id>
     // selector). Not yet enumerated in the local spec doc — fields-list there
     // is incomplete; the example response shows it. `seller.url` is the shop
-    // homepage and is the WRONG buyer-handoff target — we used to emit a CTA
-    // for it; that's been dropped.
+    // homepage and is the WRONG buyer-handoff target — never emit a CTA for it.
     if (typeof safeField(v, 'url') === 'string') shape.hasVariantUrl = true
     if (typeof safeField(v, 'checkout_url') === 'string') shape.hasCheckoutUrl = true
     // Early-out once we've seen every signal this detector owns: walking the
@@ -239,15 +239,14 @@ function buildGlobalCatalogCommands(
 }
 
 function globalCatalogHandoffCopy(shape: GlobalCatalogShape, variantPath: string): string {
-  // The `eligible.native_checkout` signal used to gate a separate "business
-  // doesn't support native checkout" branch here, but in practice that
-  // signal predicts a `requires_escalation` envelope at `checkout complete`
-  // — which the regular escalation path already handles. Letting the agent
-  // walk the unified search→cart→checkout→complete flow lets them prebuild
-  // useful state regardless; if the business escalates at the end, the
-  // buyer just confirms via `continue_url` instead of starting from scratch.
-  // Buyer handoff via PDP / checkout_url remains advertised so the agent
-  // can choose handoff explicitly when the buyer prefers it.
+  // Deliberately no `eligible.native_checkout` branch: that signal only
+  // predicts a `requires_escalation` envelope at `checkout complete`, which
+  // the escalation path already handles. Walking the unified
+  // search→cart→checkout→complete flow lets the agent prebuild useful state
+  // either way; if the business escalates at the end, the buyer confirms via
+  // `continue_url` instead of starting from scratch. Buyer handoff via PDP /
+  // checkout_url stays advertised so the agent can choose handoff explicitly
+  // when the buyer prefers it.
   const parts: string[] = []
   if (shape.hasVariantUrl)
     parts.push(`open ${variantPath}.url for the PDP when the buyer is still browsing`)
@@ -733,8 +732,8 @@ export interface BuildCtaContext {
    */
   isEscalation: boolean
   /**
-   * Business-advertised capability ids that intersect the build-time
-   * allowlist. Sourced from the CLI's trusted negotiated discover view —
+   * Business-advertised capability ids that the ACTIVE agent profile also
+   * declares. Sourced from the CLI's trusted negotiated discover view —
    * NOT the response body's `ucp.capabilities` (which is business-supplied
    * and tamper-prone). Empty when discover did not run or did not surface
    * any allowlisted extension. Builders that surface hints from this list

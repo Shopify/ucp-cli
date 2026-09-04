@@ -32,7 +32,6 @@ const SAMPLE_BODY: PlatformProfile = {
 const SAMPLE_META = {
   created_at: '2026-05-05T12:00:00Z',
   profile_url: 'https://mybot.example.com/.well-known/ucp',
-  protocol_versions: { min: '2026-01-11', max: '2026-08-25' },
 }
 
 describe('path helpers', () => {
@@ -250,6 +249,34 @@ describe('profile CRUD', () => {
     expect(read.meta.defaults).toMatchObject({
       catalog: 'https://x.example/mcp',
       cart: 'https://y.example/mcp',
+    })
+  })
+
+  it('accepts a meta.json carrying keys the schema does not declare (backward-compat)', async () => {
+    // A removed field must never fail a profile at its boundary: `.loose()` is
+    // what makes an upgrade safe, so removing a `profileMetaSchema` field is a
+    // deletion and nothing else. `protocol_versions` is one concrete case;
+    // `profile_id` / `etag` / `published_at` are the others — all written by
+    // <= 0.7.0, all undeclared since, none of them ever read.
+    await saveUserProfile({ name: 'prod', body: SAMPLE_BODY, meta: SAMPLE_META }, { homeDir })
+    await writeFile(
+      join(profileDir('prod', { homeDir }), 'meta.json'),
+      JSON.stringify({
+        ...SAMPLE_META,
+        protocol_versions: { min: '2026-01-11', max: '2026-08-25' },
+        profile_id: 'abc',
+        etag: '"123"',
+        published_at: '2026-05-02T00:00:00.000Z',
+      }),
+      'utf-8',
+    )
+    const read = await readUserProfile('prod', { homeDir })
+    expect(read.meta.profile_url).toBe(SAMPLE_META.profile_url)
+    expect(read.meta).toMatchObject({
+      protocol_versions: { min: '2026-01-11', max: '2026-08-25' },
+      profile_id: 'abc',
+      etag: '"123"',
+      published_at: '2026-05-02T00:00:00.000Z',
     })
   })
 })

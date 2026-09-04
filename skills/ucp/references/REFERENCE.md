@@ -24,29 +24,47 @@ Successful UCP operation responses have this shape:
 
 Errors: `{ "code": "...", "message": "...", "cta": {...} }` (no dispatch identity — failure may pre-date contact). Successful commands exit `0` (including `requires_escalation`); errors exit `1`.
 
+`ucp discover` additionally returns `protocol` and `expectedCapabilities`:
+
+- **`protocol.version`** — the negotiated UCP version. Always the version the **active agent profile** declares; `ucp-cli` only bounds which releases are *possible* (`ucp --version` prints the ones it supports). Switch versions by switching profiles.
+- **`protocol.source`** — `well-known` when the merchant's top-level document was at that version, `supported_versions` when a version-specific leaf was followed. There is deliberately no second date to compare: do **not** infer compatibility from date order.
+- **`protocol.businessProfileUrl`** — the merchant document that was parsed. (`profileUrl` everywhere else means the *agent's* URL.)
+- **`expectedCapabilities`** — `your profile ∩ merchant` — a **prediction** for pre-call planning, not an authority. The CLI computes it from what it declares locally; the merchant fetches your profile URL itself and reports what it actually negotiated in every response's `ucp.capabilities`; that field wins. `[]` means "nothing in common (or none published)", never "nothing works".
+- **`negotiated`** is only the services **both** sides declare. Services the merchant offers that your profile does not declare are not negotiated; they stay visible in the lossless `profile` field and `--verbose` says which were skipped.
+
+**The error envelope carries `code`, `message`, and `cta` only** — there is no `context` field on the wire. Everything you need to recover is in those three. Branch on `code`; read `message` for the specific values (version sets, declared/offered service ids, the failing URL).
+
 ## Error codes
 
 Branch on `code` first; CTAs (when present) carry recovery suggestions.
 
+Naming rule: **`PROFILE_*` is the merchant's document; `AGENT_PROFILE_*` is yours.** No code means both.
+
 | Code | Meaning | Recovery |
 |---|---|---|
-| `BUSINESS_NOT_RESOLVED` | Operation needs a merchant; none resolved | Pass `--business <url>`, or `ucp use <url>` for the session. Catalog operations fall back to the global catalog automatically. |
-| `SCHEMA_VALIDATION_FAILED` | Payload doesn't match merchant's advertised schema, or uses unknown plain keys | Run `ucp <op> --input-schema --business <url>`, correct field names, re-submit. Some canonical UCP fields (e.g. `context.currency` per spec) may be valid but require explicit merchant support. |
+| `INVALID_INPUT` | CLI-side parse/validation error (bad JSON, missing positional, malformed URL) | Read `message`; fix the command |
+| `SCHEMA_VALIDATION_FAILED` | Payload doesn't match the merchant's advertised schema, or uses unknown plain keys | `ucp <op> --input-schema --business <url>`, correct field names, re-submit. Canonical UCP fields (e.g. `context.currency`) can still need explicit merchant support |
+| `BUSINESS_NOT_RESOLVED` | Operation needs a merchant; none resolved | Pass `--business <url>`, or `ucp use <url>` for the session. Catalog ops fall back to the global catalog automatically |
 | `OPERATION_NOT_OFFERED` | Merchant doesn't expose this operation | `ucp discover --business <url>` to see what's offered |
-| `INVALID_INPUT` | CLI-side parse/validation error (bad JSON, missing required positional, malformed URL) | Check the message; usually self-explanatory |
+| `CAPABILITY_NOT_OFFERED` | Merchant doesn't advertise the requested service id — **including when your profile also lacks it** (a typo is not a profile problem) | Check the id against `ucp discover --business <url>` |
 | `PROFILE_FETCH_FAILED` | Merchant doesn't speak UCP (or `.well-known/ucp` is unreachable) | Surface to buyer; offer non-UCP fallback (other tools, navigation, alternate merchants with consent) |
-| `PROTOCOL_VERSION_INCOMPATIBLE` | Merchant's `/.well-known/ucp` version and every `supported_versions` entry fall outside this CLI's range (see `context.supportedVersions`) | Upgrade the CLI (`npm i -g @shopify/ucp-cli@latest`); if already current, the merchant is ahead of the spec release this CLI ships |
-| `PROFILE_VERSION_MISMATCH` | A `supported_versions` document declares a different `ucp.version` than the key linking to it; spec forbids using it | Merchant-side bug; surface to buyer and treat like `PROFILE_FETCH_FAILED` |
-| `PROFILE_NOT_FOUND` | No active agent profile | `ucp profile init --name <name>` (see `references/SETUP.md`) |
-| `AUTH_REQUIRED` | Merchant requires authentication (HTTP 401) | This CLI doesn't implement merchant-specific auth (JWT, OAuth, API key). Handoff using the best prior URL: checkout/cart `continue_url`, then `variant.checkout_url`, then variant/product `url`, then `seller.url`, then `--business` URL or `https://<seller.domain>`. |
-| `INSUFFICIENT_PERMISSIONS` | Authenticated but lacks required scope (HTTP 403) | Same recovery as `AUTH_REQUIRED` — handoff using the same URL priority. |
-| `IDEMPOTENCY_CONFLICT` | Idempotency key reused with different payload (HTTP 409) | Re-issue with a fresh key, or omit and retry |
+| `PROTOCOL_VERSION_INCOMPATIBLE` | Merchant doesn't offer the exact version your agent profile speaks | `message` names both (what the merchant `offers` and what your profile `uses`). If a `cta` names another of your local profiles, re-run with `--profile <name>`. Otherwise upgrade the CLI (`npm i -g @shopify/ucp-cli@latest`) |
+| `PROFILE_VERSION_MISMATCH` | The **merchant's** document contradicts itself | Merchant-side bug; nothing to fix client-side. Surface to buyer, treat like `PROFILE_FETCH_FAILED` |
+| `NO_COMPATIBLE_TRANSPORT` | Right version, no transport both sides can speak | `message` names all three sets (merchant offers / profile declares / ucp-cli supports). Not fixable mid-task |
+| `SERVICE_VERSION_INCOMPATIBLE` | Merchant offers the protocol version, but this service's own version line doesn't intersect yours | Not fixable mid-task. Stop, or try another merchant. Operator fix: `references/SETUP.md` |
+| `AGENT_PROFILE_*` (any) | **Your side is misconfigured** — your agent profile is off-version, schema-invalid, missing a service, or (as the merchant reports it) unreachable at the URL you sent. Not the merchant's fault | **Retrying will not help.** Stop and report to the operator: `ucp doctor`, then `references/SETUP.md` |
+| `PROFILE_NOT_FOUND` | No agent profile on this machine | `ucp profile init --name agent` — idempotent, safe to run unconditionally |
+| `AUTH_REQUIRED` | Merchant requires authentication (HTTP 401) | No merchant auth in this CLI. Hand off using the best prior URL: checkout/cart `continue_url`, then `variant.checkout_url`, then variant/product `url`, then `seller.url`, then the `--business` URL or `https://<seller.domain>` |
+| `INSUFFICIENT_PERMISSIONS` | Authenticated but lacks required scope (HTTP 403) | Same handoff URL priority as `AUTH_REQUIRED` |
+| `IDEMPOTENCY_CONFLICT` | Idempotency key reused with a different payload (HTTP 409) | Re-issue with a fresh key, or omit and retry |
 | `RATE_LIMITED` | Merchant rate-limited (HTTP 429) | Back off and retry; transient |
 | `BUSINESS_SERVER_ERROR` | Merchant 5xx (HTTP 500-599 except 503) | Likely transient; retry |
 | `SERVICE_UNAVAILABLE` | Merchant temporarily unable to handle requests (HTTP 503) | Wait and retry; transient |
-| `MCP_RPC_ERROR` | JSON-RPC error envelope from merchant (no spec-aligned HTTP status) | Read `message` and `context.rpcCode` for merchant detail |
-| `TRANSPORT_HTTP_ERROR` | Non-2xx HTTP without spec-aligned mapping | Read `http_status` from error context |
-| `TRANSPORT_NETWORK_ERROR` | DNS, connection refused, TLS, timeout, abort | Network-level — agent should report and retry |
+| `MCP_RPC_ERROR` | JSON-RPC error envelope from merchant (no spec-aligned HTTP status) | Read `message` — it carries the merchant's RPC detail and HTTP status |
+| `TRANSPORT_HTTP_ERROR` | Non-2xx HTTP without spec-aligned mapping | Read `message` for the status |
+| `TRANSPORT_NETWORK_ERROR` | DNS, connection refused, TLS, timeout, abort | Network-level — report and retry |
+
+The `AGENT_PROFILE_*` family and `SERVICE_VERSION_INCOMPATIBLE` are operator fixes (editing a document, and uploading it to the URL that serves it), not runtime ones — per-code detail is in `references/SETUP.md`.
 
 ## `--set` and `--set-string` (overlay flags)
 
