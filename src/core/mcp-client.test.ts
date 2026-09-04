@@ -107,6 +107,99 @@ describe('mcpRpc — error mapping', () => {
     )
   })
 
+  // The business fetches OUR hosted profile on every call and refuses when it
+  // cannot (verified live: -32001 `UCP discovery failed`,
+  // `data.code: 'profile_unreachable'`). That is our document failing, not the
+  // merchant's — same condition `fetchAgentProfile` detects locally, reported
+  // from the far side. `MCP_RPC_ERROR` would point the agent at the merchant.
+  const PROFILE_UNREACHABLE_RESPONSE = {
+    jsonrpc: '2.0',
+    id: 1,
+    error: {
+      code: -32001,
+      message: 'UCP discovery failed',
+      data: { code: 'profile_unreachable' },
+    },
+  }
+
+  const AGENT_PROFILE_URL = 'https://agent.example.invalid/agent.json'
+  const PROFILE_PARAMS = {
+    arguments: { meta: { 'ucp-agent': { profile: AGENT_PROFILE_URL } } },
+  }
+
+  it('maps -32001 profile_unreachable to AGENT_PROFILE_UNREACHABLE naming our URL', async () => {
+    const { fetch } = recorder(jsonResponse(PROFILE_UNREACHABLE_RESPONSE))
+
+    await expect(
+      mcpRpc({
+        endpoint: ENDPOINT,
+        method: 'tools/list',
+        params: PROFILE_PARAMS,
+        fetch,
+        id: 1,
+      }),
+    ).rejects.toThrowError(
+      expect.objectContaining({
+        code: 'AGENT_PROFILE_UNREACHABLE',
+        // `client`, matching the local detection path — keeps code → layer a
+        // function (lib/error-layers.test.ts).
+        layer: 'client',
+        context: expect.objectContaining({
+          reason: 'business_reported',
+          url: AGENT_PROFILE_URL,
+        }) as unknown,
+      }) as unknown as Error,
+    )
+  })
+
+  it('the profile_unreachable envelope names the URL and `ucp doctor` on the wire', async () => {
+    const { fetch } = recorder(jsonResponse(PROFILE_UNREACHABLE_RESPONSE))
+    let caught: { message: string; cta?: { commands: { command: string }[] } } | undefined
+    await mcpRpc({
+      endpoint: ENDPOINT,
+      method: 'tools/call',
+      params: { name: 'search_catalog', ...PROFILE_PARAMS },
+      fetch,
+      id: 1,
+    }).catch((err) => {
+      caught = err as typeof caught
+    })
+    expect(caught?.message).toContain(AGENT_PROFILE_URL)
+    expect(caught?.message).toContain('ucp doctor')
+    expect(caught?.cta?.commands.map((c) => c.command)).toContain('ucp doctor')
+  })
+
+  it('falls back to a generic description when the request carried no profile URL', async () => {
+    const { fetch } = recorder(jsonResponse(PROFILE_UNREACHABLE_RESPONSE))
+    await expect(
+      mcpRpc({ endpoint: ENDPOINT, method: 'tools/list', fetch, id: 1 }),
+    ).rejects.toThrowError(
+      expect.objectContaining({
+        code: 'AGENT_PROFILE_UNREACHABLE',
+        message: expect.stringContaining(
+          'the agent profile URL sent with this request',
+        ) as unknown as string,
+      }) as unknown as Error,
+    )
+  })
+
+  it('a different -32001 payload stays MCP_RPC_ERROR', async () => {
+    // Only `data.code: 'profile_unreachable'` is the signal; the numeric code
+    // sits in JSON-RPC's implementation-defined server-error range.
+    const { fetch } = recorder(
+      jsonResponse({
+        jsonrpc: '2.0',
+        id: 1,
+        error: { code: -32001, message: 'UCP discovery failed', data: { code: 'other_thing' } },
+      }),
+    )
+    await expect(
+      mcpRpc({ endpoint: ENDPOINT, method: 'tools/list', params: PROFILE_PARAMS, fetch, id: 1 }),
+    ).rejects.toThrowError(
+      expect.objectContaining({ code: 'MCP_RPC_ERROR', layer: 'transport' }) as unknown as Error,
+    )
+  })
+
   it('throws SERVICE_UNAVAILABLE on HTTP 503 (spec-aligned, retryable)', async () => {
     const { fetch } = recorder(new Response('boom', { status: 503 }))
 

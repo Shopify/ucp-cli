@@ -9,15 +9,23 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-
-import { callOperation, isDryRunPreview, unwrapMcpCallResult } from './operation.js'
-import type { AgentRange } from './profile.js'
+import { agentProfileFixture } from '../test-utils.js'
+import {
+  callOperation,
+  isDryRunPreview,
+  isReverseDnsKey,
+  unwrapMcpCallResult,
+} from './operation.js'
+import { RELEASES } from './releases.js'
 import { setVerboseWriter } from './verbose.js'
 
 const BUSINESS_URL = 'https://shop.example.invalid'
 const MCP_ENDPOINT = 'https://shop.example.invalid/ucp/mcp'
 const PROFILE_URL = 'https://agent.example.com/.well-known/ucp'
-const RANGE: AgentRange = { min: '2026-01-23', max: '2026-08-25' }
+// The platform side of negotiation: Shopify's published 2026-08-25 agent
+// profile, fetched-and-validated. It declares `dev.ucp.shopping` over mcp at
+// that exact version, which is what the PROFILE fixture below offers.
+const AGENT = agentProfileFixture({ version: '2026-08-25' })
 
 const PROFILE = {
   ucp: {
@@ -120,7 +128,7 @@ describe('callOperation', () => {
           toolName: 'search_catalog',
           input: { catalog: { query: 'boots', pagination: { limit: 2 } } },
         },
-        { cacheDir, agentRange: RANGE, fetch, profileUrl: PROFILE_URL },
+        { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL },
       ),
     ).resolves.toEqual({ products: [] })
 
@@ -162,7 +170,7 @@ describe('callOperation', () => {
             catalog: { query: 'boots' },
           },
         },
-        { cacheDir, agentRange: RANGE, fetch, profileUrl: PROFILE_URL },
+        { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL },
       ),
     ).rejects.toMatchObject({
       code: 'INVALID_INPUT',
@@ -198,7 +206,7 @@ describe('callOperation', () => {
         toolName: 'search_catalog',
         input: { meta: { trace_id: 'abc-123' }, catalog: { query: 'boots' } },
       },
-      { cacheDir, agentRange: RANGE, fetch, profileUrl: PROFILE_URL },
+      { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL },
     )
 
     const args = bodies.find((body) => body.method === 'tools/call')?.params as {
@@ -244,7 +252,7 @@ describe('callOperation', () => {
           catalog: { query: 'boots' },
         },
       },
-      { cacheDir, agentRange: RANGE, fetch, profileUrl: PROFILE_URL },
+      { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL },
     )
 
     const args = bodies.find((body) => body.method === 'tools/call')?.params as {
@@ -278,7 +286,7 @@ describe('callOperation', () => {
     await callOperation(
       BUSINESS_URL,
       { capability: 'dev.ucp.shopping', toolName: 'search_catalog', input: { query: 'boots' } },
-      { cacheDir, agentRange: RANGE, fetch, profileUrl: PROFILE_URL },
+      { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL },
     ).catch((err) => {
       captured = err
     })
@@ -324,7 +332,7 @@ describe('callOperation', () => {
           },
         },
       },
-      { cacheDir, agentRange: RANGE, fetch, profileUrl: PROFILE_URL },
+      { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL },
     )
 
     const params = bodies.find((body) => body.method === 'tools/call')?.params as {
@@ -357,7 +365,7 @@ describe('callOperation', () => {
         toolName: 'search_catalog',
         input: { catalog: { query: 'boots' } },
       },
-      { cacheDir, agentRange: RANGE, fetch, profileUrl: PROFILE_URL, dryRun: true },
+      { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL, dryRun: true },
     )
     expect(isDryRunPreview(result)).toBe(true)
     if (!isDryRunPreview(result)) throw new Error('unreachable')
@@ -412,7 +420,7 @@ describe('callOperation', () => {
           toolName: 'search_catalog',
           input: { query: 'boots' },
         },
-        { cacheDir, agentRange: RANGE, fetch, profileUrl: PROFILE_URL, dryRun: true },
+        { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL, dryRun: true },
       ),
     ).rejects.toMatchObject({ code: 'SCHEMA_VALIDATION_FAILED' })
   })
@@ -451,7 +459,7 @@ describe('callOperation', () => {
       },
       {
         cacheDir,
-        agentRange: RANGE,
+        agent: AGENT,
         fetch,
         profileUrl: PROFILE_URL,
         _onDiscover: (d) => {
@@ -490,7 +498,7 @@ describe('callOperation', () => {
       },
       {
         cacheDir,
-        agentRange: RANGE,
+        agent: AGENT,
         fetch,
         profileUrl: PROFILE_URL,
         _onDiscover: () => {
@@ -581,7 +589,7 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
         toolName: 'search_catalog',
         input: { catalog: { query: 'boots' } },
       },
-      { cacheDir, agentRange: RANGE, fetch: buildFetch(SEARCH_SCHEMA), profileUrl: PROFILE_URL },
+      { cacheDir, agent: AGENT, fetch: buildFetch(SEARCH_SCHEMA), profileUrl: PROFILE_URL },
     )
     expect(result).toBeDefined()
     // Happy path emits no validator-related verbose traces (the discover
@@ -602,7 +610,7 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
       },
       {
         cacheDir,
-        agentRange: RANGE,
+        agent: AGENT,
         fetch: buildFetch(UNCOMPILABLE_SCHEMA, calls),
         profileUrl: PROFILE_URL,
       },
@@ -622,7 +630,7 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
       },
       {
         cacheDir,
-        agentRange: RANGE,
+        agent: AGENT,
         fetch: buildFetch(UNCOMPILABLE_SCHEMA),
         profileUrl: PROFILE_URL,
       },
@@ -649,7 +657,7 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
       },
       {
         cacheDir,
-        agentRange: RANGE,
+        agent: AGENT,
         fetch: buildFetch(UNCOMPILABLE_SCHEMA),
         profileUrl: PROFILE_URL,
       },
@@ -687,7 +695,7 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
       },
       {
         cacheDir,
-        agentRange: RANGE,
+        agent: AGENT,
         fetch: buildFetch(SEARCH_SCHEMA, calls),
         profileUrl: PROFILE_URL,
       },
@@ -709,7 +717,7 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
           },
         },
       },
-      { cacheDir, agentRange: RANGE, fetch: buildFetch(SEARCH_SCHEMA), profileUrl: PROFILE_URL },
+      { cacheDir, agent: AGENT, fetch: buildFetch(SEARCH_SCHEMA), profileUrl: PROFILE_URL },
     )
     const flagTrace = verboseLines.find((l) => l.includes('not listed in published schema'))
     expect(flagTrace).toBeDefined()
@@ -733,7 +741,7 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
           },
         },
       },
-      { cacheDir, agentRange: RANGE, fetch: buildFetch(SEARCH_SCHEMA), profileUrl: PROFILE_URL },
+      { cacheDir, agent: AGENT, fetch: buildFetch(SEARCH_SCHEMA), profileUrl: PROFILE_URL },
     ).catch((err) => {
       captured = err
     })
@@ -756,7 +764,7 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
       BUSINESS_URL,
       // Missing the required `catalog` field.
       { capability: 'dev.ucp.shopping', toolName: 'search_catalog', input: {} },
-      { cacheDir, agentRange: RANGE, fetch: buildFetch(SEARCH_SCHEMA), profileUrl: PROFILE_URL },
+      { cacheDir, agent: AGENT, fetch: buildFetch(SEARCH_SCHEMA), profileUrl: PROFILE_URL },
     ).catch((err) => {
       captured = err
     })
@@ -803,5 +811,173 @@ describe('unwrapMcpCallResult — structuredContent vs content[].text', () => {
   it('returns the input unchanged when content[].text is not valid JSON', () => {
     const wire = { content: [{ type: 'text', text: 'not-json{' }] }
     expect(unwrapMcpCallResult(wire)).toBe(wire)
+  })
+})
+
+// ─── Extension-key grammar is per-release ─────────────────────────────────
+//
+// `isReverseDnsKey` reads `release(v).reverseDomainPattern` for the version
+// Step 1 negotiated, never a hand-copied regex — the 04-08 grammar is STRICTLY
+// NARROWER than 08-25.
+//
+//   04-08  ^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)+$
+//   08-25  ^[a-z](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9_-]*[a-z0-9_])?)+$
+//
+// So hyphens anywhere, and digit-leading later segments, flip from valid at
+// 08-25 to invalid at 04-08. Using the wrong one either rejects keys the
+// business accepts or lets keys through our pre-flight guard that the
+// business's `propertyNames` validator rejects at submission time.
+
+describe('isReverseDnsKey — 2026-04-08 vs 2026-08-25 grammar', () => {
+  const p0408 = RELEASES['2026-04-08'].reverseDomainPattern
+  const p0825 = RELEASES['2026-08-25'].reverseDomainPattern
+
+  // Keys the two releases DISAGREE about — valid at 08-25, invalid at 04-08.
+  // These are the assertions PR #50's widening shipped without.
+  it.each([
+    // interior hyphen in a later segment
+    ['com.example-shop.checkout'],
+    // digit-leading later segment
+    ['com.2example.cart'],
+    // punycode TLD (interior hyphens in the FIRST label)
+    ['xn--p1ai.example.checkout'],
+    // interior hyphen in the trailing segment
+    ['com.example.loyalty-points'],
+  ])('%s is valid at 2026-08-25 and INVALID at 2026-04-08', (key) => {
+    expect(isReverseDnsKey(key, p0825)).toBe(true)
+    expect(isReverseDnsKey(key, p0408)).toBe(false)
+  })
+
+  // Keys both releases accept — the narrower grammar is a subset, so nothing
+  // valid at 04-08 may be rejected at 08-25.
+  it.each([
+    ['com.example.checkout'],
+    ['dev.ucp.shopping'],
+    ['com.example.fulfillment_hint'],
+    ['a.b'],
+  ])('%s is valid at BOTH releases', (key) => {
+    expect(isReverseDnsKey(key, p0408)).toBe(true)
+    expect(isReverseDnsKey(key, p0825)).toBe(true)
+  })
+
+  // Keys neither release accepts — the guard's actual job: plain-English
+  // aliases that would be rejected server-side.
+  it.each([
+    ['address_subdivision'],
+    ['zip_code'],
+    ['com'],
+    ['Com.Example.Checkout'],
+    ['.com.example'],
+    ['com.example.'],
+    ['com..example'],
+  ])('%s is invalid at BOTH releases', (key) => {
+    expect(isReverseDnsKey(key, p0408)).toBe(false)
+    expect(isReverseDnsKey(key, p0825)).toBe(false)
+  })
+
+  it('04-08 accepts a strict subset of 08-25 (no key is valid at 04-08 only)', () => {
+    const corpus = [
+      'com.example.checkout',
+      'com.example-shop.checkout',
+      'com.2example.cart',
+      'xn--p1ai.example.checkout',
+      'com.example.loyalty-points',
+      'com.example.fulfillment_hint',
+      'dev.ucp.shopping',
+      'a.b',
+      'address_subdivision',
+      'com',
+    ]
+    const only0408 = corpus.filter((k) => isReverseDnsKey(k, p0408) && !isReverseDnsKey(k, p0825))
+    expect(only0408).toEqual([])
+  })
+})
+
+describe('callOperation — extension keys are judged at the NEGOTIATED release', () => {
+  let cacheDir: string
+
+  beforeEach(async () => {
+    cacheDir = await mkdtemp(join(tmpdir(), 'ucp-cli-op-revdns-'))
+    setVerboseWriter(null)
+  })
+
+  afterEach(async () => {
+    await rm(cacheDir, { recursive: true, force: true })
+    delete process.env.UCP_STRICT_SCHEMA
+    setVerboseWriter(null)
+  })
+
+  /** A business rendering at `version` offering shopping over mcp. */
+  function profileAt(version: string) {
+    return {
+      ucp: {
+        version,
+        services: {
+          'dev.ucp.shopping': [{ version, transport: 'mcp', endpoint: MCP_ENDPOINT }],
+        },
+        payment_handlers: {},
+      },
+    }
+  }
+
+  function fetchAt(version: string): typeof globalThis.fetch {
+    return vi.fn(async (url: string | URL | Request, init: RequestInit = {}) => {
+      const u = String(url)
+      const body =
+        typeof init.body === 'string'
+          ? (JSON.parse(init.body) as Record<string, unknown>)
+          : undefined
+      if (u.endsWith('/.well-known/ucp')) return jsonResponse(profileAt(version))
+      const id = body?.id
+      if (body?.method === 'tools/list') {
+        return jsonResponse({
+          jsonrpc: '2.0',
+          id,
+          result: { tools: [{ name: 'search_catalog', inputSchema: SEARCH_SCHEMA }] },
+        })
+      }
+      return jsonResponse({ jsonrpc: '2.0', id, result: { products: [] } })
+    }) as unknown as typeof globalThis.fetch
+  }
+
+  /**
+   * `UCP_STRICT_SCHEMA=1` turns the unknown-plain-field policy into a throw,
+   * which is how a test observes the grammar decision rather than a vlog line.
+   */
+  async function callWithHyphenatedKey(version: '2026-04-08' | '2026-08-25') {
+    process.env.UCP_STRICT_SCHEMA = '1'
+    return callOperation(
+      BUSINESS_URL,
+      {
+        capability: 'dev.ucp.shopping',
+        toolName: 'search_catalog',
+        input: {
+          catalog: {
+            query: 'boots',
+            context: { address_country: 'US', 'com.example-shop.hint': 'dock' },
+          },
+        },
+      },
+      {
+        cacheDir,
+        agent: agentProfileFixture({ version }),
+        fetch: fetchAt(version),
+        profileUrl: PROFILE_URL,
+      },
+    )
+  }
+
+  it('2026-08-25: a hyphenated extension key passes pre-flight', async () => {
+    await expect(callWithHyphenatedKey('2026-08-25')).resolves.toEqual({ products: [] })
+  })
+
+  it('2026-04-08: the SAME key is rejected — 04-08 forbids hyphens', async () => {
+    await expect(callWithHyphenatedKey('2026-04-08')).rejects.toMatchObject({
+      code: 'SCHEMA_VALIDATION_FAILED',
+      layer: 'client',
+      context: {
+        unknown_fields: ['/catalog/context/com.example-shop.hint'],
+      },
+    })
   })
 })

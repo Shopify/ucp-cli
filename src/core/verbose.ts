@@ -48,3 +48,22 @@ export function vlog(msg: string): void {
 export function verboseEnabled(): boolean {
   return writer !== null
 }
+
+// Unconditional warning writer. Defaults to stderr (safe in MCP-over-stdio
+// mode, where stdout is the protocol stream); tests inject a capturing
+// writer. Distinct from vlog: warnings fire without --verbose because they
+// describe declared configuration the engine is ignoring (e.g. a profile
+// transport ucp-cli does not support) — the design rule is "not a silent
+// no-op, not a hard failure".
+let warnWriter: ((msg: string) => void) | null = null
+
+/** Install (or clear) the warning writer. `null` restores the stderr default. */
+export function setWarnWriter(w: ((msg: string) => void) | null): void {
+  warnWriter = w
+}
+
+/** Emit one warning line, regardless of verbose mode. */
+export function uwarn(msg: string): void {
+  const write = warnWriter ?? ((m: string) => process.stderr.write(m))
+  write(`[ucp] warning: ${msg}\n`)
+}

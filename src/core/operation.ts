@@ -21,11 +21,12 @@ import { ErrorCodes, UcpError } from '../lib/errors.js'
 import { omitUndefined } from '../lib/omit-undefined.js'
 import { type DiscoveredBusiness, type DiscoverOptions, discover } from './discover.js'
 import { mcpRpc } from './mcp-client.js'
+import { RELEASES } from './releases.js'
 import { vlog } from './verbose.js'
 
 export type CallOperationCallerOptions = Pick<
   DiscoverOptions,
-  'agentRange' | 'cacheDir' | 'fetch' | 'force' | 'headers' | 'profileUrl' | 'signal'
+  'agent' | 'cacheDir' | 'fetch' | 'force' | 'headers' | 'profileUrl' | 'profileName' | 'signal'
 > & {
   /**
    * `--dry-run`: run the full pre-flight (discover → meta inject → schema
@@ -67,11 +68,12 @@ export function forwardCallOptions(
   return {
     profileUrl: options.profileUrl,
     ...omitUndefined({
-      agentRange: options.agentRange,
+      agent: options.agent,
       cacheDir: options.cacheDir,
       fetch: options.fetch,
       force: options.force,
       headers: options.headers,
+      profileName: options.profileName,
       signal: options.signal,
       dryRun: options.dryRun,
       _onDiscover: options._onDiscover,
@@ -130,7 +132,7 @@ export function serviceOp(capability: string, toolName: string, opName: string):
 export interface CallOperationOptions
   extends Pick<
     DiscoverOptions,
-    'agentRange' | 'cacheDir' | 'fetch' | 'force' | 'headers' | 'signal'
+    'agent' | 'cacheDir' | 'fetch' | 'force' | 'headers' | 'profileName' | 'signal'
   > {
   profileUrl: string
   dryRun?: boolean
@@ -188,11 +190,12 @@ export async function callOperation<T = unknown>(
     capabilities: [input.capability],
     profileUrl: options.profileUrl,
     ...omitUndefined({
-      agentRange: options.agentRange,
+      agent: options.agent,
       cacheDir: options.cacheDir,
       fetch: options.fetch,
       force: options.force,
       headers: options.headers,
+      profileName: options.profileName,
       signal: options.signal,
     }),
   })
@@ -224,6 +227,10 @@ export async function callOperation<T = unknown>(
     toolName: input.toolName,
     schema: tool.inputSchema,
     args,
+    // Extension-key grammar is per-release, and the release is whatever Step 1
+    // negotiated for THIS call. `protocol.version` is a `Version`, so the
+    // registry lookup is total.
+    reverseDomainPattern: RELEASES[resolved.protocol.version].reverseDomainPattern,
   })
 
   if (options.dryRun === true) {
@@ -362,6 +369,7 @@ function validateOperationInput(opts: {
   toolName: string
   schema: unknown
   args: Record<string, unknown>
+  reverseDomainPattern: RegExp
 }): void {
   const ajv = new Ajv2020({ allErrors: true, strict: false })
   addFormats(ajv)
@@ -372,6 +380,7 @@ function validateOperationInput(opts: {
     toolName: opts.toolName,
     schema: opts.schema,
     args: opts.args,
+    reverseDomainPattern: opts.reverseDomainPattern,
   })
   let validate: ReturnType<typeof ajv.compile>
   try {
@@ -432,8 +441,9 @@ function flagUnknownPlainFields(opts: {
   toolName: string
   schema: unknown
   args: Record<string, unknown>
+  reverseDomainPattern: RegExp
 }): void {
-  const unknown = findUnknownPlainFields(opts.schema, opts.args, '')
+  const unknown = findUnknownPlainFields(opts.schema, opts.args, '', opts.reverseDomainPattern)
   if (unknown.length === 0) return
 
   if (strictSchemaMode()) {
@@ -462,7 +472,12 @@ function formatUnknownFields(fields: string[]): string {
   return `${shown}, +${fields.length - 5} more`
 }
 
-function findUnknownPlainFields(schema: unknown, value: unknown, path: string): string[] {
+function findUnknownPlainFields(
+  schema: unknown,
+  value: unknown,
+  path: string,
+  reverseDomainPattern: RegExp,
+): string[] {
   if (typeof schema === 'boolean') return []
   if (!isPlainObject(schema)) return []
 
@@ -470,7 +485,7 @@ function findUnknownPlainFields(schema: unknown, value: unknown, path: string): 
     const itemSchema = schema.items
     if (itemSchema === undefined) return []
     return value.flatMap((item, index) =>
-      findUnknownPlainFields(itemSchema, item, joinJsonPath(path, index)),
+      findUnknownPlainFields(itemSchema, item, joinJsonPath(path, index), reverseDomainPattern),
     )
   }
 
@@ -488,14 +503,28 @@ function findUnknownPlainFields(schema: unknown, value: unknown, path: string): 
     const propertySchema = properties[key]
     if (propertySchema === undefined) {
       if (path === '' && key === 'meta') {
-        unknown.push(...findUnknownPlainFields(protocolMetaExtensionSchema(), child, '/meta'))
+        unknown.push(
+          ...findUnknownPlainFields(
+            protocolMetaExtensionSchema(),
+            child,
+            '/meta',
+            reverseDomainPattern,
+          ),
+        )
         continue
       }
-      if (isAllowedUnknownExtensionKey(path, key)) continue
+      if (isAllowedUnknownExtensionKey(path, key, reverseDomainPattern)) continue
       unknown.push(joinJsonPath(path, key))
       continue
     }
-    unknown.push(...findUnknownPlainFields(propertySchema, child, joinJsonPath(path, key)))
+    unknown.push(
+      ...findUnknownPlainFields(
+        propertySchema,
+        child,
+        joinJsonPath(path, key),
+        reverseDomainPattern,
+      ),
+    )
   }
   return unknown
 }
@@ -511,24 +540,39 @@ function protocolMetaExtensionSchema(): Record<string, unknown> {
   }
 }
 
-function isAllowedUnknownExtensionKey(path: string, key: string): boolean {
+function isAllowedUnknownExtensionKey(
+  path: string,
+  key: string,
+  reverseDomainPattern: RegExp,
+): boolean {
   // `meta.idempotency-key` is protocol-owned and injected by this dispatcher;
   // many business schemas omit it even when the protocol accepts it. All
   // caller-defined extension keys should be reverse-DNS names so typo-like
   // plain English aliases (`address_subdivision`, `zip_code`) fail fast.
   if (path === '/meta' && key === 'idempotency-key') return true
-  return isReverseDnsKey(key)
+  return isReverseDnsKey(key, reverseDomainPattern)
 }
 
-function isReverseDnsKey(key: string): boolean {
-  // Mirrors UCP spec `reverse_domain_name` exactly
-  // (https://ucp.dev/2026-08-25/schemas/common/types/reverse_domain_name.json):
-  // first segment is letters/digits with optional interior hyphens (punycode
-  // TLDs), then one or more `.segment` that may start with a digit and may
-  // contain interior `-`/`_`. Anything looser would let invalid keys pass our
-  // pre-flight guard only to be rejected by the business's `propertyNames`
-  // validator at submission time.
-  return /^[a-z](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9_-]*[a-z0-9_])?)+$/.test(key)
+/**
+ * Shape check for a caller-supplied extension key against the NEGOTIATED
+ * release's `reverse_domain_name` grammar (`release(v).reverseDomainPattern`,
+ * codegen'd per release — never hand-copied).
+ *
+ * The grammar is not stable across releases and 2026-04-08 is strictly
+ * narrower than 2026-08-25: 04-08 is `^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)+$`
+ * — no hyphens anywhere, no digit-leading segments — while 08-25 allows
+ * interior hyphens in the first label (punycode TLDs like `xn--p1ai`) and
+ * digit-leading later segments. So `com.example-shop.checkout`,
+ * `com.2example.cart`, and `xn--p1ai.example.checkout` are valid at 08-25 and
+ * INVALID at 04-08. Using one release's pattern for the other would either
+ * reject keys the business accepts or pass keys its `propertyNames` validator
+ * rejects at submission time.
+ *
+ * The patterns are anchored and flagless, so `.test` is stateless and safe to
+ * call repeatedly on the shared registry RegExp.
+ */
+export function isReverseDnsKey(key: string, reverseDomainPattern: RegExp): boolean {
+  return reverseDomainPattern.test(key)
 }
 
 function joinJsonPath(base: string, segment: string | number): string {

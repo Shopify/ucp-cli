@@ -10,6 +10,7 @@
 // The product, cart, and checkout IDs are stable constants so tests can use them.
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { RELEASES } from '../../src/core/releases.js'
 import type { MockBusiness } from './mock-business.js'
 import { startMockBusiness } from './mock-business.js'
 
@@ -457,38 +458,131 @@ async function handleMcp(
   )
 }
 
+// ─── Published profile documents ──────────────────────────────────────────
+//
+// The mock now models what a real business publishes: a current rendering at
+// `/.well-known/ucp` plus a `supported_versions` leaf for the older release
+// in this CLI's window. Negotiation is exact-version and profile-driven, so a
+// fixture that serves only one document can only ever exercise one leg of it.
+
+/** Spec releases this fixture publishes renderings for. */
+export const MOCK_CURRENT_VERSION = '2026-08-25'
+export const MOCK_LEGACY_VERSION = '2026-04-08'
+export const MOCK_LEGACY_PROFILE_PATH = `/.well-known/ucp/${MOCK_LEGACY_VERSION}`
+
+/**
+ * Which `dev.ucp.shopping` array the CURRENT (2026-08-25) rendering serves.
+ *
+ * The default is CONFORMANT, because a fixture whose default state is a
+ * merchant defect makes every unrelated test depend on how the CLI tolerates
+ * that defect. The defective shapes stay available as explicit opt-ins: they
+ * mirror real Shopify storefront renderings and are the only way to reach the
+ * `PROFILE_VERSION_MISMATCH kind:'service-entries'` and stale-entry-vlog
+ * paths end to end.
+ *
+ *  - `'conformant'`      one mcp entry at the rendering's own version.
+ *  - `'stale-entry'`     conformant PLUS a leftover `embedded@2026-04-08`.
+ *                        Negotiates fine; the CLI vlogs the ignored entry.
+ *                        This is the live Shopify storefront defect.
+ *  - `'mixed-versions'`  NO entry at the rendering's own version (only
+ *                        `2026-01-23`) → `PROFILE_VERSION_MISMATCH`
+ *                        `kind: 'service-entries'`.
+ */
+export type MockShoppingServiceEntries = 'conformant' | 'stale-entry' | 'mixed-versions'
+
+export interface MockUcpShoppingOptions {
+  /** Defaults to `'conformant'`. */
+  serviceEntries?: MockShoppingServiceEntries
+}
+
+const SPEC_URLS = {
+  spec: 'https://ucp.dev/specification/overview/',
+  schema: 'https://ucp.dev/services/shopping/openrpc.json',
+} as const
+
+function shoppingEntries(
+  variant: MockShoppingServiceEntries,
+  endpoint: string,
+): Record<string, unknown>[] {
+  const current = { version: MOCK_CURRENT_VERSION, ...SPEC_URLS, transport: 'mcp', endpoint }
+  switch (variant) {
+    case 'conformant':
+      return [current]
+    case 'stale-entry':
+      return [
+        current,
+        { version: MOCK_LEGACY_VERSION, ...SPEC_URLS, transport: 'embedded', endpoint },
+      ]
+    case 'mixed-versions':
+      return [{ version: '2026-01-23', ...SPEC_URLS, transport: 'mcp', endpoint }]
+  }
+}
+
+/** Path the mock hosts the AGENT's profile at (see {@link MockUcpShopping.agentProfileUrl}). */
+export const MOCK_AGENT_PROFILE_PATH = '/agent-profile.json'
+
 export interface MockUcpShopping extends MockBusiness {
   /** The URL the MCP endpoint is served at (the `endpoint` in the UCP profile). */
   mcpEndpoint: string
+  /** URL of the `supported_versions` leaf for {@link MOCK_LEGACY_VERSION}. */
+  legacyProfileUrl: string
+  /**
+   * Where this server also hosts the AGENT's profile, so an end-to-end test
+   * has a reachable `meta.profile_url`.
+   *
+   * Under profile-driven negotiation the CLI GETs its own hosted profile
+   * before every invocation (the business fetches the same URL), so a fixture
+   * whose `profile_url` points at a non-existent host fails every command with
+   * `AGENT_PROFILE_UNREACHABLE` before touching the business at all. Serving
+   * it here keeps the whole journey inside the fixture. The body is the
+   * VERBATIM published 2026-08-25 Shopify agent profile from the release
+   * registry — the same document the CLI negotiates against by default.
+   */
+  agentProfileUrl: string
 }
 
 /**
  * Start a fully-wired mock UCP shopping business. Returns a handle with:
  * - `url`: the business origin (used as `--business` arg)
  * - `mcpEndpoint`: the MCP endpoint URL (embedded in the UCP profile)
+ * - `legacyProfileUrl`: the 2026-04-08 `supported_versions` leaf
  * - `close()`: tear down the HTTP server
  *
- * The server serves `/.well-known/ucp` and `POST /mcp` only.
+ * Serves `/.well-known/ucp`, the 2026-04-08 leaf, and `POST /mcp`.
  * All other routes return the mock-business 404.
  */
-export async function startMockUcpShopping(): Promise<MockUcpShopping> {
+export async function startMockUcpShopping(
+  options: MockUcpShoppingOptions = {},
+): Promise<MockUcpShopping> {
   const mock = await startMockBusiness()
   const { url } = mock
+  const endpoint = `${url}/mcp`
+  const legacyProfileUrl = `${url}${MOCK_LEGACY_PROFILE_PATH}`
 
-  // Profile served at /.well-known/ucp — must pass parsePlatformProfile zod validation.
+  // Current rendering, validated against the 2026-08-25 business schema.
   const profile = {
     ucp: {
-      version: '2026-08-25',
+      version: MOCK_CURRENT_VERSION,
+      status: 'success',
+      supported_versions: { [MOCK_LEGACY_VERSION]: legacyProfileUrl },
+      services: {
+        'dev.ucp.shopping': shoppingEntries(options.serviceEntries ?? 'conformant', endpoint),
+      },
+      payment_handlers: {},
+    },
+    keys: [],
+  }
+
+  // The leaf: a complete, self-contained 2026-04-08 rendering. Leaves carry no
+  // `supported_versions` of their own — the spec says version-specific
+  // documents are terminal, and the CLI logs and ignores a nested map.
+  const legacyProfile = {
+    ucp: {
+      version: MOCK_LEGACY_VERSION,
       status: 'success',
       services: {
         'dev.ucp.shopping': [
-          {
-            version: '2026-01-23',
-            spec: 'https://ucp.dev/specification/overview/',
-            schema: 'https://ucp.dev/services/shopping/openrpc.json',
-            transport: 'mcp',
-            endpoint: `${url}/mcp`,
-          },
+          { version: MOCK_LEGACY_VERSION, ...SPEC_URLS, transport: 'mcp', endpoint },
         ],
       },
       payment_handlers: {},
@@ -496,15 +590,28 @@ export async function startMockUcpShopping(): Promise<MockUcpShopping> {
     keys: [],
   }
 
-  mock.setRoute('GET', '/.well-known/ucp', (_req, res) => {
+  const serveJson = (body: unknown) => (_req: IncomingMessage, res: ServerResponse) => {
     res.statusCode = 200
     res.setHeader('content-type', 'application/json')
-    res.end(JSON.stringify(profile))
+    res.end(JSON.stringify(body))
+  }
+
+  mock.setRoute('GET', '/.well-known/ucp', serveJson(profile))
+  mock.setRoute('GET', MOCK_LEGACY_PROFILE_PATH, serveJson(legacyProfile))
+  mock.setRoute('GET', MOCK_AGENT_PROFILE_PATH, (_req, res) => {
+    res.statusCode = 200
+    res.setHeader('content-type', 'application/json')
+    res.end(RELEASES[MOCK_CURRENT_VERSION].agentProfileJson)
   })
 
   mock.setRoute('POST', '/mcp', (req, res) => {
     return handleMcp(req, res, url)
   })
 
-  return { ...mock, mcpEndpoint: `${url}/mcp` }
+  return {
+    ...mock,
+    mcpEndpoint: endpoint,
+    legacyProfileUrl,
+    agentProfileUrl: `${url}${MOCK_AGENT_PROFILE_PATH}`,
+  }
 }

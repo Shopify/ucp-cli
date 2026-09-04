@@ -27,7 +27,24 @@
 //
 // Codes grouped by error layer below so misclassification is visible at
 // the registry. When a layer is wrong for a code, that's a real bug —
-// fix the code or fix the layer.
+// fix the code or fix the layer. {@link ERROR_LAYERS} makes that grouping
+// machine-checkable: `code → layer` must be a FUNCTION, and
+// `error-layers.test.ts` asserts the map against every `new UcpError` site
+// in `src/`.
+//
+// ── Naming rule (adopted after the 2026-09 API review) ─────────────────────
+//
+//   PROFILE_*        the BUSINESS's document (`/.well-known/ucp` and its
+//                    `supported_versions` leaves). Merchant acts, or nobody.
+//   AGENT_PROFILE_*  OUR hosted document (the URL we advertise as
+//                    `meta.ucp-agent.profile`). The agent acts.
+//
+// No code may mean both. The previous design discriminated the two with
+// `context.kind`, which does not work: `cli.ts`'s error middleware emits
+// `{code, message, retryable}` or `{code, message, cta}` and NEVER
+// serializes `context`, so the discriminator was invisible to the primary
+// audience (agents reading CLI JSON). Anything an agent must branch on has
+// to live in `code`, `message`, or `cta`.
 
 /**
  * Public registry of CLI-emitted error codes. Pre-v1, this should still be
@@ -40,20 +57,44 @@ export const ErrorCodes = {
   PROFILE_FETCH_FAILED: 'PROFILE_FETCH_FAILED',
   /** Business profile body could not be parsed as JSON. */
   PROFILE_INVALID_JSON: 'PROFILE_INVALID_JSON',
-  /** Business profile body parsed as JSON but failed schema validation. */
+  /**
+   * BUSINESS profile body parsed as JSON but failed schema validation. Our
+   * own hosted document has its own code (`AGENT_PROFILE_SCHEMA_INVALID`);
+   * never use this one for it.
+   */
   PROFILE_SCHEMA_INVALID: 'PROFILE_SCHEMA_INVALID',
   /**
-   * Business + CLI protocol ranges don't intersect: neither the top-level
-   * profile's `ucp.version` nor any `supported_versions` key is in range, or
-   * the selected rendering has no service entry in range.
+   * The business does not offer the exact version the active agent profile
+   * speaks: neither the top-level `/.well-known/ucp` `ucp.version` nor any
+   * `supported_versions` key equals the profile's `ucp.version`. Recovery is
+   * agent-side: switch to a profile whose version the business offers (the
+   * message carries a hint when a local profile qualifies) or upgrade the CLI.
    */
   PROTOCOL_VERSION_INCOMPATIBLE: 'PROTOCOL_VERSION_INCOMPATIBLE',
   /**
-   * A `supported_versions` document declares a different `ucp.version` than
-   * the key that linked to it. The spec says the platform MUST NOT use such a
-   * document, so discovery stops here instead of negotiating against it.
+   * The BUSINESS's document contradicts itself about its version. Merchant
+   * defect; there is nothing to fix client-side, which is why both cases
+   * share one code and one (null) remedy. `context.kind` distinguishes them
+   * for anyone holding the `UcpError` in-process:
+   *   - `'supported_versions'`: a `supported_versions` document declares a
+   *     different `ucp.version` than the key that linked to it. The spec says
+   *     the platform MUST NOT use such a document.
+   *   - `'service-entries'`: the negotiated business rendering advertises a
+   *     `dev.ucp.*` service with no entry at the rendering's own
+   *     `ucp.version`.
+   *
+   * Our own profile's equivalent defect is `AGENT_PROFILE_VERSION_MISMATCH`
+   * — different document, different layer, different remedy.
    */
   PROFILE_VERSION_MISMATCH: 'PROFILE_VERSION_MISMATCH',
+  /**
+   * The business offers the negotiated protocol version, but a requested
+   * SERVICE's entries do not intersect the versions the agent profile
+   * declares for it (third-party services carry their own version lines).
+   * Named `SERVICE_*` because the check is against `ucp.services`, not the
+   * adjacent `ucp.capabilities` feature-flag registry.
+   */
+  SERVICE_VERSION_INCOMPATIBLE: 'SERVICE_VERSION_INCOMPATIBLE',
   /** Business profile parses cleanly but does not advertise the requested capability. */
   CAPABILITY_NOT_OFFERED: 'CAPABILITY_NOT_OFFERED',
   /** Business negotiated a capability but did not expose the requested operation/tool. */
@@ -136,7 +177,57 @@ export const ErrorCodes = {
   PROFILE_ALREADY_EXISTS: 'PROFILE_ALREADY_EXISTS',
   /** Profile name violates the filesystem-safe naming rule or reserved-name rule. */
   PROFILE_INVALID_NAME: 'PROFILE_INVALID_NAME',
+  /**
+   * OUR hosted document could not be fetched. The business fetches the same
+   * URL on every call and would fail too — fix hosting first.
+   * `context.reason` says which sub-case:
+   *   - `'network'`         DNS/TLS/connection/abort
+   *   - `'http_status'`     reached, non-2xx
+   *   - `'not_json'`        200 with a body that is not JSON (a self-hosted
+   *                         origin serving an HTML error page is the single
+   *                         most common failure here, and it is not really
+   *                         "unreachable")
+   *   - `'business_reported'` the business told us: JSON-RPC -32001 with
+   *                         `data.code: 'profile_unreachable'`
+   */
+  AGENT_PROFILE_UNREACHABLE: 'AGENT_PROFILE_UNREACHABLE',
+  /**
+   * OUR profile declares a `ucp.version` ucp-cli does not support.
+   * Re-init at a supported version, switch profiles, or upgrade the CLI.
+   */
+  AGENT_PROFILE_VERSION_UNSUPPORTED: 'AGENT_PROFILE_VERSION_UNSUPPORTED',
+  /**
+   * OUR profile is internally inconsistent: a `dev.ucp.*` entry at a version
+   * other than the profile's own `ucp.version` (the snapshot rule we hold
+   * merchants to, applied to ourselves).
+   *
+   * Fatal only when the profile is SELF-HOSTED. When `profileUrl` is a
+   * release default the document is the platform's, not the user's — the
+   * condition degrades into an ordinary negotiation error under
+   * declare/constrain/intersect, so it warns and proceeds rather than
+   * hard-stopping every installed CLI on a publisher's defect.
+   */
+  AGENT_PROFILE_VERSION_MISMATCH: 'AGENT_PROFILE_VERSION_MISMATCH',
+  /** OUR hosted document failed its release's platform-profile schema. */
+  AGENT_PROFILE_SCHEMA_INVALID: 'AGENT_PROFILE_SCHEMA_INVALID',
+  /**
+   * A service was explicitly requested (`--capability`, operation dispatch),
+   * the BUSINESS offers it, and OUR profile does not declare it — so there is
+   * no platform side to negotiate with. Add the service to the profile.
+   *
+   * When neither side has the id the answer is `CAPABILITY_NOT_OFFERED`
+   * instead: a typo is not a "go edit your profile" problem.
+   */
+  AGENT_PROFILE_SERVICE_UNDECLARED: 'AGENT_PROFILE_SERVICE_UNDECLARED',
 } as const
+
+// Deliberately absent: `PROFILE_VERSION_UNSUPPORTED`. It existed only for
+// `parseBusinessProfile`, a helper with no callers, and it encoded a model
+// this rewrite deletes — that a BUSINESS's own `ucp.version` selects the
+// schema we validate it against. It does not: the agent profile's version
+// selects the release, and a business that cannot serve that version is
+// `PROTOCOL_VERSION_INCOMPATIBLE`. Our own document's equivalent condition is
+// `AGENT_PROFILE_VERSION_UNSUPPORTED`.
 
 /**
  * STABLE — registered codes give autocomplete; arbitrary strings remain valid
@@ -148,6 +239,66 @@ export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes] | (string &
 import { Errors } from 'incur'
 
 import type { CtaBlock, ErrorLayer } from './types.js'
+
+/**
+ * `code → layer`, as a FUNCTION. This is the contract, not a description:
+ * `src/lib/error-layers.test.ts` parses every `new UcpError({...})` site in
+ * `src/` and fails when a site disagrees with this map, when one code is
+ * thrown at two layers, or when a registered code has no throw site at all.
+ *
+ * Why it matters: an agent grouping failures by `code` is grouping by remedy.
+ * A code thrown at two layers mixes two remedies — which is exactly what
+ * happened before the 2026-09 rename, when `PROFILE_VERSION_MISMATCH` was
+ * `client` for our own profile and `transport` for a merchant's, and
+ * `PROFILE_SCHEMA_INVALID` straddled the same seam. `layer` is also the field
+ * PROTOCOL §4.2 requires at each throw site, so it cannot be derived here
+ * without rewriting all 80+ sites; asserting instead keeps the throw sites
+ * self-documenting and the invariant enforced.
+ *
+ * `null` means "never carried on a `UcpError`": the CLI emits it through
+ * incur's `c.error()` envelope path, which has no `layer` field.
+ */
+export const ERROR_LAYERS: Readonly<Record<keyof typeof ErrorCodes, ErrorLayer | null>> =
+  Object.freeze({
+    // ── transport ─────────────────────────────────────────────────────
+    PROFILE_FETCH_FAILED: 'transport',
+    PROFILE_INVALID_JSON: 'transport',
+    PROFILE_SCHEMA_INVALID: 'transport',
+    PROTOCOL_VERSION_INCOMPATIBLE: 'transport',
+    PROFILE_VERSION_MISMATCH: 'transport',
+    SERVICE_VERSION_INCOMPATIBLE: 'transport',
+    CAPABILITY_NOT_OFFERED: 'transport',
+    OPERATION_NOT_OFFERED: 'transport',
+    SERVICE_ENDPOINT_MISSING: 'transport',
+    NO_COMPATIBLE_TRANSPORT: 'transport',
+    TRANSPORT_HTTP_ERROR: 'transport',
+    TRANSPORT_NETWORK_ERROR: 'transport',
+    TRANSPORT_INVALID_JSON: 'transport',
+    MCP_INVALID_RESPONSE: 'transport',
+    MCP_RPC_ERROR: 'transport',
+    AUTH_REQUIRED: 'transport',
+    INSUFFICIENT_PERMISSIONS: 'transport',
+    IDEMPOTENCY_CONFLICT: 'transport',
+    RATE_LIMITED: 'transport',
+    BUSINESS_SERVER_ERROR: 'transport',
+    SERVICE_UNAVAILABLE: 'transport',
+
+    // ── client ────────────────────────────────────────────────────────
+    SCHEMA_VALIDATION_FAILED: 'client',
+    INVALID_INPUT: 'client',
+    PROFILE_NOT_FOUND: 'client',
+    PROFILE_ALREADY_EXISTS: 'client',
+    PROFILE_INVALID_NAME: 'client',
+    AGENT_PROFILE_UNREACHABLE: 'client',
+    AGENT_PROFILE_VERSION_UNSUPPORTED: 'client',
+    AGENT_PROFILE_VERSION_MISMATCH: 'client',
+    AGENT_PROFILE_SCHEMA_INVALID: 'client',
+    AGENT_PROFILE_SERVICE_UNDECLARED: 'client',
+
+    // ── envelope-only (c.error(), no UcpError, no layer) ──────────────
+    BUSINESS_NOT_RESOLVED: null,
+    PROFILE_INIT_REQUIRES_NAME: null,
+  })
 
 export interface UcpErrorOptions {
   /** STABLE — one of the four PROTOCOL §4.2 layers. Required at every throw site. */

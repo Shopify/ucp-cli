@@ -23,7 +23,7 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { AgentRange } from '../core/profile.js'
+import { agentProfileFixture } from '../test-utils.js'
 import {
   cancelCart,
   cancelCheckout,
@@ -43,7 +43,10 @@ import {
 const BUSINESS_URL = 'https://shop.example.invalid'
 const MCP_ENDPOINT = 'https://shop.example.invalid/ucp/mcp'
 const PROFILE_URL = 'https://agent.example.com/.well-known/ucp'
-const RANGE: AgentRange = { min: '2026-01-23', max: '2026-08-25' }
+// The platform side of negotiation: Shopify's published 2026-08-25 agent
+// profile, fetched-and-validated. It declares `dev.ucp.shopping` over mcp at
+// that exact version, which is what the PROFILE fixture below offers.
+const AGENT = agentProfileFixture({ version: '2026-08-25' })
 
 const PROFILE = {
   ucp: {
@@ -221,7 +224,7 @@ describe.each(ROWS)('$tool', ({ fn, tool, input, schema }) => {
 
   it('dispatches via the expected tool name with user input passed through', async () => {
     const { fetch, calls } = makeFetch(tool, schema)
-    await fn(BUSINESS_URL, input, { cacheDir, agentRange: RANGE, fetch, profileUrl: PROFILE_URL })
+    await fn(BUSINESS_URL, input, { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL })
 
     const toolsCall = calls.find((c) => c.method === 'tools/call')
     expect(toolsCall).toBeDefined()
@@ -247,7 +250,7 @@ describe.each(ROWS)('$tool', ({ fn, tool, input, schema }) => {
     }) as unknown as typeof globalThis.fetch
 
     await expect(
-      fn(BUSINESS_URL, input, { cacheDir, agentRange: RANGE, fetch, profileUrl: PROFILE_URL }),
+      fn(BUSINESS_URL, input, { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL }),
     ).rejects.toMatchObject({ code: 'OPERATION_NOT_OFFERED', layer: 'transport' })
   })
 })
