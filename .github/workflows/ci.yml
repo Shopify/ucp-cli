@@ -12,11 +12,12 @@ concurrency:
 
 jobs:
   codegen-drift:
-    # Catch silent regressions in src/core/generated/. The schema generator now
-    # reads package.json#ucp.{specVersion,specBaseUrl} and fetches the frozen
-    # published schema URLs directly; there is no repo tag checkout in this
-    # pipeline anymore. Keep this gate aligned with scripts/codegen-schemas.ts
-    # instead of reintroducing a stale shadow source of truth.
+    # Catch silent regressions in src/core/generated/. The generator reads
+    # package.json#ucp.{releases,specBaseUrl} and fetches the published schema
+    # URLs for EVERY release in the window directly; there is no repo tag
+    # checkout in this pipeline. Keep this gate aligned with
+    # scripts/codegen-schemas.ts instead of reintroducing a stale shadow
+    # source of truth.
     name: codegen drift gate
     runs-on: ubuntu-22.04
     steps:
@@ -55,6 +56,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
+      # `pnpm test` carries --exclude=**/*.integration.test.ts, so the
+      # integration suite MUST be run separately or it is a total blind spot
+      # (it was fully red on a feature branch for three phases without anyone
+      # noticing, because nobody ran it locally). Do not collapse these into
+      # one step; `test:integration` re-runs the build on purpose.
       - run: pnpm test
       - run: pnpm build
       - run: pnpm test:integration

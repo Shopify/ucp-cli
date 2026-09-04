@@ -1,23 +1,44 @@
 // scripts/codegen-schemas.ts
 //
-// Codegens `src/core/generated/{platform,business}_profile.zod.ts` from the
-// canonical UCP schemas published at `<specBaseUrl>/<specVersion>/`.
+// Codegens the per-release spec artifacts under `src/core/generated/<version>/`
+// for every release listed in package.json#ucp.releases:
 //
-// Pipeline:
-//   1. Read package.json#ucp.{specVersion, specBaseUrl}; UCP_SPEC_BASE_URL
+//   business_profile.zod.ts   zod schema for the business profile branch
+//   platform_profile.zod.ts   zod schema for the platform profile branch
+//   reverse_domain.ts         that release's reverse_domain_name pattern
+//   agent_profile.ts          VERBATIM snapshot of the published Shopify
+//                             agent profile this CLI presents as its identity
+//
+// The hand-written registry `src/core/releases.ts` imports these per release.
+//
+// Pipeline (per release):
+//   1. Read package.json#ucp.{releases, specBaseUrl}; UCP_SPEC_BASE_URL
 //      env override wins over package.json
-//   2. $RefParser.dereference against entry URL, with a pass-through
+//   2. Look up the release's codegen config (entry path and `$defs` names
+//      moved between releases — see RELEASE_CONFIGS)
+//   3. $RefParser.dereference against the entry URL, with a pass-through
 //      resolve.http resolver (every URL goes through fetch()).
-//   3. Apply T2 injectObjectType()                    — bundle-level, permanent
-//   4. Apply T4 openAdditionalProperties()            — bundle-level, permanent
-//   5. For each of [platform_profile, business_profile]:
-//        jsonSchemaToZod → write to src/core/generated/<branch>.zod.ts
-//   6. Stamp each output with a header banner pointing back here
+//   4. Apply T2 injectObjectType()                    — bundle-level, permanent
+//   5. Apply T4 openAdditionalProperties()            — bundle-level, permanent
+//   6. For each of [platform, business]:
+//        jsonSchemaToZod → write to src/core/generated/<version>/<branch>.zod.ts
+//   7. Fetch the release's reverse_domain_name.json and emit its `pattern`
+//      so it is never hand-copied into src again
+//   8. Fetch the published agent profile, validate it against the freshly
+//      generated platform schema, and emit it byte-for-byte
+//   9. Stamp each output with a header banner pointing back here
 //
-// No temporary transforms are active at the current specVersion. The T3 and T5
+// Both transforms are permanent and bundle-level, so they apply uniformly to
+// every release. (Historical note: the pre-#50 2026-04-08 generation ran with
+// T2 only — T4 landed later. T4 is a pure relaxation, `additionalProperties`
+// absent ⇒ open per JSON Schema 2020-12, so applying it retroactively to
+// 2026-04-08 restores the spec's intent rather than changing it.)
+//
+// No temporary transforms are active at the current releases. The T3 and T5
 // patterns (pre-fetch source doc + mutate by name + serve mutated copy through
-// a resolve.http short-circuit) were removed once upstream stabilized at this
-// version. Reintroduce the same shape if a future temporary fix is needed.
+// a resolve.http short-circuit) were removed once upstream stabilized. If a
+// future temporary fix is needed, reintroduce the same shape — scoped to one
+// release's config.
 //
 // Published artifacts at `<base>/<version>/schemas/...` carry absolute,
 // version-prefixed `$id` URLs that match the absolute fetch paths — refs
@@ -27,48 +48,77 @@
 //
 // Version paths under <base>/<version>/ are frozen-by-convention: BC and
 // non-BC fixes both land at a new version path. Temporary-transform self-
-// destruct triggers (when reintroduced) are therefore engineer-driven (bump
-// specVersion), never spontaneous.
+// destruct triggers (when reintroduced) are therefore engineer-driven (edit
+// the release config), never spontaneous.
 //
 // Run via: pnpm gen:schemas
 // CI drift gate: `pnpm gen:schemas && git diff --exit-code src/core/generated/`
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import $RefParser from '@apidevtools/json-schema-ref-parser'
 import { jsonSchemaToZod } from 'json-schema-to-zod'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(HERE, '..')
-const OUT_DIR = resolve(REPO_ROOT, 'src/core/generated')
+const OUT_ROOT = resolve(REPO_ROOT, 'src/core/generated')
 
 type Manifest = {
   ucp: {
-    specVersion: string
+    releases: string[]
     specBaseUrl: string
   }
 }
 
 type JsonNode = unknown
 
-// `def` is the `$defs` key inside the spec's profile.json (renamed from
-// `*_profile` to `*_schema` in 2026-08-25); `out` is the generated filename,
-// kept stable so importers never churn when the spec renames its internals.
-const BRANCHES = [
-  {
-    def: 'platform_schema',
-    out: 'platform_profile',
-    export: 'platformProfileSchema',
-    type: 'PlatformProfile',
+// Per-release codegen config. Everything version-specific about how a release
+// publishes its schemas lives here; package.json#ucp.releases decides WHICH
+// releases are generated, this table decides HOW.
+//
+// The `$defs` names are the trap this table exists for: 2026-08-25 renamed
+// the profile branches from `*_profile` to `*_schema` and moved the entry
+// document from `schemas/discovery/` to `schemas/`. Generated filenames stay
+// `{platform,business}_profile` across releases so importers never churn when
+// the spec renames its internals.
+type ReleaseConfig = {
+  /** Profile entry document, relative to `<base>/<version>/`. */
+  entryPath: string
+  /** `$defs` key of the platform branch inside the entry document. */
+  platformDef: string
+  /** `$defs` key of the business branch inside the entry document. */
+  businessDef: string
+  /** `reverse_domain_name.json` location, relative to `<base>/<version>/`. */
+  reverseDomainPath: string
+  /**
+   * Published agent profile snapshotted verbatim as this release's default
+   * identity. Absolute URL (shopify.dev, not the spec host), so the
+   * UCP_SPEC_BASE_URL mirror override deliberately does not apply to it.
+   */
+  agentProfileUrl: string
+}
+
+const RELEASE_CONFIGS: Record<string, ReleaseConfig> = {
+  '2026-04-08': {
+    entryPath: 'schemas/discovery/profile.json',
+    platformDef: 'platform_profile',
+    businessDef: 'business_profile',
+    reverseDomainPath: 'schemas/shopping/types/reverse_domain_name.json',
+    agentProfileUrl:
+      'https://shopify.dev/ucp/agent-profiles/2026-04-08/valid-with-capabilities.json',
   },
-  {
-    def: 'business_schema',
-    out: 'business_profile',
-    export: 'businessProfileSchema',
-    type: 'BusinessProfile',
+  '2026-08-25': {
+    entryPath: 'schemas/profile.json',
+    platformDef: 'platform_schema',
+    businessDef: 'business_schema',
+    reverseDomainPath: 'schemas/common/types/reverse_domain_name.json',
+    agentProfileUrl:
+      'https://shopify.dev/ucp/agent-profiles/2026-08-25/valid-with-capabilities.json',
   },
-] as const
+}
+
+const TRANSFORMS_APPLIED = ['T2 injectObjectType', 'T4 openAdditionalProperties']
 
 /** Recursive `$requestConstraints` grammar; stubbed in the resolver (see below). */
 const CONSTRAINT_EXPRESSION_RE = /\/common\/types\/constraint_expression\.json$/
@@ -80,35 +130,53 @@ main().catch((err) => {
 
 async function main() {
   const pkg: Manifest = JSON.parse(await readFile(resolve(REPO_ROOT, 'package.json'), 'utf8'))
-  const { specVersion } = pkg.ucp
+  const releases = pkg.ucp.releases
+  if (!Array.isArray(releases) || releases.length === 0) {
+    throw new Error('package.json#ucp.releases must be a non-empty array of spec versions')
+  }
   // UCP_SPEC_BASE_URL overrides package.json#ucp.specBaseUrl at runtime —
   // for staging, air-gapped mirrors, or local spec preview.
   const specBaseUrl = (process.env.UCP_SPEC_BASE_URL ?? pkg.ucp.specBaseUrl).replace(/\/$/, '')
 
-  // 2026-08-25 moved the profile schema from `schemas/discovery/` to `schemas/`.
-  const entryUrl = `${specBaseUrl}/${specVersion}/schemas/profile.json`
+  // Sorted ascending so output order (logs, directory creation) is
+  // deterministic regardless of package.json ordering.
+  for (const version of [...releases].sort()) {
+    const config = RELEASE_CONFIGS[version]
+    if (!config) {
+      throw new Error(
+        `package.json#ucp.releases lists "${version}" but scripts/codegen-schemas.ts has no ` +
+          `RELEASE_CONFIGS entry for it — add one (entry path, $defs names, reverse-domain path, ` +
+          `agent profile URL).`,
+      )
+    }
+    await generateRelease(version, config, specBaseUrl)
+  }
+}
 
-  console.log(`▸ spec version: ${specVersion}`)
+async function generateRelease(version: string, config: ReleaseConfig, specBaseUrl: string) {
+  const entryUrl = `${specBaseUrl}/${version}/${config.entryPath}`
+  const outDir = resolve(OUT_ROOT, version)
+
+  console.log(`▸ release:      ${version}`)
   console.log(`▸ spec base:    ${specBaseUrl}`)
   console.log(`▸ entry:        ${entryUrl}`)
 
-  // No temporary transforms applied at the current specVersion. Both T3
-  // (platform_schema endpoint) and T5 (business_schema payment_handlers) were
-  // removed once the upstream picture stabilized at this version. If a future
-  // temporary fix is needed, re-introduce the pre-fetch + resolver short-
-  // circuit pattern: fetch the source document, mutate by name, and serve the
-  // mutated copy back through a custom resolve.http reader.
   const dereffed = (await $RefParser.dereference(entryUrl, {
     resolve: {
       http: {
         order: 1,
         canRead: /^https?:/i,
         async read(file: { url: string }) {
-          // `$requestConstraints` (2026-08-25) is a genuinely recursive schema
-          // (constraint_expression -> and/or -> constraint_expression). It is
-          // only reachable through the response_* defs, which we never emit,
-          // so serve an open stub instead of relaxing `circular: false` for
-          // the whole tree.
+          // `constraint_expression` (introduced 2026-08-25; no counterpart in
+          // 2026-04-08, so this branch never fires there) is a genuinely
+          // recursive grammar (constraint_expression -> and/or ->
+          // constraint_expression), which `dereference: { circular: false }`
+          // would reject. It IS reachable from an emitted branch:
+          // business_schema -> payment_handlers -> available_instruments[]
+          // .constraints $refs it, so the stub lands in generated output as an
+          // open object. That shallow leaf is deliberate: the CLI treats
+          // constraint expressions as opaque business-owned data, and an open
+          // stub beats relaxing `circular` for the whole tree.
           if (CONSTRAINT_EXPRESSION_RE.test(file.url)) {
             return JSON.stringify({ type: 'object', additionalProperties: true })
           }
@@ -125,30 +193,143 @@ async function main() {
   injectObjectType(dereffed) // T2
   openAdditionalProperties(dereffed) // T4
 
-  await mkdir(OUT_DIR, { recursive: true })
-  const transformsApplied = ['T2 injectObjectType', 'T4 openAdditionalProperties']
+  await mkdir(outDir, { recursive: true })
 
-  for (const branch of BRANCHES) {
+  // `def` is the `$defs` key inside the spec's profile entry document (renamed
+  // from `*_profile` to `*_schema` in 2026-08-25); `out` is the generated
+  // filename, kept stable so importers never churn when the spec renames its
+  // internals.
+  const branches = [
+    {
+      def: config.platformDef,
+      out: 'platform_profile',
+      export: 'platformProfileSchema',
+      type: 'PlatformProfile',
+    },
+    {
+      def: config.businessDef,
+      out: 'business_profile',
+      export: 'businessProfileSchema',
+      type: 'BusinessProfile',
+    },
+  ] as const
+
+  for (const branch of branches) {
     const subSchema = (dereffed.$defs as Record<string, JsonNode>)?.[branch.def]
     if (!subSchema) {
-      throw new Error(`Spec is missing #/$defs/${branch.def} — schema layout changed?`)
+      throw new Error(`Spec ${version} is missing #/$defs/${branch.def} — schema layout changed?`)
     }
     const body = jsonSchemaToZod(subSchema, {
       module: 'esm',
       name: branch.export,
       type: branch.type,
     })
-    const out = resolve(OUT_DIR, `${branch.out}.zod.ts`)
-    await writeFile(out, `${banner(entryUrl, specVersion, transformsApplied)}\n${body}\n`)
-    console.log(`✓ ${branch.out} → ${out} (${body.length.toLocaleString()} bytes)`)
+    const out = resolve(outDir, `${branch.out}.zod.ts`)
+    await writeFile(out, `${banner(entryUrl, version, TRANSFORMS_APPLIED)}\n${body}\n`)
+    console.log(`✓ ${version}/${branch.out} → ${out} (${body.length.toLocaleString()} bytes)`)
   }
+
+  await generateReverseDomainPattern(version, config, specBaseUrl, outDir)
+  await generateAgentProfileSnapshot(version, config, outDir)
+}
+
+// Emits the release's `reverse_domain_name` pattern as generated code so it is
+// never hand-copied again. The pattern CHANGED between releases (2026-04-08
+// disallows hyphens and digit-leading segments; 2026-08-25 allows both), so
+// per-release emission is load-bearing, not ceremony.
+async function generateReverseDomainPattern(
+  version: string,
+  config: ReleaseConfig,
+  specBaseUrl: string,
+  outDir: string,
+) {
+  const url = `${specBaseUrl}/${version}/${config.reverseDomainPath}`
+  const doc = JSON.parse(await fetchText(url)) as { type?: unknown; pattern?: unknown }
+  if (doc.type !== 'string' || typeof doc.pattern !== 'string') {
+    throw new Error(`${url} is not a { type: "string", pattern: ... } schema — layout changed?`)
+  }
+  // Compile check at codegen time: a pattern the runtime cannot compile must
+  // fail here, not at first CLI use.
+  new RegExp(doc.pattern)
+
+  const body = `${banner(url, version, [])}
+// Consumed through the release registry: \`isReverseDnsKey\` in
+// src/core/operation.ts validates caller-supplied extension keys against
+// \`RELEASES[<negotiated version>].reverseDomainPattern\`. Never hand-copy this
+// pattern — the grammar is not stable across releases (2026-04-08 is strictly
+// narrower: no hyphens, no digit-leading segments), so one release's regex is
+// wrong for the other.
+
+/** \`reverse_domain_name\` pattern for UCP ${version}, verbatim from the spec. */
+export const reverseDomainPattern: RegExp = new RegExp(${JSON.stringify(doc.pattern)})
+`
+  const out = resolve(outDir, 'reverse_domain.ts')
+  await writeFile(out, body)
+  console.log(`✓ ${version}/reverse_domain → ${out}`)
+}
+
+// Emits a VERBATIM snapshot of the published agent profile. Byte-faithful by
+// design: on the default path `meta.profile_url` points at this same published
+// URL, so the hosted document is the CLI's identity and the local copy must
+// match what the URL serves — otherwise `ucp doctor`'s drift diff reports
+// phantom drift on every clean install. Because the snapshot participates in
+// the CI drift gate, an upstream edit to the published profile surfaces as a
+// diff at the next regen instead of silently desyncing.
+async function generateAgentProfileSnapshot(
+  version: string,
+  config: ReleaseConfig,
+  outDir: string,
+) {
+  const text = await fetchText(config.agentProfileUrl)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch (err) {
+    throw new Error(
+      `Published agent profile at ${config.agentProfileUrl} is not valid JSON: ${String(err)}`,
+    )
+  }
+
+  // Validate the snapshot against the platform schema generated moments ago —
+  // the exact artifact runtime consumers use (same transforms, same zod). This
+  // backs the `as PlatformProfile` the registry applies when parsing the
+  // snapshot, and catches Shopify publishing a profile its own spec rejects.
+  const schemaModule = pathToFileURL(resolve(outDir, 'platform_profile.zod.ts')).href
+  const { platformProfileSchema } = (await import(schemaModule)) as {
+    platformProfileSchema: { safeParse(input: unknown): { success: boolean; error?: unknown } }
+  }
+  const result = platformProfileSchema.safeParse(parsed)
+  if (!result.success) {
+    throw new Error(
+      `Published agent profile at ${config.agentProfileUrl} does not validate against the ` +
+        `generated ${version} platform profile schema:\n${JSON.stringify(result.error, null, 2)}`,
+    )
+  }
+
+  const body = `${banner(config.agentProfileUrl, version, [])}
+/** Source URL of the published agent profile snapshotted below. */
+export const agentProfileUrl: string = ${JSON.stringify(config.agentProfileUrl)}
+
+/**
+ * Verbatim response body of \`agentProfileUrl\` at codegen time — byte-for-byte,
+ * including whitespace. Do not filter, reorder, or hand-tune: this document is
+ * the identity the CLI presents, and byte equality with the published URL is
+ * what keeps profile-drift diffing honest.
+ */
+export const agentProfileJson: string = ${JSON.stringify(text)}
+`
+  const out = resolve(outDir, 'agent_profile.ts')
+  await writeFile(out, body)
+  console.log(
+    `✓ ${version}/agent_profile → ${out} (${text.length.toLocaleString()} bytes verbatim)`,
+  )
 }
 
 // ─── HTTP helpers ─────────────────────────────────────────────────────────
 //
-// Both fetchText and fetchJson wrap network errors with a friendly message
-// naming the URL and the UCP_SPEC_BASE_URL override. Without this, contributors
-// on flaky networks blame us instead of their connection.
+// fetchText wraps network errors with a friendly message naming the URL and
+// the UCP_SPEC_BASE_URL override. Without this, contributors on flaky
+// networks blame us instead of their connection.
 
 async function fetchText(url: string): Promise<string> {
   let r: Response
@@ -231,15 +412,19 @@ function openAdditionalProperties(node: JsonNode): void {
 
 // ─── output banner ────────────────────────────────────────────────────────
 
-function banner(entryUrl: string, specVersion: string, transforms: string[]): string {
+function banner(sourceUrl: string, specVersion: string, transforms: string[]): string {
+  const transformLines =
+    transforms.length > 0
+      ? transforms.map((t) => `//   - ${t}`).join('\n')
+      : '//   (none — verbatim source)'
   return `// AUTOGENERATED — DO NOT EDIT.
 //
 // Generated by scripts/codegen-schemas.ts from UCP spec at:
-//   url     ${entryUrl}
+//   url     ${sourceUrl}
 //   version ${specVersion}
 //
 // Transforms applied:
-${transforms.map((t) => `//   - ${t}`).join('\n')}
+${transformLines}
 //
 // To regenerate:  pnpm gen:schemas
 // CI drift gate:  any uncommitted change here fails the build.
