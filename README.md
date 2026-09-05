@@ -90,7 +90,32 @@ The skill packages the agent-facing operating model — when to search vs discov
 
 ## How it works
 
-A **business** is a URL — `https://shop.example.com`. The CLI fetches the business's UCP profile (cached on disk per spec TTL), negotiates a compatible protocol version + transport, and dispatches operations against its endpoint. UCP CLI abstracts transport, service + capability negotiation, ..., and error handling.
+A **business** is a URL — `https://shop.example.com`. The CLI fetches the business's UCP profile (cached on disk per spec TTL), negotiates the protocol version + transport, and dispatches operations against its endpoint. UCP CLI abstracts transport, service + capability negotiation, ..., and error handling.
+
+### Choosing a protocol version
+
+```sh
+ucp --version        # ucp 0.7.0 (UCP 2026-04-08, 2026-08-25)
+```
+
+The parenthetical lists the UCP releases this CLI supports. Which one you speak is set by your **active profile** — a profile declares exactly one `ucp.version`, and merchants validate that exact version on every request. So switching version means switching profile:
+
+```sh
+ucp profile init --name legacy --version 2026-04-08   # create a profile pinned to an older release
+ucp discover shop.example.com --profile legacy        # ...and use it
+```
+
+The CLI sends that URL on every request and merchants fetch it, so it must be publicly reachable. `~/.ucp/profiles/<name>/profile.json` is your local copy of what is hosted there — keeping the two in sync is your responsibility, and `ucp doctor` checks it.
+
+Hosting the profile yourself is the only way to advertise your own capability set; on the default URL the document is Shopify's, so editing your local copy changes nothing merchants can see. Nothing is signed, so **whoever controls that URL controls this agent's identity.**
+
+```sh
+ucp profile init --name mine --profile-url https://you.example/agent.json
+# edit ~/.ucp/profiles/mine/profile.json
+# upload it to that URL yourself — scp, S3, whatever you host with
+ucp doctor           # verifies the two agree: `protocol` fails if the URL disagrees
+                     # with what you'd send; `profile-drift` warns while it is stale
+```
 
 Two scopes for picking which business an operation targets:
 
@@ -256,7 +281,9 @@ There is no `--auth-bearer` flag and no `UCP_AUTH_BEARER` env var. `--header` is
 | Variable | Effect |
 |---|---|
 | `UCP_BUSINESS` | Default merchant URL when `--business` is omitted |
-| `UCP_PROFILE` | Override which local profile is active |
+| `UCP_PROFILE` | Override which local profile is active (and therefore the protocol version) |
+| `UCP_AGENT_PROFILE_URL` | Override the agent-profile URL sent on every request. Outranks `meta.profile_url` |
+| `UCP_DEFAULT_CATALOG` | Business URL catalog operations fall back to when the profile sets no `meta.defaults.catalog` |
 | `UCP_ON_ESCALATION` | Shell command for the escalation hook (JSON payload on stdin) |
 | `UCP_HOME` | Override the local state directory (default `~/.ucp`) |
 | `UCP_VERBOSE` | Set `1`/`true` to print trace lines to stderr |

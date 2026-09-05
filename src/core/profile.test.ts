@@ -9,50 +9,41 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import type { CacheEntry } from './cache.js'
-import {
-  type BusinessProfile,
-  DEFAULT_AGENT_CAPABILITY_IDS,
-  DEFAULT_PROFILE_URL,
-  fetchBusinessProfile,
-  localAgentProfileBody,
-  parsePlatformProfile,
-} from './profile.js'
+import { type BusinessProfile, fetchBusinessProfile, parsePlatformProfile } from './profile.js'
+import { LATEST, RELEASES, SUPPORTED_VERSIONS } from './releases.js'
 
-describe('temporary profile URL fallback', () => {
-  it('DEFAULT_PROFILE_URL matches the build-time-defined template', () => {
-    // Internal-testing stopgap: points at a known-reachable UCP-shaped profile
-    // until we publish a shopify.github.io-hosted default. Friction-logged.
-    expect(DEFAULT_PROFILE_URL).toMatch(/^https:\/\/[\w.-]+\/.+\.json(\?.*)?$/)
-  })
-})
+// `profile init --version <v>` writes `RELEASES[v].agentProfileJson` verbatim.
+// These pin what that artifact is for EVERY release in the window, not just
+// the latest: `--version 2026-04-08` is a supported path, and a release whose
+// snapshot lost a capability would silently narrow what agents advertise.
+//
+// The predecessor of this block tested a HAND-WRITTEN template
+// (`localAgentProfileBody`), which had already drifted from the published
+// document it claimed to mirror (it omitted `dev.ucp.shopping.buyer_consent`
+// and invented spec URLs Shopify leaves out). That drift is unrepresentable
+// now: the artifact IS the published bytes.
+describe.each([...SUPPORTED_VERSIONS])('profile init artifact — UCP %s', (version) => {
+  const template = () =>
+    JSON.parse(RELEASES[version].agentProfileJson) as ReturnType<typeof parsePlatformProfile>
 
-describe('localAgentProfileBody — local profile template', () => {
-  // The body is the on-disk template `profile init` writes. Pin the shape so a
-  // careless edit doesn't silently drop a capability that EXTENSION_HINTS or an
-  // integration test relies on.
   it('schema-validates as a PlatformProfile', () => {
-    // If the schema ever rejects, `profile init` is broken at runtime — pinning
-    // here catches it at unit-test time instead.
-    expect(() => parsePlatformProfile(localAgentProfileBody())).not.toThrow()
+    // If the schema rejects it, `profile init --version <v>` writes a
+    // profile.json that `readUserProfile` will refuse on the next command.
+    expect(() => parsePlatformProfile(template())).not.toThrow()
   })
 
-  it('returns a fresh deep-cloned object on every call', () => {
-    const a = localAgentProfileBody()
-    const b = localAgentProfileBody()
-    expect(a).not.toBe(b)
-    expect(a.ucp.capabilities).not.toBe(b.ucp.capabilities)
-    // Mutating one must not bleed into the next call.
-    if (a.ucp.capabilities) a.ucp.capabilities['dev.shopify.catalog'] = []
-    expect(
-      localAgentProfileBody().ucp.capabilities?.['dev.shopify.catalog']?.length,
-    ).toBeGreaterThan(0)
+  it('declares its own release version and one mcp shopping service', () => {
+    const body = template()
+    expect(body.ucp.version).toBe(version)
+    const entries = body.ucp.services?.['dev.ucp.shopping'] ?? []
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({ version, transport: 'mcp' })
   })
 
   it('advertises the core shopping ops and Shopify catalog extensions', () => {
-    const body = localAgentProfileBody()
-    const ids = Object.keys(body.ucp.capabilities ?? {})
-    // Core shopping ops + Shopify storefront/global-catalog extensions. If we
-    // drop one, agents lose advertised support — explicit list catches that.
+    const ids = Object.keys(template().ucp.capabilities ?? {})
+    // Core shopping ops + Shopify storefront/global-catalog extensions. If a
+    // release drops one, agents lose advertised support for it.
     expect(ids).toEqual(
       expect.arrayContaining([
         'dev.ucp.shopping.checkout',
@@ -68,12 +59,14 @@ describe('localAgentProfileBody — local profile template', () => {
     )
   })
 
-  it('DEFAULT_AGENT_CAPABILITY_IDS matches the bundled body keys', () => {
-    // The exported constant is the source for the response-filter allowlist;
-    // it must stay in sync with the body or the filter rejects things we
-    // advertise (or vice-versa).
-    const bodyKeys = Object.keys(localAgentProfileBody().ucp.capabilities ?? {})
-    expect([...DEFAULT_AGENT_CAPABILITY_IDS].sort()).toEqual([...bodyKeys].sort())
+  it('every advertised capability id satisfies THIS release’s reverse-domain grammar', () => {
+    // The capability ids are what `allowlistedExtensions` intersects with the
+    // business's, and the grammar is narrower at 2026-04-08 — so this is
+    // checked per release, against that release's own generated pattern.
+    const pattern = RELEASES[version].reverseDomainPattern
+    const ids = Object.keys(template().ucp.capabilities ?? {})
+    expect(ids.length).toBeGreaterThan(0)
+    for (const id of ids) expect(pattern.test(id), id).toBe(true)
   })
 })
 

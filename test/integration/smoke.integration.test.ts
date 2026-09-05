@@ -29,9 +29,16 @@ async function run(...args: string[]): Promise<{ stdout: string; stderr: string;
 }
 
 describe('smoke: compiled binary', () => {
-  it('--version prints the build define semver and exits 0', async () => {
+  // `--version` answers two questions now. The build semver was never the
+  // interesting one: the protocol version is chosen by the ACTIVE PROFILE, so
+  // the only version fact a build can state is which releases it ships
+  // schemas for. That window is derived from src/core/releases.ts, which is
+  // why this asserts a shape rather than a literal.
+  it('--version prints the build semver AND the protocol window, exits 0', async () => {
     const { stdout, code } = await run('--version')
-    expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+/)
+    expect(stdout.trim()).toMatch(
+      /^ucp \d+\.\d+\.\d+.* \(UCP \d{4}-\d{2}-\d{2}(, \d{4}-\d{2}-\d{2})*\)$/,
+    )
     expect(code).toBe(0)
   })
 
@@ -57,7 +64,7 @@ describe('smoke: compiled binary', () => {
 
       const { stdout, stderr } = await execFileAsync('node', [binPath, '--version'])
       expect(stderr).toBe('')
-      expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+/)
+      expect(stdout.trim()).toMatch(/^ucp \d+\.\d+\.\d+/)
     },
   )
 
@@ -80,16 +87,13 @@ describe('smoke: compiled binary', () => {
     expect(code).toBe(1)
   })
 
-  // Regression: top-level await in the bin entry used to suspend module
-  // evaluation before BUSINESS_NOT_RESOLVED_CTA initialized, so the cta
-  // silently disappeared from the wire envelope when the binary was invoked
-  // directly (unit tests imported the module first, masking the bug). This
-  // test runs the actual compiled binary so any future re-introduction of the
-  // ordering hazard fails CI rather than getting caught in production.
+  // Hazard this gate exists for: top-level await in the bin entry suspends
+  // module evaluation, and any module-scope CTA constant not yet initialized
+  // silently drops out of the wire envelope. Unit tests import the module
+  // first and cannot see it — only the compiled binary can, so this runs it.
   //
-  // Profile init is now required before any dispatch. This regression gate
-  // exercises the compiled binary's structured CTA path for that first-run
-  // failure.
+  // Profile init is required before any dispatch, so this exercises the
+  // compiled binary's structured CTA path for that first-run failure.
   it('emits PROFILE_NOT_FOUND with structured cta when no profile is initialized', async () => {
     const env: Record<string, string> = {}
     for (const [k, v] of Object.entries(process.env)) {
@@ -133,6 +137,47 @@ describe('smoke: compiled binary', () => {
     const parsed = JSON.parse(stdout) as { code: string; cta?: { commands?: unknown[] } }
     expect(parsed.code).toBe('PROFILE_NOT_FOUND')
     expect(parsed.cta?.commands?.length ?? 0).toBeGreaterThan(0)
+  })
+
+  // `doctor` signals a `fail` check by exiting nonzero while printing the
+  // unchanged checks envelope on stdout. The mechanism is `process.exitCode`
+  // (incur's error sentinel would replace `data` with `{code, message}` and
+  // delete the checks array), so it only works if nothing downstream resets
+  // it — which only the real binary, exiting for real, can prove.
+  it('doctor exits 1 when a check fails, keeping the checks envelope on stdout', async () => {
+    const env: Record<string, string> = {}
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && k !== 'UCP_BUSINESS') env[k] = v
+    }
+    env.UCP_HOME = await mkdtemp(join(tmpdir(), 'ucp-doctor-fail-'))
+    const { stdout, code } = await new Promise<{ stdout: string; code: number }>((resolve) => {
+      execFile('node', [CLI_PATH, 'doctor', '--skip-network'], { env }, (err, out) => {
+        const e = err as { code?: number } | null
+        resolve({ stdout: out, code: e?.code ?? 0 })
+      })
+    })
+    expect(code).toBe(1)
+    const parsed = JSON.parse(stdout) as { ok: boolean; checks: { id: string; status: string }[] }
+    expect(parsed.ok).toBe(false)
+    // No profile is initialized in this fresh home.
+    expect(parsed.checks.find((c) => c.id === 'active-profile')?.status).toBe('fail')
+  })
+
+  it('doctor exits 0 when every check passes', async () => {
+    const env: Record<string, string> = {}
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && k !== 'UCP_BUSINESS') env[k] = v
+    }
+    env.UCP_HOME = await mkdtemp(join(tmpdir(), 'ucp-doctor-ok-'))
+    await execFileAsync('node', [CLI_PATH, 'profile', 'init', '--name', 'agent'], { env })
+    const { stdout, code } = await new Promise<{ stdout: string; code: number }>((resolve) => {
+      execFile('node', [CLI_PATH, 'doctor', '--skip-network'], { env }, (err, out) => {
+        const e = err as { code?: number } | null
+        resolve({ stdout: out, code: e?.code ?? 0 })
+      })
+    })
+    expect(code).toBe(0)
+    expect((JSON.parse(stdout) as { ok: boolean }).ok).toBe(true)
   })
 
   it('--help advertises --input-schema on op commands', async () => {

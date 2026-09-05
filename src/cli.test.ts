@@ -16,6 +16,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { ResolvedSession, ResolveSessionOptions } from './cli/session.js'
 import { createUcpCli, isSkillsAddInvocation } from './cli.js'
+import { saveUserProfile, writeActive } from './core/profile-store.js'
 import { setVerboseWriter } from './core/verbose.js'
 import { serveCli } from './test-utils.js'
 
@@ -42,8 +43,14 @@ describe('createUcpCli', () => {
           profile: {
             ucp: { version: '2026-08-25', status: 'success', services: {}, payment_handlers: {} },
           },
+          protocol: {
+            version: '2026-08-25',
+            source: 'well-known',
+            businessProfileUrl: `${args[0]}/.well-known/ucp`,
+          },
+          expectedCapabilities: [],
           negotiated: {},
-        }
+        } as const
       },
       resolveSession: passthroughSession,
     })
@@ -404,7 +411,7 @@ describe('createUcpCli — business resolution', () => {
 
 describe('createUcpCli — catalog fallback (meta.defaults.catalog)', () => {
   // Business origin URL — discovery hits <CATALOG_URL>/.well-known/ucp on
-  // the normal `discover()` path; there is no longer a bypass.
+  // the normal `discover()` path; there is no bypass.
   const CATALOG_URL = 'https://catalog.example.invalid'
   // Resolver stub that produces a user profile carrying `defaults.catalog`.
   // Mirrors what `resolveSession` builds for a real user profile after
@@ -669,20 +676,28 @@ describe('createUcpCli — catalog fallback (meta.defaults.catalog)', () => {
 })
 
 // End-to-end test that the `_onDiscover` side-channel flows from helper to
-// buildCta, and that the allowlist filter (`allowlistedExtensions` in
-// cli.ts) correctly intersects business-advertised capabilities with
-// `DEFAULT_AGENT_CAPABILITY_IDS` (the bundled agent profile's capabilities).
-// The test feeds a synthetic DiscoveredBusiness through the helper stub and
-// asserts the emitted CTA description carries the extension hint copy.
+// buildCta, and that `allowlistedExtensions` in cli.ts reads the ACTIVE
+// AGENT PROFILE's negotiated capability set (`expectedCapabilities`) rather
+// than a compile-time-frozen copy of the bundled template. The test feeds a
+// synthetic DiscoveredBusiness through the helper stub and asserts what the
+// emitted CTA description does — and does not — claim is active.
 describe('createUcpCli — extension-hint pipeline (negotiated → allowlist → CTA)', () => {
   const PROFILE_URL_LOCAL = 'https://agent.example.com/.well-known/ucp'
 
-  // Synthetic DiscoveredBusiness with the catalog-global extension advertised
-  // in capabilities (the TRUSTED, schema-parsed view of what the business
-  // published at /.well-known/ucp).
-  function discoveredWithExtension(extensions: string[]) {
+  // Synthetic DiscoveredBusiness. Two capability sets, deliberately separate:
+  //
+  //   `advertised`  what the BUSINESS published at /.well-known/ucp (lossless,
+  //                 stays in `profile` whatever we do with it)
+  //   `expected`    `agent.capabilities ∩ advertised` — computed by discover()
+  //                 from the HOSTED agent profile, and the field the CTA
+  //                 allowlist reads. Defaults to `advertised` (the
+  //                 "profile declares everything the business does" case).
+  //
+  // Modelling both is the point: passing `expected` explicitly is how a test
+  // says "the active profile does / does not declare this".
+  function discoveredWithExtension(advertised: string[], expected: string[] = advertised) {
     const capabilities: Record<string, unknown[]> = {}
-    for (const ext of extensions) capabilities[ext] = [{ version: '2026-08-25' }]
+    for (const ext of advertised) capabilities[ext] = [{ version: '2026-08-25' }]
     return {
       business: 'https://shop.example.com',
       profile: {
@@ -694,6 +709,7 @@ describe('createUcpCli — extension-hint pipeline (negotiated → allowlist →
           capabilities,
         },
       },
+      expectedCapabilities: expected,
       negotiated: {},
     } as never // shape is structurally correct; type union from generated zod is heavy
   }
@@ -718,9 +734,10 @@ describe('createUcpCli — extension-hint pipeline (negotiated → allowlist →
     expect(parsed.cta?.description).toMatch(/global catalog active/)
   })
 
-  it('non-allowlisted capability does NOT leak into the CTA description', async () => {
-    // Even though the business advertises an unknown capability, the
-    // build-time allowlist drops it BEFORE it reaches the CTA layer.
+  it('a capability the BUSINESS advertises alone does NOT leak into the CTA', async () => {
+    // The property that matters: THE BUSINESS CANNOT EXPAND THE SET. Under
+    // `active ∩ business`, ids only the business published contribute nothing
+    // — `expectedCapabilities` is empty here even though `profile` lists them.
     const cli = createUcpCli({
       resolveSession: async () => ({
         profile: { name: 'agent', profileUrl: PROFILE_URL_LOCAL },
@@ -729,7 +746,7 @@ describe('createUcpCli — extension-hint pipeline (negotiated → allowlist →
       }),
       searchCatalog: async (_business, _input, options) => {
         options._onDiscover?.(
-          discoveredWithExtension(['evil.example.com.tracker', 'random.unknown.extension']),
+          discoveredWithExtension(['evil.example.com.tracker', 'random.unknown.extension'], []),
         )
         return { products: [{ id: 'p1' }] }
       },
@@ -741,7 +758,30 @@ describe('createUcpCli — extension-hint pipeline (negotiated → allowlist →
     expect(parsed.cta?.description).not.toMatch(/evil\.example\.com/)
   })
 
-  it('mixed advertised: only allowlisted entries reach the CTA', async () => {
+  it('the ACTIVE PROFILE decides, not the bundled template', async () => {
+    // `dev.shopify.catalog.global` IS in the bundled/published template, so a
+    // compile-time-frozen allowlist would surface its hint here.
+    // The active profile does not declare it, so the server never negotiated
+    // it, so the CTA must not claim it is active. This is the assertion that
+    // fails if the allowlist ever goes back to reading a frozen constant.
+    const cli = createUcpCli({
+      resolveSession: async () => ({
+        profile: { name: 'agent', profileUrl: PROFILE_URL_LOCAL },
+        business: 'https://shop.example.com',
+        businessSource: 'flag',
+      }),
+      searchCatalog: async (_business, _input, options) => {
+        options._onDiscover?.(discoveredWithExtension(['dev.shopify.catalog.global'], []))
+        return { products: [{ id: 'p1' }] }
+      },
+    })
+    const { output, exitCode } = await serveCli(cli, ['catalog', 'search'])
+    expect(exitCode).toBe(0)
+    const parsed = JSON.parse(output)
+    expect(parsed.cta?.description).not.toMatch(/global catalog active/)
+  })
+
+  it('mixed advertised: only negotiated entries reach the CTA', async () => {
     const cli = createUcpCli({
       resolveSession: async () => ({
         profile: { name: 'agent', profileUrl: PROFILE_URL_LOCAL },
@@ -750,7 +790,10 @@ describe('createUcpCli — extension-hint pipeline (negotiated → allowlist →
       }),
       searchCatalog: async (_business, _input, options) => {
         options._onDiscover?.(
-          discoveredWithExtension(['dev.shopify.catalog.global', 'evil.example.com.tracker']),
+          discoveredWithExtension(
+            ['dev.shopify.catalog.global', 'evil.example.com.tracker'],
+            ['dev.shopify.catalog.global'],
+          ),
         )
         return { products: [{ id: 'p1' }] }
       },
@@ -1126,8 +1169,8 @@ describe('createUcpCli — escalation hook', () => {
 
     // Escalation is a normal UCP response — exit 0, full checkout nested at
     // `result`. The wire `status: 'requires_escalation'` is the
-    // checkout-state-machine value (load-bearing); there's no longer a
-    // redundant envelope-level `status: 'ok'` to shadow it.
+    // checkout-state-machine value (load-bearing); no envelope-level `status`
+    // shadows it.
     expect(exitCode).toBe(0)
     const parsed = JSON.parse(output)
     expect(parsed.business).toBe('https://shop.example.com')
@@ -1766,6 +1809,77 @@ describe('createUcpCli — --view projection', () => {
     ])
     expect(exitCode).not.toBe(0)
     expect(output).toMatch(/BUSINESS_NOT_RESOLVED/)
+  })
+})
+
+// `ucp doctor`'s exit code. A `fail` severity that cannot fail a build is
+// decoration, and `protocol` is the first check whose failure PREDICTS total
+// failure (the business GETs the same profile URL). The envelope on stdout is
+// unchanged — which is why this is `process.exitCode` and not `c.error`,
+// whose sentinel would replace `data` with `{code, message}` and delete the
+// checks array. incur only invokes its exit handler on error paths, so
+// `serveCli`'s injected `exit` is never called here.
+describe('createUcpCli — doctor exit code', () => {
+  async function doctorExitCode(
+    argv: string[],
+    deps: Parameters<typeof createUcpCli>[0] = {},
+  ): Promise<{ output: string; processExitCode: number | string | undefined }> {
+    const prior = process.exitCode
+    process.exitCode = undefined
+    try {
+      const { output } = await serveCli(createUcpCli(deps), argv)
+      return { output, processExitCode: process.exitCode }
+    } finally {
+      process.exitCode = prior
+    }
+  }
+
+  it('exits 1 on ok:false and still prints the full checks envelope', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ucp-doctor-exit-'))
+    const { output, processExitCode } = await doctorExitCode(['doctor', '--skip-network'], {
+      doctor: { homeDir: home, env: {} },
+    })
+    expect(processExitCode).toBe(1)
+    const parsed = JSON.parse(output) as {
+      ok: boolean
+      checks: { id: string; status: string }[]
+    }
+    expect(parsed.ok).toBe(false)
+    expect(parsed.checks.find((c) => c.id === 'active-profile')?.status).toBe('fail')
+    expect(parsed.checks.length).toBeGreaterThan(3)
+  })
+
+  it('leaves the exit code alone when every check passes', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ucp-doctor-exit-ok-'))
+    await saveUserProfile(
+      {
+        name: 'agent',
+        body: {
+          ucp: { version: '2026-08-25', status: 'success', services: {}, payment_handlers: {} },
+          keys: [],
+        },
+        meta: { created_at: '2026-05-05T12:00:00Z' },
+      },
+      { homeDir: home },
+    )
+    await writeActive({ profile: 'agent' }, { homeDir: home })
+    const { output, processExitCode } = await doctorExitCode(['doctor', '--skip-network'], {
+      doctor: { homeDir: home, env: {} },
+    })
+    expect(processExitCode).toBeUndefined()
+    expect((JSON.parse(output) as { ok: boolean }).ok).toBe(true)
+  })
+
+  // Under `--mcp` the checks are a tool result. A stdio server that answered
+  // one doctor call must not later exit nonzero because of it.
+  it('does not set the process exit code in MCP mode', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ucp-doctor-exit-mcp-'))
+    const { output, processExitCode } = await doctorExitCode(['doctor', '--skip-network'], {
+      inMcpMode: true,
+      doctor: { homeDir: home, env: {} },
+    })
+    expect(processExitCode).toBeUndefined()
+    expect((JSON.parse(output) as { ok: boolean }).ok).toBe(false)
   })
 })
 

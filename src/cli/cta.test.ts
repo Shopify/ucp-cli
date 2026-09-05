@@ -3,8 +3,8 @@
 // Coverage:
 //  - dispatcher routing (toolName → builder; isEscalation override)
 //  - per-op builder happy paths (commands present, descriptions sane)
-//  - update_checkout gate: status === 'ready_for_complete' (regression for the
-//    non-spec `ready_to_complete` boolean we used to read)
+//  - update_checkout gate: status === 'ready_for_complete' (the non-spec
+//    `ready_to_complete` boolean must not bypass it)
 //  - escalation cascade priority (unrecoverable > recoverable >
 //    requires_buyer_input > requires_buyer_review)
 //  - processCheckoutErrors branch matrix (the spec algorithm itself)
@@ -369,8 +369,8 @@ describe('update_checkout CTA — spec-status gate', () => {
 
   it('regression: legacy ready_to_complete: true is IGNORED — gate is the spec status', () => {
     // The CLI must gate only on the spec status enum. A non-spec
-    // `ready_to_complete: true` boolean (which we used to read) must not
-    // bypass the gate when status says otherwise.
+    // `ready_to_complete: true` boolean must not bypass the gate when status
+    // says otherwise.
     const cta = buildCta({
       toolName: 'update_checkout',
       result: { id: 'chk_1', status: 'incomplete', ready_to_complete: true },
@@ -711,13 +711,10 @@ describe('catalog CTA — global-catalog branch (seller/checkout enrichment)', (
     )
     expect(cta?.description).toMatch(/products\[N\]\.variants\[M\]\.url/)
     expect(cta?.description).toMatch(/products\[N\]\.variants\[M\]\.checkout_url/)
-    // The dropped native_checkout branch used to emit "business-hosted
-    // buy-now handoff"; the surviving handoff copy still mentions both
-    // "buy-now handoff" and "business-hosted checkout" as separate phrases.
+    // Handoff copy names both phrases separately.
     expect(cta?.description).toMatch(/buy-now handoff/)
     expect(cta?.description).toMatch(/business-hosted checkout/)
-    // native_checkout used to gate a separate "business doesn't support
-    // native checkout" branch; that copy is gone (escalation handles it).
+    // No native_checkout branch — escalation covers that case.
     expect(cta?.description).not.toMatch(/native_checkout/)
     expect(cta?.description).toMatch(/one cart\/checkout per seller/)
     // Handoff URLs are data paths in prose, not invalid CLI subcommands.
@@ -957,11 +954,12 @@ describe('catalog CTA — extension hints from negotiated view', () => {
     expect(cta?.description).not.toMatch(/Extensions:/)
   })
 
-  // Defense-in-depth: the upstream filter in cli.ts allowlistedExtensions
-  // already gates against DEFAULT_AGENT_CAPABILITY_IDS (the bundled profile's
-  // capability set). The CTA layer's EXTENSION_HINTS map is the second
-  // safeguard — even if a name bypassed the upstream allowlist, no hint copy
-  // means it never reaches the agent's view.
+  // Upstream, `allowlistedExtensions` in cli.ts has already reduced this to
+  // `active agent profile ∩ merchant`, so no merchant-only id can arrive
+  // here. EXTENSION_HINTS is a copy LOOKUP, not a second filter: an id with
+  // no registered copy simply produces no hint. That is the right default for
+  // a third-party capability this CLI has nothing specific to say about — and
+  // it also means a hostile name could not carry text even if it arrived.
   it('unknown extension id (no hint copy registered) is silently dropped', () => {
     const cta = buildCta({
       toolName: 'search_catalog',

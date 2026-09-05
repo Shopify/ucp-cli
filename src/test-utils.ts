@@ -8,8 +8,10 @@
 
 import type { ProfileCliDependencies } from './cli/profile.js'
 import type { createUcpCli } from './cli.js'
+import { type AgentProfile, loadAgentProfile } from './core/agent.js'
 import type { PlatformProfile } from './core/profile.js'
 import type { ActiveSession, UserProfile } from './core/profile-store.js'
+import { LATEST, RELEASES, type Version } from './core/releases.js'
 
 const BLANK_BODY: PlatformProfile = {
   ucp: { version: '2026-08-25', status: 'success', services: {}, payment_handlers: {} },
@@ -18,11 +20,46 @@ const BLANK_BODY: PlatformProfile = {
 
 const BLANK_META = {
   created_at: '2026-05-01T00:00:00.000Z',
-  protocol_versions: { min: '2026-01-23', max: '2026-08-25' },
 }
 
 export function userProfile(name: string, overrides: Partial<UserProfile> = {}): UserProfile {
   return { name, body: BLANK_BODY, meta: BLANK_META, ...overrides }
+}
+
+export interface AgentProfileFixtureOptions {
+  /** Spec release the profile declares. Defaults to {@link LATEST}. */
+  version?: Version
+  /** Local profile name used in messages. Defaults to `'agent'`. */
+  name?: string
+  /** Hosted URL. Defaults to the release's published agent-profile URL. */
+  url?: string
+  /** Replace `ucp.services` wholesale (the platform side of negotiation). */
+  services?: Record<string, Array<Record<string, unknown>>>
+  /** Replace `ucp.capabilities` wholesale. */
+  capabilities?: Record<string, Array<Record<string, unknown>>>
+}
+
+/**
+ * Build a fetched-and-validated {@link AgentProfile} for tests.
+ *
+ * Starts from the release's VERBATIM published snapshot (the document the CLI
+ * actually presents on the default path) and runs it through the real
+ * `loadAgentProfile`, so fixtures cannot declare something the loader would
+ * have rejected — e.g. a `dev.ucp.*` entry off the profile's own version.
+ */
+export function agentProfileFixture(options: AgentProfileFixtureOptions = {}): AgentProfile {
+  const version = options.version ?? LATEST
+  const release = RELEASES[version]
+  const body = JSON.parse(release.agentProfileJson) as {
+    ucp: Record<string, unknown>
+  }
+  if (options.services !== undefined) body.ucp.services = options.services
+  if (options.capabilities !== undefined) body.ucp.capabilities = options.capabilities
+  return loadAgentProfile({
+    body,
+    url: options.url ?? release.defaultAgentProfileUrl,
+    name: options.name ?? 'agent',
+  })
 }
 
 export async function serveCli(

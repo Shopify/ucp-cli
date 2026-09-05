@@ -11,6 +11,7 @@ import { buildCta } from './cli/cta.js'
 import { type DoctorDeps, runDoctor } from './cli/doctor.js'
 import { buildOperationInput } from './cli/input.js'
 import { buildProfileCli, type ProfileCliDependencies } from './cli/profile.js'
+import { buildProfileSwitchCta, localProfilesSpeaking } from './cli/profile-hint.js'
 import { resolveSession } from './cli/session.js'
 import { syncSkillsWithCleanup } from './cli/skills-sync.js'
 import { runUse, type UseDeps } from './cli/use.js'
@@ -26,8 +27,9 @@ import {
 } from './core/escalation.js'
 import { canonicalizeOrigin, type HeaderMap, resolveHeaders } from './core/headers.js'
 import { isDryRunPreview } from './core/operation.js'
-import { DEFAULT_AGENT_CAPABILITY_IDS } from './core/profile.js'
+import { listProfiles, readUserProfile } from './core/profile-store.js'
 import { describeProxyState } from './core/proxy.js'
+import { SUPPORTED_VERSIONS } from './core/releases.js'
 import { acceptsHttpsUrl, parseHttpsUrl } from './core/url.js'
 import { setVerboseWriter, vlog } from './core/verbose.js'
 import { ErrorCodes, UcpError } from './lib/errors.js'
@@ -59,6 +61,35 @@ const SKILLS_SUGGESTIONS: string[] = [
   'Search <shop-url> for noise-canceling headphones and walk me through buying a pair',
   'What operations does <shop-url> support over UCP?',
 ]
+/**
+ * What `ucp --version` prints: `ucp 0.7.0 (UCP 2026-04-08, 2026-08-25)`.
+ *
+ * The parenthetical is the SUPPORTED RELEASES, derived from the release
+ * registry — never hardcoded, so adding or dropping a release cannot leave
+ * this line lying. It matters because the installed CLI does not determine
+ * which protocol version is spoken (the active agent profile does): the only
+ * version fact a build can state is which releases it supports.
+ */
+export function versionLine(): string {
+  return `ucp ${__CLI_VERSION__} (UCP ${SUPPORTED_VERSIONS.join(', ')})`
+}
+
+/**
+ * True when `argv` is a root `--version` query rather than a command-local
+ * `--version` VALUE (`ucp profile init --version 2026-04-08`).
+ *
+ * Mirrors incur's own rule (`Cli.js` extractBuiltinFlags): `--version` is the
+ * builtin only when the next token is absent or starts with `-`. `--help`
+ * wins over `--version` there too, so it wins here.
+ */
+export function isRootVersionInvocation(argv: readonly string[]): boolean {
+  if (argv.includes('--help') || argv.includes('-h')) return false
+  return argv.some(
+    (token, i) =>
+      token === '--version' && (argv[i + 1] === undefined || argv[i + 1]?.startsWith('-') === true),
+  )
+}
+
 const CREATE_CHECKOUT_TOOL_NAME = 'create_checkout'
 const CHECKOUT_TOOL_NAMES = new Set([
   CREATE_CHECKOUT_TOOL_NAME,
@@ -79,6 +110,8 @@ export type ShoppingHelperDep = (
   options: {
     force: boolean
     profileUrl: string
+    /** Local profile name, for messages (see DiscoverOptions.profileName). */
+    profileName?: string
     dryRun?: boolean
     /** Resolved outbound HTTP headers; see {@link resolveHeaders}. */
     headers?: Record<string, string>
@@ -138,10 +171,20 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
   const completeCheckoutImpl = withMeta(deps.completeCheckout, completeCheckout)
   const cancelCheckoutImpl = withMeta(deps.cancelCheckout, cancelCheckout)
   const getOrderImpl = withMeta(deps.getOrder, getOrder)
+  // Reuses the `profile` command tree's injectable store so tests drive one
+  // set of stubs; the hint is read-only and best-effort either way.
+  const profileHintDeps = {
+    listProfiles: deps.profile?.listProfiles ?? listProfiles,
+    readUserProfile: deps.profile?.readUserProfile ?? readUserProfile,
+  }
 
   const cli = Cli.create('ucp', {
     description: CLI_DESCRIPTION,
     format: 'json',
+    // Bare semver, deliberately: incur feeds `version` to its update checker
+    // (strict-semver `parseVersion`) and to `Mcp.serve` as `serverInfo.version`,
+    // so the protocol window cannot ride along here. `runUcpCli` intercepts
+    // the root `--version` surface instead — see `versionLine()`.
     version: __CLI_VERSION__,
     mcp: {
       // incur 0.5 defaults MCP tool discovery to 'progressive' (search /
@@ -195,6 +238,25 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
             },
           })
           return
+        }
+        // PROTOCOL_VERSION_INCOMPATIBLE is thrown in core, which cannot see
+        // the profile store. Decorate it here with the one remedy that needs
+        // local state: "another profile of yours speaks a version they do
+        // offer". Deliberately a CTA — `context` is never serialized, so a
+        // hint that lived there would not exist for agents reading CLI JSON.
+        if (err instanceof UcpError && err.code === ErrorCodes.PROTOCOL_VERSION_INCOMPATIBLE) {
+          const cta = buildProfileSwitchCta(
+            await localProfilesSpeaking(
+              offeredVersions(err.context),
+              activeProfileName(err.context),
+              profileHintDeps,
+            ),
+            { command: c.command, displayName: c.displayName },
+          )
+          if (cta !== undefined) {
+            c.error({ code: err.code, message: err.message, cta })
+            return
+          }
         }
         if (err instanceof UcpError && err.cta !== undefined) {
           c.error({ code: err.code, message: err.message, cta: err.cta })
@@ -297,6 +359,10 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       const discoverResult = await discoverImpl(businessUrl, {
         force: c.options.refresh,
         profileUrl: requireProfileUrl(session.profile.profileUrl),
+        // The session knows the local profile NAME; without passing it,
+        // PROTOCOL_VERSION_INCOMPATIBLE can only name the URL and cannot
+        // suggest `--profile <name>`.
+        profileName: session.profile.name,
         headers,
       })
       return c.ok(applyView({ result: discoverResult }, viewState))
@@ -441,6 +507,7 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       const result = await helper(prep.business, merged, {
         force: prep.force,
         profileUrl: prep.profileUrl,
+        profileName: prep.profileName,
         headers,
         ...(c.options.dryRun ? { dryRun: true } : {}),
         _onDiscover: (d) => {
@@ -666,6 +733,24 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
     },
   })
 
+  // `doctor` exits 1 when the verdict is `ok: false`, and prints the same
+  // structured envelope either way. A `fail` severity that cannot fail a
+  // build is decoration — and `protocol` is the first check whose failure
+  // PREDICTS total failure (the business GETs the same profile URL and
+  // hard-fails `-32001 profile_unreachable` if it cannot read it, or
+  // negotiates a different release than the one we speak), so a green exit
+  // there would be telling CI the install is healthy while every command is
+  // guaranteed to fail. `--skip-network` is the offline/flake escape.
+  //
+  // Done by setting `process.exitCode` rather than `c.error(...)`: incur's
+  // error sentinel REPLACES `data` with `{code, message}`, which would delete
+  // the per-check array that is the entire point of the command. incur only
+  // calls its exit handler on error paths, so a success return leaves this
+  // value untouched and the process exits with it.
+  //
+  // Not applied under `--mcp`: there the checks are a tool result, and a
+  // stdio server that has answered one doctor call must not later exit
+  // nonzero because of it.
   cli.command('doctor', {
     description: 'Verify your install is healthy and businesses are reachable',
     args: z.object({}),
@@ -673,13 +758,17 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       skipNetwork: z
         .boolean()
         .default(false)
-        .describe('Skip network probes (profile fetch, hosting URL reachability).'),
+        .describe(
+          'Skip network probes (fetching the hosted agent profile). Also the escape hatch for exit-code gating in offline or flaky-network CI.',
+        ),
     }),
     async run(c) {
-      return runDoctor({
+      const result = await runDoctor({
         ...(deps.doctor ?? {}),
         skipNetwork: c.options.skipNetwork,
       })
+      if (!result.ok && !inMcpMode) process.exitCode = 1
+      return result
     },
   })
 
@@ -714,7 +803,7 @@ interface OperationContext {
 
 // Run-time context for shopping commands. `id` is optional because
 // create/search/lookup commands omit it; opRun handles undefined gracefully
-// via mergeId. `business` no longer lives in args (moved to options).
+// via mergeId. `business` lives in options, not args.
 interface ShoppingRunContext extends OperationContext {
   // `id?: string | undefined` (not `id?: string`) so the type lines up with
   // incur's inferred context shape under exactOptionalPropertyTypes when the
@@ -734,6 +823,8 @@ type ShoppingHelper = {
     options: {
       force: boolean
       profileUrl: string
+      /** Local profile name, for messages (see DiscoverOptions.profileName). */
+      profileName?: string
       dryRun?: boolean
       /** Resolved outbound HTTP headers; see {@link resolveHeaders}. */
       headers?: Record<string, string>
@@ -930,6 +1021,7 @@ async function inputSchemaOperation(
   const resolved = await discoverImpl(businessUrl, {
     capabilities: [helper.capability],
     profileUrl,
+    profileName: session.profile.name,
     force: c.options.refresh,
     headers,
   })
@@ -998,6 +1090,20 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+// `PROTOCOL_VERSION_INCOMPATIBLE.context` readers. Defensive rather than
+// cast: `context` is typed `unknown` on UcpError, and a malformed context
+// must degrade to "no hint", never take down the error path it decorates.
+function offeredVersions(context: unknown): readonly string[] {
+  if (!isPlainRecord(context)) return []
+  const offered = context.offered
+  return Array.isArray(offered) ? offered.filter((v): v is string => typeof v === 'string') : []
+}
+
+function activeProfileName(context: unknown): string | undefined {
+  if (!isPlainRecord(context)) return undefined
+  return typeof context.profileName === 'string' ? context.profileName : undefined
+}
+
 function requireProfileUrl(profileUrl: string | undefined): string {
   if (profileUrl !== undefined) return profileUrl
   throw new UcpError({
@@ -1019,35 +1125,33 @@ interface ErrorEnvelopeOpts {
   retryable?: boolean
 }
 
-// Intersect business-advertised capability ids (the TRUSTED, schema-parsed
-// view from `discover()`) with this CLI's bundled capability set
-// (`DEFAULT_AGENT_CAPABILITY_IDS`). Returns the subset of advertised
-// extensions the CTA layer is permitted to surface to agents.
+// Which advertised extension ids the CTA layer may surface: the intersection
+// of the ACTIVE AGENT PROFILE's declared capabilities with the business's.
+// `discovered.expectedCapabilities` is exactly that intersection, computed in
+// `discover()` from the identity that profile resolves to.
 //
-// Why allowlist:
-//   * The business profile is schema-validated but the capability KEYS are
-//     free-form reverse-domain strings. A business can publish any name. Even
-//     trusted (parsed-by-CLI) names should not propagate into agent-facing
-//     guidance unless we know what they mean. The allowlist is the bridge.
-//   * The allowlist is compile-time-frozen — `DEFAULT_AGENT_CAPABILITY_IDS` is
-//     derived once from the bundled `localAgentProfileBody()` template at
-//     module load. A runtime-mutable allowlist would be an escalation target;
-//     the immutability is the security property.
-//   * Single source of truth: anything this CLI is willing to *negotiate* is
-//     the same thing it *advertises* in its agent profile. If we add a
-//     capability to the bundled profile, the filter accepts it automatically;
-//     if we drop one, the filter rejects it automatically. No separate list
-//     to keep in sync.
+// Threat model, stated plainly — the previous comment defended against the
+// wrong party. The property that matters is THE BUSINESS CANNOT EXPAND THE
+// SET: under `active ∩ business` a merchant publishing `com.evil.exfiltrate`
+// contributes nothing unless our own profile already declares it. Only the
+// user's profile can add an id, and the user is the principal — they wrote
+// (or chose to point at) that document. Freezing the set at compile time from
+// the bundled template protected the user from themselves while leaving the
+// actual threat unstated, and it broke the legitimate case: a user who
+// declares `com.acme.loyalty` in their own hosted profile and whose merchant
+// negotiates it was invisible to the CTA layer.
+//
+// This is a PRESENTATION gate, not a security boundary for payloads. Payload
+// pre-flight is `isAllowedUnknownExtensionKey` (a shape check against the
+// negotiated release's `reverseDomainPattern`), and the authoritative field
+// gate is the business's `inputSchema` — already shaped by server-side
+// negotiation against this same profile.
 //
 // Returns an empty array when `discovered` is undefined (e.g. discover never
 // completed, or the helper short-circuited before invoking `_onDiscover`),
 // so CTA builders that read this field never have to null-check.
 function allowlistedExtensions(discovered: DiscoveredBusiness | undefined): readonly string[] {
-  if (discovered === undefined) return []
-  const capabilities = discovered.profile.ucp.capabilities
-  if (typeof capabilities !== 'object' || capabilities === null) return []
-  const advertised = new Set(Object.keys(capabilities))
-  return DEFAULT_AGENT_CAPABILITY_IDS.filter((ext) => advertised.has(ext))
+  return discovered?.expectedCapabilities ?? []
 }
 
 // Hoist the protocol `ucp` field out of the raw server response so it sits at
@@ -1202,7 +1306,21 @@ export function isSkillsAddInvocation(argv: readonly string[]): boolean {
   )
 }
 
-export async function runUcpCli(argv = process.argv.slice(2)): Promise<void> {
+export async function runUcpCli(
+  argv = process.argv.slice(2),
+  // Injectable so the version surface is unit-testable without spawning the
+  // compiled binary (the compiled path is covered in the smoke integration).
+  write: (s: string) => void = (s) => {
+    process.stdout.write(s)
+  },
+): Promise<void> {
+  // Intercepted here rather than handed to incur as `version` (see
+  // Cli.create above). Runs before proxy/verbose setup: `--version` must not
+  // depend on outbound networking being configurable.
+  if (isRootVersionInvocation(argv)) {
+    write(`${versionLine()}\n`)
+    return
+  }
   // `--mcp` toggles MCP stdio mode in incur. The escalation hook must be a
   // no-op in that mode (see src/core/escalation.ts). Detecting at the executable
   // boundary and threading via `inMcpMode` keeps run handlers importable and

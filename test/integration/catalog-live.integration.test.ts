@@ -20,8 +20,10 @@
 //      a brittle gate on Shopify's merchandising state.
 //
 // catalog.shopify.com fetches the advertised `meta.ucp-agent.profile` during
-// dispatch. Until managed upload lands, local profiles without `profile_url`
-// advertise DEFAULT_PROFILE_URL as a known-reachable stopgap.
+// dispatch, so the URL must be reachable. `profile init` writes the release
+// default there unless `--profile-url` names one you host yourself, and a
+// profile authored by an older CLI with no `profile_url` falls back to the
+// same release default.
 
 import { execFile } from 'node:child_process'
 import { mkdtemp } from 'node:fs/promises'

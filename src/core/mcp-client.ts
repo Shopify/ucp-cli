@@ -173,6 +173,9 @@ export async function mcpRpc<T = unknown>(opts: McpRpcOptions): Promise<T> {
       endpoint,
       method: opts.method,
       raw,
+      ...(agentProfileUrlFromParams(opts.params) !== undefined
+        ? { agentProfileUrl: agentProfileUrlFromParams(opts.params) as string }
+        : {}),
       ...(response.ok ? {} : { http_status: response.status }),
     })
   }
@@ -189,15 +192,81 @@ export async function mcpRpc<T = unknown>(opts: McpRpcOptions): Promise<T> {
   return raw.result as T
 }
 
+// The agent profile URL we put on the wire for THIS request. Both `tools/list`
+// and `tools/call` carry it at `params.arguments.meta.ucp-agent.profile`
+// (composed by discover.ts / operation.ts), so a server complaint about that
+// document can be reported against the exact URL we sent.
+function agentProfileUrlFromParams(params: unknown): string | undefined {
+  if (typeof params !== 'object' || params === null) return undefined
+  const args = (params as { arguments?: unknown }).arguments
+  if (typeof args !== 'object' || args === null) return undefined
+  const meta = (args as { meta?: unknown }).meta
+  if (typeof meta !== 'object' || meta === null) return undefined
+  const agent = (meta as Record<string, unknown>)['ucp-agent']
+  if (typeof agent !== 'object' || agent === null) return undefined
+  const profile = (agent as { profile?: unknown }).profile
+  return typeof profile === 'string' ? profile : undefined
+}
+
+// The business could not fetch OUR hosted agent profile, so it refused the
+// call (verified live: JSON-RPC -32001 `UCP discovery failed` with
+// `data.code: 'profile_unreachable'`). This is the ONLY request-time source
+// of AGENT_PROFILE_UNREACHABLE: the CLI does not pre-flight its own URL (a
+// blip there must not block a call the merchant would have served from
+// cache), so the merchant reporting the fetch failure is how we learn — not a
+// generic MCP_RPC_ERROR, and not the merchant's fault. Matched on `data.code`
+// rather than the numeric -32001: the numeric code sits in JSON-RPC's
+// implementation-defined server-error range and is not itself a UCP contract,
+// while `profile_unreachable` means exactly one thing.
+function isProfileUnreachableRpcError(data: unknown): boolean {
+  if (typeof data !== 'object' || data === null) return false
+  return (data as { code?: unknown }).code === 'profile_unreachable'
+}
+
 function rpcError(opts: {
   endpoint: string
   method: string
   raw: JsonRpcErrorResponse
   http_status?: number
+  /** Agent profile URL advertised on this request, when the params carried one. */
+  agentProfileUrl?: string
 }): UcpError {
   const { code: rpcCode, message: rpcMessage, data: rpcData } = opts.raw.error
   const httpDetail = opts.http_status === undefined ? '' : ` [HTTP ${opts.http_status}]`
   const dataDetail = summarizeRpcData(rpcData)
+
+  if (isProfileUnreachableRpcError(rpcData)) {
+    const where =
+      opts.agentProfileUrl === undefined
+        ? 'the agent profile URL sent with this request'
+        : opts.agentProfileUrl
+    return new UcpError({
+      // `client`, not `transport`: the broken document is ours. Same layer the
+      // local detection path uses, which is what keeps `code → layer` a
+      // function (see ERROR_LAYERS in lib/errors.ts).
+      layer: 'client',
+      code: ErrorCodes.AGENT_PROFILE_UNREACHABLE,
+      message: `${opts.endpoint} could not fetch our hosted agent profile at ${where} (business reported profile_unreachable); every call fails until that URL serves the profile. Run \`ucp doctor\`.`,
+      context: {
+        endpoint: opts.endpoint,
+        method: opts.method,
+        reason: 'business_reported',
+        ...(opts.agentProfileUrl !== undefined ? { url: opts.agentProfileUrl } : {}),
+        rpcCode,
+        rpcData,
+      },
+      cta: {
+        description:
+          'The business fetches the agent profile URL on every call. Fix hosting (or point at a reachable profile URL with --profile-url), then retry.',
+        commands: [
+          {
+            command: 'ucp doctor',
+            description: 'probe the active profile URL and report what it serves',
+          },
+        ],
+      },
+    })
+  }
   // When HTTP status is present AND matches a spec-aligned code (auth, rate-
   // limit, server-error), prefer that over the generic MCP_RPC_ERROR fallback
   // so agents can branch precisely. For unmapped statuses (e.g. 422

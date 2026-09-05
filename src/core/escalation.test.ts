@@ -61,7 +61,7 @@ describe('isEscalationEnvelope', () => {
     'string',
     42,
     {},
-    { checkout: { status: 'requires_escalation' } }, // old wrapped shape — no longer matches
+    { checkout: { status: 'requires_escalation' } }, // wrapped — the detector reads the top level
     { status: 'incomplete' },
     // Review is a message severity (`requires_buyer_review`), not a checkout status.
     { status: 'requires_review' },

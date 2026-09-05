@@ -7,8 +7,8 @@
 // documented in scripts/codegen-schemas.ts.
 
 import { describe, expect, it } from 'vitest'
-import { businessProfileSchema } from './generated/business_profile.zod.js'
-import { platformProfileSchema } from './generated/platform_profile.zod.js'
+import { businessProfileSchema } from './generated/2026-08-25/business_profile.zod.js'
+import { platformProfileSchema } from './generated/2026-08-25/platform_profile.zod.js'
 
 describe('platformProfileSchema', () => {
   it('accepts an MCP service entry without an endpoint (consumer-only agent)', () => {
