@@ -16,8 +16,8 @@ importers:
         specifier: ^1.3.0
         version: 1.3.0
       incur:
-        specifier: ^0.4.26
-        version: 0.4.26
+        specifier: ^0.5.1
+        version: 0.5.1
       undici:
         specifier: ^7.29.0
         version: 7.29.0
@@ -883,8 +883,8 @@ packages:
   import-meta-resolve@4.2.0:
     resolution: {integrity: sha512-Iqv2fzaTQN28s/FwZAoFq0ZSs/7hMAHJVX+w8PZl3cY19Pxk6jFFalxQoIfW2826i/fDLXv8IiEZRIT0lDuWcg==, tarball: https://registry.npmjs.org/import-meta-resolve/-/import-meta-resolve-4.2.0.tgz}
 
-  incur@0.4.26:
-    resolution: {integrity: sha512-63lwOc8+o1VeFkIW3sWWMrDSP5Dd1NsvucUWyxLUk+DoNRiNl7cj481nlLdlboXkq+tqYPBSlV/7XbylS2S4BA==, tarball: https://registry.npmjs.org/incur/-/incur-0.4.26.tgz}
+  incur@0.5.1:
+    resolution: {integrity: sha512-gEwPg0Rwf+Oi8pwySLumYgWk//Xiv2wRJhwsOwVskt7ZHrfwFTR7oQmANnyDqudRYhqK3I5/dp489kPehPjIww==, tarball: https://registry.npmjs.org/incur/-/incur-0.5.1.tgz}
     engines: {node: '>=22'}
     hasBin: true
 
@@ -1999,7 +1999,7 @@ snapshots:
 
   import-meta-resolve@4.2.0: {}
 
-  incur@0.4.26:
+  incur@0.5.1:
     dependencies:
       '@cfworker/json-schema': 4.1.1
       '@modelcontextprotocol/server': 2.0.0-alpha.2(@cfworker/json-schema@4.1.1)
