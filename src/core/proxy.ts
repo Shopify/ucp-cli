@@ -24,6 +24,8 @@
 // decided once at boot. `bin.ts` installs; doctor and transport error paths
 // read.
 
+import { isSupportedNodeVersion } from './node-version.js'
+
 /**
  * Logical variable names, matched case-insensitively against the actual env
  * keys — never probed as fixed-name properties. Windows env vars are
@@ -115,16 +117,15 @@ export async function installProxyDispatcher(opts: ProxyInstallOptions = {}): Pr
     // Redact the failure text too: it reaches doctor output and error
     // envelopes, and undici embedding the proxy URI someday must not leak.
     //
-    // Below the engines floor the failure is the import itself — undici 7
-    // references globals older Node lacks — and the raw error ("File is not
-    // defined") does not name the actual problem. Annotate with the version
-    // rather than pre-checking specific globals, which would couple us to
-    // undici's internals.
+    // Below the engines floor the failure can be the import itself when a
+    // dependency references globals older Node lacks, and the raw error
+    // ("File is not defined") does not name the actual problem. Annotate with
+    // the version rather than pre-checking globals, which would couple us to
+    // dependency internals.
     const nodeVersion = process.versions.node
-    const versionHint =
-      Number(nodeVersion.split('.', 1)[0]) < __MIN_NODE_MAJOR__
-        ? ` (Node v${nodeVersion}; ucp requires Node >= ${__MIN_NODE_MAJOR__})`
-        : ''
+    const versionHint = !isSupportedNodeVersion(nodeVersion)
+      ? ` (Node v${nodeVersion}; ucp requires Node >= ${__MIN_NODE_VERSION__})`
+      : ''
     state = { status: 'error', vars, error: redactProxyValue((err as Error).message) + versionHint }
   }
   return state

@@ -13,7 +13,7 @@
   },
   "homepage": "https://github.com/Shopify/ucp-cli#readme",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "packageManager": "pnpm@10.28.0",
   "sideEffects": false,
@@ -61,7 +61,7 @@
   "dependencies": {
     "@jmespath-community/jmespath": "^1.3.0",
     "incur": "^0.5.1",
-    "undici": "^7.29.0",
+    "undici": "^8.10.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

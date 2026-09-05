@@ -19,6 +19,7 @@ import { join } from 'node:path'
 
 import { type AgentProfile, fetchAgentProfileLive, resolveAgentProfile } from '../core/agent.js'
 import { MIN_CACHE_SECONDS } from '../core/cache.js'
+import { isSupportedNodeVersion } from '../core/node-version.js'
 import {
   activeYamlPath,
   type ProfileStoreOptions,
@@ -115,18 +116,18 @@ export async function runDoctor(deps: DoctorDeps = {}): Promise<DoctorResult> {
 }
 
 // Below the engines floor is a `fail`, not a warn: the contract is declared,
-// the runtime is EOL, and breakage arrives as cryptic dependency errors (on
-// Node 18 the proxy dispatcher dies with "File is not defined"). A CI gate
-// going red on an unsupported runtime is the check working as intended.
+// and breakage arrives as cryptic dependency errors (on Node 18 the proxy
+// dispatcher dies with "File is not defined"). A CI gate going red on an
+// unsupported runtime is the check working as intended.
 function checkRuntime(): Check {
   const version = process.versions.node
-  const supported = Number(version.split('.', 1)[0]) >= __MIN_NODE_MAJOR__
+  const supported = isSupportedNodeVersion(version)
   return {
     id: 'runtime',
     status: supported ? 'ok' : 'fail',
     detail: supported
       ? `Node v${version}`
-      : `Node v${version} — ucp requires Node >= ${__MIN_NODE_MAJOR__}`,
+      : `Node v${version} — ucp requires Node >= ${__MIN_NODE_VERSION__}`,
   }
 }
 

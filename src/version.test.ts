@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { parseNodeEngineFloor } from '../scripts/defines.mjs'
 import { isRootVersionInvocation, runUcpCli, versionLine } from './cli.js'
 import { LATEST, RELEASES, SUPPORTED_VERSIONS } from './core/releases.js'
 
@@ -7,6 +8,16 @@ describe('build defines', () => {
   it('CLI version is a semver-shaped string', () => {
     expect(typeof __CLI_VERSION__).toBe('string')
     expect(__CLI_VERSION__).toMatch(/^\d+\.\d+\.\d+/)
+  })
+
+  it('Node floor keeps all three engines components', () => {
+    expect(__MIN_NODE_VERSION__).toMatch(/^\d+\.\d+\.\d+$/)
+    expect(parseNodeEngineFloor(`>=${__MIN_NODE_VERSION__}`)).toBe(__MIN_NODE_VERSION__)
+  })
+
+  it('rejects an engines range without one parseable three-component floor', () => {
+    expect(() => parseNodeEngineFloor('>=22')).toThrow('expected ">=major.minor.patch"')
+    expect(() => parseNodeEngineFloor('^22.19.0')).toThrow('expected ">=major.minor.patch"')
   })
 
   it('build number is a numeric string', () => {

@@ -58,13 +58,24 @@ interface FixtureServer {
 
 interface FixtureProxy extends FixtureServer {
   /**
-   * Absolute-form targets seen (`GET http://host/path`). Asserted EMPTY:
-   * undici tunnels *everything* with CONNECT, including plain http, unlike
-   * curl which forwards http in absolute form. Pinned by test because it
-   * dictates what the proxy-side ACL must allow.
+   * Absolute-form targets seen (`GET http://host/path`). undici splits on
+   * the request scheme: http is forwarded in absolute form, https is
+   * tunnelled (see {@link FixtureProxy.tunneled}).
+   *
+   * Two things produce an http dispatch, neither of them ordinary use: the
+   * loopback escape hatch in core/url.ts
+   * (`UCP_TEST_ALLOW_INSECURE_LOCALHOST`, loopback hosts only), and a
+   * redirect from an https origin to an http one — `fetch` follows that hop
+   * itself, so parseHttpsUrl never sees the downgraded URL.
    */
   forwarded: string[]
-  /** CONNECT targets seen, i.e. tunnelling. */
+  /**
+   * CONNECT targets seen (`host:port`). Every https request tunnels, since
+   * a proxy cannot rewrite bytes it cannot read without terminating TLS —
+   * so this is the wire form of all production traffic, and permitting
+   * CONNECT to the merchant hosts is what a proxy-side ACL has to do.
+   * Pinned by test because it dictates that requirement.
+   */
   tunneled: string[]
 }
 
@@ -224,21 +235,27 @@ describe('installProxyDispatcher — conditional load', () => {
     expect(state.error).not.toContain('requires Node')
   })
 
-  it('names the Node version when a load failure happens below the engines floor', async () => {
-    // Field report from a Node 18 box: undici 7's import throws "File is not
-    // defined", which does not name the actual problem — the runtime is below
-    // our engines floor. The annotation is version-based, not global-sniffing,
-    // so it covers whatever undici happens to trip over on old Node.
+  it.each([
+    ['22.10.0', true],
+    ['22.19.0', false],
+    ['22.19.1', false],
+    ['22.19.0-rc.1', true],
+    ['22.20.0-nightly20250101', false],
+  ] as const)('gates the load-failure hint on the full Node %s version', async (version, expectsHint) => {
+    // The annotation is version-based, not global-sniffing, so it covers
+    // whichever missing API undici happens to encounter below the floor.
     vi.stubEnv('https_proxy', 'http://proxy.example:3128')
     const descriptor = Object.getOwnPropertyDescriptor(process.versions, 'node')
-    Object.defineProperty(process.versions, 'node', { ...descriptor, value: '18.19.1' })
+    Object.defineProperty(process.versions, 'node', { ...descriptor, value: version })
     try {
       const state = await installProxyDispatcher({
         load: () => Promise.reject(new ReferenceError('File is not defined')),
       })
       expect(state.status).toBe('error')
       expect(state.error).toContain('File is not defined')
-      expect(state.error).toContain('(Node v18.19.1; ucp requires Node >= 22)')
+      const hint = `(Node v${version}; ucp requires Node >= ${__MIN_NODE_VERSION__})`
+      if (expectsHint) expect(state.error).toContain(hint)
+      else expect(state.error).not.toContain('requires Node')
     } finally {
       Object.defineProperty(process.versions, 'node', descriptor as PropertyDescriptor)
     }
@@ -342,7 +359,10 @@ describe('proxy state reporting', () => {
 })
 
 describe('routing through a fixture proxy (real undici)', () => {
-  it('routes a request through the proxy end to end', async () => {
+  it('forwards plain http to the proxy in absolute form', async () => {
+    // `relay: true` even though no tunnel is expected: if the scheme split
+    // ever changes, the fixture completes the CONNECT and the failure is a
+    // readable assertion diff instead of a socket error.
     const proxy = await startFixtureProxy({ relay: true })
     const origin = await startDirectTarget()
     try {
@@ -350,14 +370,13 @@ describe('routing through a fixture proxy (real undici)', () => {
       expect((await installProxyDispatcher()).status).toBe('active')
 
       const res = await fetch(`${origin.url}/profile.json`)
-      // Body proves the tunnel carried real traffic; the recorded CONNECT
-      // proves it went through the proxy rather than straight to the origin.
-      expect(await res.text()).toBe('direct')
-      expect(origin.hits).toEqual(['/profile.json'])
-      expect(proxy.tunneled).toEqual([origin.url.replace('http://', '')])
-      // Pins undici's tunnel-always behaviour: no absolute-form forwarding,
-      // even for plain http. The proxy must permit CONNECT.
-      expect(proxy.forwarded).toEqual([])
+      // An install that silently no-ops answers 'direct' with a hit on the
+      // origin, so this block is what proves the dispatcher is live and the
+      // request reached the proxy rather than the origin.
+      expect(await res.text()).toBe('via-fixture-proxy')
+      expect(origin.hits).toEqual([])
+      expect(proxy.forwarded).toEqual([`${origin.url}/profile.json`])
+      expect(proxy.tunneled).toEqual([])
     } finally {
       await Promise.all([proxy.close(), origin.close()])
     }
@@ -373,6 +392,9 @@ describe('routing through a fixture proxy (real undici)', () => {
       // assertion that matters is the CONNECT line it saw first.
       await expect(fetch('https://merchant.invalid/profile.json')).rejects.toThrow()
       expect(proxy.tunneled).toEqual(['merchant.invalid:443'])
+      // Nothing in absolute form: an https origin shows the proxy a CONNECT
+      // and nothing else, which is why CONNECT is the ACL requirement.
+      expect(proxy.forwarded).toEqual([])
     } finally {
       await proxy.close()
     }
@@ -417,7 +439,10 @@ describe('routing through a fixture proxy (real undici)', () => {
       const res = await fetch(`${direct.url}/bypass`)
       expect(await res.text()).toBe('direct')
       expect(direct.hits).toEqual(['/bypass'])
+      // Both wire forms, so the assertion stays load-bearing whichever one
+      // the scheme would otherwise have selected.
       expect(proxy.forwarded).toEqual([])
+      expect(proxy.tunneled).toEqual([])
     } finally {
       await Promise.all([proxy.close(), direct.close()])
     }

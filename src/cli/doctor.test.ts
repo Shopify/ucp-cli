@@ -688,20 +688,27 @@ describe('runDoctor — proxy check', () => {
     expect(check.detail).toBe(`Node v${process.versions.node}`)
   })
 
-  it('fails the runtime check below the engines floor', async () => {
-    // npm engines is warning-only, so an unsupported Node still installs and
-    // mostly runs; doctor is where that state gets caught deliberately
-    // instead of as a cryptic dependency error (field-reported: undici 7 on
-    // Node 18 dies with "File is not defined").
+  it.each([
+    ['22.10.0', 'fail'],
+    ['22.19.0', 'ok'],
+    ['22.19.1', 'ok'],
+    ['22.19.0-rc.1', 'fail'],
+    ['22.20.0-nightly20250101', 'ok'],
+  ] as const)('compares the full runtime version for Node %s', async (version, expectedStatus) => {
+    // The 22.10.0 case shares the floor's major version but remains outside
+    // the engines range. Suffix-bearing builds must also be classified without
+    // making the diagnostic throw.
     const descriptor = Object.getOwnPropertyDescriptor(process.versions, 'node')
-    Object.defineProperty(process.versions, 'node', { ...descriptor, value: '18.19.1' })
+    Object.defineProperty(process.versions, 'node', { ...descriptor, value: version })
     try {
       const result = await runDoctor({ homeDir, skipNetwork: true, env: {} })
       const check = findCheck(result, 'runtime')
-      expect(check.status).toBe('fail')
-      expect(check.detail).toContain('Node v18.19.1')
-      expect(check.detail).toContain('requires Node >= 22')
-      expect(result.ok).toBe(false)
+      expect(check.status).toBe(expectedStatus)
+      expect(check.detail).toBe(
+        expectedStatus === 'ok'
+          ? `Node v${version}`
+          : `Node v${version} — ucp requires Node >= ${__MIN_NODE_VERSION__}`,
+      )
     } finally {
       Object.defineProperty(process.versions, 'node', descriptor as PropertyDescriptor)
     }
