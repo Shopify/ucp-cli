@@ -170,17 +170,16 @@ describe('ucp profile init', () => {
     const cli = makeCli({ saveUserProfile })
     const { output, exitCode } = await serveCli(cli, ['profile', 'init', '--name', 'fresh'])
     expect(exitCode).toBe(0)
-    // `profile_url` is ALWAYS written now — it is the whole of version
-    // selection, so leaving it undefined would put the version decision in an
-    // implicit session-resolution fallback instead of on disk where `doctor`
-    // and the user can see it.
+    // `profile_url` is always written so the remote identity is explicit on
+    // disk where `doctor` and the user can inspect it.
     expect(saves[0]?.meta.profile_url).toBe(RELEASES[LATEST].defaultAgentProfileUrl)
     expect(JSON.parse(output)).toMatchObject({ name: 'fresh' })
   })
 
   // ── --version ─────────────────────────────────────────────────
   //
-  // `--version` is load-bearing exactly once: it picks `meta.profile_url`.
+  // `--version` selects the release template written to profile.json and the
+  // matching published URL used when --profile-url is omitted.
 
   it('defaults to LATEST: writes that release’s snapshot and its published URL', async () => {
     const { saves, saveUserProfile } = captureSaves()
@@ -235,11 +234,9 @@ describe('ucp profile init', () => {
     expect(saves).toHaveLength(0)
   })
 
-  it('self-hosting overrides the release default URL but keeps the snapshot', async () => {
-    // The version still picks WHICH snapshot to author from; the URL decides
-    // whose document is the identity. Self-hosting is the only way to
-    // advertise a custom capability set — there is no signing, so whoever
-    // controls the URL controls what this agent claims.
+  it('--profile-url uses the requested URL while --version selects the template', async () => {
+    // A custom capability set needs a URL the user controls because there is
+    // no signing: whoever controls the URL controls what businesses see.
     const { saves, saveUserProfile } = captureSaves()
     const cli = makeCli({ saveUserProfile })
     const { exitCode } = await serveCli(cli, [
@@ -275,9 +272,7 @@ describe('ucp profile init', () => {
     expect(exitCode).toBe(1)
   })
 
-  // `meta` is built and written directly — nothing between the template and
-  // disk. The deleted upload seam used to sit here and stamp a (always empty)
-  // service response over it on every default init.
+  // `meta` is built and written directly from explicit init inputs.
   it('writes only the fields init derives; no hosting metadata is invented', async () => {
     const { saves, saveUserProfile } = captureSaves()
     const cli = makeCli({ saveUserProfile })

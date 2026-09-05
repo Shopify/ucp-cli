@@ -108,10 +108,9 @@ export function parsePlatformProfile(input: unknown, label = 'platform profile')
 export const DEFAULT_CATALOG_URL: string = __DEFAULT_CATALOG_URL__
 
 // `profile init` writes `release(v).agentProfileJson` — the VERBATIM published
-// snapshot of the document `release(v).defaultAgentProfileUrl` serves. Never
-// substitute a hand-written template: on the default path the hosted document
-// IS the identity, so any local divergence makes `ucp doctor` report drift on
-// every clean install.
+// document served by `release(v).defaultAgentProfileUrl`. Never substitute a
+// hand-written template: the local file and the URL must start in agreement so
+// `ucp doctor` reports only real drift.
 
 export interface FetchProfileOptions {
   /** Override the cache directory. Defaults to `<ucpHomeDir>/cache/businesses`. */

@@ -8,20 +8,25 @@
 // The resolver returns what it can prove from local state. When a profile
 // carries no `meta.profile_url`, the fallback is the latest release's PUBLISHED
 // agent profile (`release(LATEST).defaultAgentProfileUrl`) — a real, reachable
-// document, which matters because the business GETs this URL on every call
-// and negotiates against what it serves.
+// document for the business to read. The CLI still negotiates from the named
+// profile's local `profile.json`; `ucp doctor` reports any disagreement.
 //
 // `ActiveProfile` stays a POINTER: `{name, profileUrl, meta}`. The identity
 // document is not resolved here — `discover` does that from the URL plus the
-// profile NAME (core/agent.ts: bundled snapshot for a release default, the
-// local `profile.json` when self-hosted), with no request either way.
+// profile NAME, and core/agent.ts answers it from that profile's own
+// `profile.json`, with no request.
 //
 // v0.1/v0.2 local profile work: signing material is intentionally not threaded
 // through. The profile body may advertise public keys later, but request
 // signing remains a separate phase.
 
 import { DEFAULT_CATALOG_URL } from '../core/profile.js'
-import { type ProfileMeta, readActive, readUserProfile } from '../core/profile-store.js'
+import {
+  type ActiveSession,
+  type ProfileMeta,
+  readActive,
+  readUserProfile,
+} from '../core/profile-store.js'
 import { LATEST, RELEASES } from '../core/releases.js'
 import { ErrorCodes, UcpError } from '../lib/errors.js'
 
@@ -67,6 +72,11 @@ export interface ResolveSessionOptions {
   homeDir?: string
   /** Override env-var lookup for tests. Defaults to `process.env`. */
   env?: Record<string, string | undefined>
+  /**
+   * Set by `ucp --mcp`. Drops the `active.yaml` legs of both precedence
+   * chains; flags and `UCP_PROFILE` / `UCP_BUSINESS` are unaffected.
+   */
+  inMcpMode?: boolean
 }
 
 /**
@@ -75,7 +85,13 @@ export interface ResolveSessionOptions {
 export async function resolveSession(opts: ResolveSessionOptions = {}): Promise<ResolvedSession> {
   const env = opts.env ?? process.env
   const storeOpts = opts.homeDir !== undefined ? { homeDir: opts.homeDir } : {}
-  const active = await readActive(storeOpts)
+  // MCP mode does not read active.yaml at all — not read-then-discard. One
+  // stdio server serves many unrelated agent conversations, so process-global
+  // routing state a human wrote with `ucp use` would leak into all of them;
+  // an omitted business must fail closed instead of inheriting a target. The
+  // file is the only thing dropped: explicit options and UCP_PROFILE /
+  // UCP_BUSINESS resolve exactly as they do on the CLI path.
+  const active: ActiveSession = opts.inMcpMode === true ? {} : await readActive(storeOpts)
 
   const profileName = opts.profile ?? env.UCP_PROFILE ?? active.profile
   // Walk precedence explicitly so we can pin the source label to the layer
@@ -114,11 +130,11 @@ export async function resolveSession(opts: ResolveSessionOptions = {}): Promise<
 
   const user = await readUserProfile(profileName, storeOpts)
   const meta = withDefaultCatalog(user.meta, env.UCP_DEFAULT_CATALOG)
-  // A profile with no `meta.profile_url` self-hosts nothing, so it presents
-  // the release default: the published Shopify agent profile for the latest
-  // supported release. Self-hosting (`--profile-url`, `UCP_AGENT_PROFILE_URL`,
-  // or `meta.profile_url`) is how a user advertises a custom capability set;
-  // both sides then read that URL.
+  // A profile with no `meta.profile_url` advertises the latest release's
+  // published default. The CLI still reads the named profile's profile.json;
+  // doctor reports a mismatch if that file does not match the fallback URL.
+  // A capability set of your own needs a URL you control because businesses
+  // read the URL, and keeping it equal to profile.json is the user's obligation.
   const profileUrl =
     opts.profileUrl ??
     env.UCP_AGENT_PROFILE_URL ??

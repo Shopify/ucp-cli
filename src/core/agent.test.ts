@@ -11,12 +11,7 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import {
-  fetchAgentProfileLive,
-  isReleaseDefaultProfileUrl,
-  loadAgentProfile,
-  resolveAgentProfile,
-} from './agent.js'
+import { fetchAgentProfileLive, loadAgentProfile, resolveAgentProfile } from './agent.js'
 import { LATEST, RELEASES } from './releases.js'
 import { setWarnWriter } from './verbose.js'
 
@@ -82,13 +77,12 @@ describe('loadAgentProfile — failure codes are all AGENT_PROFILE_*', () => {
 // ─── Severity split: whose document is it? ─────────────────────────────────
 //
 // A `dev.ucp.*` entry off the profile's own `ucp.version` is the same defect
-// either way, but the remedy is not. Self-hosted: the user is the principal
-// and can correct the hosted document → fatal. Release default: it is the platform's,
-// and a pre-flight fatal there means one publisher defect hard-stops every
-// installed CLI before a single call. Shopify storefront profiles carry
-// exactly this defect today (`embedded@2026-04-08` under an 08-25 rendering).
+// wherever the URL points, and the remedy is the same too: the bytes ucp-cli
+// declares come from `profile.json`, which the reader can edit. Proceeding
+// would send a declaration whose off-version entries silently fail to
+// negotiate.
 
-describe('loadAgentProfile — AGENT_PROFILE_VERSION_MISMATCH severity split', () => {
+describe('loadAgentProfile — AGENT_PROFILE_VERSION_MISMATCH', () => {
   function mixedVersionBody(): ReturnType<typeof publishedBody> {
     const body = publishedBody()
     body.ucp.services = {
@@ -100,7 +94,7 @@ describe('loadAgentProfile — AGENT_PROFILE_VERSION_MISMATCH severity split', (
     return body
   }
 
-  it('self-hosted → fatal, with an upload-it-yourself CTA and both versions named', () => {
+  it('is fatal, naming the entry that is off and both versions', () => {
     captureWarnings()
     expect(() =>
       loadAgentProfile({ body: mixedVersionBody(), url: SELF_HOSTED, name: 'mine' }),
@@ -128,52 +122,56 @@ describe('loadAgentProfile — AGENT_PROFILE_VERSION_MISMATCH severity split', (
     expect(caught?.context).not.toHaveProperty('kind')
   })
 
-  it('release default → uwarn and proceed; the off-version entry simply will not match', () => {
-    const warnings = captureWarnings()
-    const agent = loadAgentProfile({ body: mixedVersionBody(), url: DEFAULT_0825, name: 'agent' })
-
-    expect(agent.version).toBe('2026-08-25')
-    // Declaration kept verbatim: messages must quote the profile honestly, and
-    // negotiation is what discards the off-version entry.
-    expect(agent.services['dev.ucp.shopping']?.map((e) => e.version)).toEqual([
-      '2026-08-25',
-      '2026-04-08',
-    ])
-    expect(warnings.join('')).toContain('dev.ucp.shopping at [2026-04-08]')
-    expect(warnings.join('')).toContain('published release default')
+  // Who serves the URL changes nothing about validating the local declaration.
+  // `ucp doctor` separately detects disagreement with the served document.
+  it('is fatal on a release-default URL too', () => {
+    captureWarnings()
+    expect(() =>
+      loadAgentProfile({ body: mixedVersionBody(), url: DEFAULT_0825, name: 'agent' }),
+    ).toThrowError(
+      expect.objectContaining({ code: 'AGENT_PROFILE_VERSION_MISMATCH' }) as unknown as Error,
+    )
   })
 
-  it('isReleaseDefaultProfileUrl recognizes every release in the window', () => {
+  // The one place always-fatal could break an install that did nothing wrong:
+  // the no-profile-name fallback declares a document the reader did not write.
+  // Safe only while every template ucp-cli ships obeys the rule it enforces —
+  // and those templates are regenerated from the published documents (CI's
+  // codegen drift gate), so this is a live constraint, not a one-time audit.
+  it('every published template ucp-cli ships satisfies the rule it enforces', () => {
     for (const rel of Object.values(RELEASES)) {
-      expect(isReleaseDefaultProfileUrl(rel.defaultAgentProfileUrl)).toBe(true)
+      expect(() =>
+        loadAgentProfile({
+          body: JSON.parse(rel.agentProfileJson),
+          url: rel.defaultAgentProfileUrl,
+        }),
+      ).not.toThrow()
     }
-    expect(isReleaseDefaultProfileUrl(SELF_HOSTED)).toBe(false)
   })
 })
 
 // ─── Where the bytes come from: never the wire ─────────────────────────────
 //
-// The request path resolves its identity locally. A release default is the
-// verbatim document this build ships; a self-hosted URL is whatever the user
-// wrote in `profile.json`. Both go through the same `loadAgentProfile`, so the
-// only thing these tests have to prove is that the SOURCE is right — and that
-// no fetch implementation is even accepted, let alone called.
+// The request path resolves its identity locally, and a named profile is
+// answered by its own `profile.json` at every URL. The published templates are
+// the last resort for a caller that supplies no name. So the only things these
+// tests have to prove is that the SOURCE is right — and that no fetch
+// implementation is even accepted, let alone called.
 
-describe('resolveAgentProfile — release defaults come from the bundled snapshot', () => {
-  it('resolves every release default to the document this build ships', async () => {
+describe('resolveAgentProfile — no profile name falls back to a published template', () => {
+  it('picks the template for the release the URL belongs to', async () => {
     for (const rel of Object.values(RELEASES)) {
-      const agent = await resolveAgentProfile({ url: rel.defaultAgentProfileUrl, name: 'agent' })
+      const agent = await resolveAgentProfile({ url: rel.defaultAgentProfileUrl })
 
       expect(agent.version).toBe(rel.version)
       expect(agent.url).toBe(rel.defaultAgentProfileUrl)
-      // Identical to what a GET of that URL would have produced: the snapshot
+      // Identical to what a GET of that URL would have produced: the template
       // is the verbatim published body (byte-identity is enforced by
       // `pnpm gen:schemas` + the CI drift gate).
       expect(agent).toStrictEqual(
         loadAgentProfile({
           body: JSON.parse(rel.agentProfileJson),
           url: rel.defaultAgentProfileUrl,
-          name: 'agent',
         }),
       )
     }
@@ -191,7 +189,7 @@ describe('resolveAgentProfile — release defaults come from the bundled snapsho
   })
 })
 
-describe('resolveAgentProfile — a self-hosted URL is answered by the local profile.json', () => {
+describe('resolveAgentProfile — a named profile is answered by its own profile.json', () => {
   let home: string
 
   beforeEach(async () => {
@@ -210,10 +208,27 @@ describe('resolveAgentProfile — a self-hosted URL is answered by the local pro
     return path
   }
 
+  // THE contract, in one test: the URL is a Shopify-published release default
+  // and the local file still wins. Anything else makes an edit to the one file
+  // the reader owns a no-op that nothing reports.
+  it('reads profile.json even when the URL is a release default', async () => {
+    const body = publishedBody()
+    body.ucp.services = {
+      'dev.ucp.shopping': [{ version: '2026-08-25', transport: 'mcp' }],
+      'com.acme.svc': [{ version: '2025-01-01', transport: 'mcp' }],
+    }
+    await writeProfile('mine', body)
+
+    const agent = await resolveAgentProfile({ url: DEFAULT_0825, name: 'mine', homeDir: home })
+
+    expect(agent.url).toBe(DEFAULT_0825)
+    expect(Object.keys(agent.services).sort()).toEqual(['com.acme.svc', 'dev.ucp.shopping'])
+  })
+
   // The premise the whole design rests on: `profile init` writes the same
   // document the URL serves, so the disk document and a fetched body are the
   // same shape and one validator consumes either. If this ever stops holding,
-  // the self-hosted path is reading something a merchant will never see.
+  // the request path is reading something a merchant will never see.
   it('produces exactly what the same bytes would produce over the wire', async () => {
     const served = JSON.parse(RELEASES['2026-08-25'].agentProfileJson) as unknown
     await writeProfile('mine', served)
@@ -225,7 +240,7 @@ describe('resolveAgentProfile — a self-hosted URL is answered by the local pro
     expect(Object.keys(agent.services)).toEqual(['dev.ucp.shopping'])
   })
 
-  it('reads the user edits, not the bundled snapshot', async () => {
+  it('reads the user edits, not a published template', async () => {
     const body = publishedBody()
     body.ucp.services = {
       'dev.ucp.shopping': [{ version: '2026-08-25', transport: 'mcp' }],
@@ -261,10 +276,10 @@ describe('resolveAgentProfile — a self-hosted URL is answered by the local pro
     })
   })
 
-  // Library-only rung: `discover({profileUrl})` with no profile name and no
-  // injected agent. The URL on the wire is still right, so this warns and
-  // negotiates generically rather than failing.
-  it('warns and falls back to the bundled latest when no profile is named', async () => {
+  // The rung no CLI path reaches: `discover({profileUrl})` with no profile
+  // name and no injected agent. The URL on the wire is still right, so this
+  // warns and negotiates generically rather than failing.
+  it('warns and falls back to the latest published template when no profile is named', async () => {
     const warnings = captureWarnings()
     const agent = await resolveAgentProfile({ url: SELF_HOSTED })
 
@@ -278,7 +293,7 @@ describe('resolveAgentProfile — a self-hosted URL is answered by the local pro
 //
 // Doctor's probe is the only fetcher left. The sub-cases must be branchable
 // without regexing the message. `not_json` is the one that matters most: a 200
-// serving an HTML error page is the common self-hosting failure and is not
+// serving an HTML error page is the common hosting failure and is not
 // "unreachable" in any useful sense.
 
 describe('fetchAgentProfileLive — AGENT_PROFILE_UNREACHABLE carries a reason', () => {
@@ -296,8 +311,8 @@ describe('fetchAgentProfileLive — AGENT_PROFILE_UNREACHABLE carries a reason',
           headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=300' },
         }),
     )
-    // A release-default URL, read live: doctor is the only thing that can
-    // catch published content changing out from under the bundled snapshot.
+    // Doctor reads the URL directly, so it can detect when the served
+    // document differs from the local profile.
     const live = await fetchAgentProfileLive({ url: DEFAULT_0825, fetch })
 
     expect(live.agent.version).toBe('2026-04-08')
@@ -326,7 +341,7 @@ describe('fetchAgentProfileLive — AGENT_PROFILE_UNREACHABLE carries a reason',
     })
   })
 
-  it("reason 'not_json' for a 200 serving HTML — the common self-hosting failure", async () => {
+  it("reason 'not_json' for a 200 serving HTML — the common hosting failure", async () => {
     const fetch = fetchStub(
       () =>
         new Response('<!doctype html><title>404 Not Found</title>', {

@@ -21,7 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ResolvedSession, ResolveSessionOptions } from './cli/session.js'
 import { createUcpCli } from './cli.js'
 import { discover } from './core/discover.js'
-import { RELEASES } from './core/releases.js'
+import { RELEASES, type Version } from './core/releases.js'
 import { setWarnWriter } from './core/verbose.js'
 import { serveCli, userProfile } from './test-utils.js'
 
@@ -29,7 +29,7 @@ const BUSINESS_URL = 'https://shop.example.invalid'
 const MCP_ENDPOINT = 'https://shop.example.invalid/ucp/mcp'
 const AGENT_PROFILE_URL = 'https://agent.example.invalid/agent.json'
 
-/** Shopify's published 08-25 agent profile — the identity on the default path. */
+/** The 08-25 release template written by profile init. */
 function publishedAgentProfile(): unknown {
   return JSON.parse(RELEASES['2026-08-25'].agentProfileJson)
 }
@@ -54,10 +54,9 @@ interface WireError {
 
 interface StubOpts {
   /**
-   * The active profile's local `profile.json`. AGENT_PROFILE_URL is
-   * self-hosted, so this document IS the identity the CLI negotiates from —
-   * it is read from disk, never fetched. Default: the published 08-25
-   * profile, i.e. a profile whose local copy matches what it publishes.
+   * The active profile's local `profile.json`, which the CLI reads from disk
+   * for negotiation. Default: the published 08-25 document, representing a
+   * profile whose local file matches what its URL serves.
    */
   agentProfile?: unknown
   /** Body for `/.well-known/ucp`. */
@@ -67,12 +66,10 @@ interface StubOpts {
   /** JSON-RPC error envelope returned for `tools/list` instead of a result. */
   rpcError?: { code: number; message: string; data?: unknown }
   /**
-   * Other profiles on this machine, as `name -> meta.profile_url`. Feeds the
-   * PROTOCOL_VERSION_INCOMPATIBLE switch-profiles hint, which resolves a
-   * local profile's version from its hosted URL (release defaults only — see
-   * cli/profile-hint.ts).
+   * Other profiles on this machine. Feeds the PROTOCOL_VERSION_INCOMPATIBLE
+   * switch-profiles hint, which reads each local profile's body version.
    */
-  localProfiles?: Record<string, string>
+  localProfiles?: Record<string, { version: Version; profileUrl?: string }>
 }
 
 function jsonResponse(body: unknown): Response {
@@ -151,9 +148,12 @@ describe('emitted CLI error JSON', () => {
       profile: {
         listProfiles: async () => Object.keys(localProfiles).sort(),
         readUserProfile: async (name: string) => {
-          const profile_url = localProfiles[name]
-          if (profile_url === undefined) throw new Error(`no such profile: ${name}`)
-          return userProfile(name, { meta: { profile_url } })
+          const candidate = localProfiles[name]
+          if (candidate === undefined) throw new Error(`no such profile: ${name}`)
+          return userProfile(name, {
+            body: JSON.parse(RELEASES[candidate.version].agentProfileJson),
+            meta: candidate.profileUrl === undefined ? {} : { profile_url: candidate.profileUrl },
+          })
         },
       },
       discover: (businessUrl, options = {}) =>
@@ -215,9 +215,9 @@ describe('emitted CLI error JSON', () => {
     // ours
     expect(wire.message).toContain('ucp-cli supports 2026-04-08, 2026-08-25')
     // ...and WHICH identity was presented, by its switchable local name.
-    // `DiscoverOptions.profileName` now carries it from the session, so the
-    // label is `profile 'agent'` rather than the raw URL — a URL names
-    // nothing the reader can pass to `--profile`.
+    // `DiscoverOptions.profileName` carries it from the session, so the label
+    // is `profile 'agent'` rather than the raw URL — a URL names nothing the
+    // reader can pass to `--profile`.
     expect(wire.message).toContain("profile 'agent' uses 2026-08-25")
   })
 
@@ -242,24 +242,29 @@ describe('emitted CLI error JSON', () => {
           payment_handlers: {},
         },
       },
-      // Two other local profiles: one at 04-08 (offered) and one at 08-25
-      // (not offered). Only the first is a remedy.
+      // Version comes from each local document, not its URL. The first two
+      // deliberately point at URLs associated with the opposite release;
+      // `mine` proves a URL the user owns participates on the same terms.
       localProfiles: {
-        'agent-0408': RELEASES['2026-04-08'].defaultAgentProfileUrl,
-        'agent-0825': RELEASES['2026-08-25'].defaultAgentProfileUrl,
-        // Self-hosted: omitted by profile-hint (see cli/profile-hint.ts) —
-        // suggesting a switch to a profile whose local copy may disagree with
-        // what it publishes is a hint that lands where merchants cannot see.
-        mine: 'https://agent.example.invalid/mine.json',
+        'agent-0408': {
+          version: '2026-04-08',
+          profileUrl: RELEASES['2026-08-25'].defaultAgentProfileUrl,
+        },
+        'agent-0825': {
+          version: '2026-08-25',
+          profileUrl: RELEASES['2026-04-08'].defaultAgentProfileUrl,
+        },
+        mine: { version: '2026-04-08', profileUrl: 'https://agent.example.invalid/mine.json' },
       },
     })
 
     expect(wire.code).toBe('PROTOCOL_VERSION_INCOMPATIBLE')
     expect(wire.cta?.description).toContain("'agent-0408' speaks 2026-04-08")
     expect(wire.cta?.description).not.toContain('agent-0825')
-    expect(wire.cta?.description).not.toContain('mine')
+    expect(wire.cta?.description).toContain("'mine' speaks 2026-04-08")
     expect(wire.cta?.commands?.map((c) => c.command)).toStrictEqual([
       'ucp discover --profile agent-0408',
+      'ucp discover --profile mine',
     ])
   })
 
@@ -277,8 +282,8 @@ describe('emitted CLI error JSON', () => {
         },
       },
       localProfiles: {
-        legacy: RELEASES['2026-04-08'].defaultAgentProfileUrl,
-        'agent-0408': RELEASES['2026-04-08'].defaultAgentProfileUrl,
+        legacy: { version: '2026-04-08' },
+        'agent-0408': { version: '2026-04-08' },
       },
     })
 
@@ -301,7 +306,7 @@ describe('emitted CLI error JSON', () => {
           payment_handlers: {},
         },
       },
-      localProfiles: { 'agent-0408': RELEASES['2026-04-08'].defaultAgentProfileUrl },
+      localProfiles: { 'agent-0408': { version: '2026-04-08' } },
     })
 
     // The business is outside the window entirely; "switch profiles" is not a
@@ -332,12 +337,12 @@ describe('emitted CLI error JSON', () => {
   // ── AGENT_PROFILE_UNREACHABLE ──────────────────────────────────────────
   //
   // `context.reason` is the discriminator; it must be readable on the wire.
-  // 'not_json' is the important one — a 200 serving an HTML error page is the
-  // common self-hosting failure and is not "unreachable" in any useful sense.
+  // 'not_json' is the important one — a 200 serving an HTML error page is a
+  // common hosting failure and is not "unreachable" in any useful sense.
 
-  it('AGENT_PROFILE_UNREACHABLE now reaches the wire only when the BUSINESS reports it', async () => {
-    // The CLI no longer pre-flights its own URL, so the one request-time
-    // source of this code is the merchant answering -32001 with
+  it('AGENT_PROFILE_UNREACHABLE reaches the request path when the BUSINESS reports it', async () => {
+    // The request path does not pre-flight its own URL; this code comes from
+    // the merchant answering -32001 with
     // `data.code: profile_unreachable` — it fetched the URL we sent and
     // could not read it. The remedy (fix hosting / run doctor) has to survive
     // serialization, because `context.reason` never does.

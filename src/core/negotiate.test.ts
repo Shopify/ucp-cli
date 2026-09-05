@@ -11,7 +11,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { agentProfileFixture } from '../test-utils.js'
-import { loadAgentProfile } from './agent.js'
 import { negotiateService } from './discover.js'
 import { businessProfileSchema as businessSchema20260408 } from './generated/2026-04-08/business_profile.zod.js'
 import { businessProfileSchema as businessSchema20260825 } from './generated/2026-08-25/business_profile.zod.js'
@@ -130,19 +129,12 @@ describe('negotiateService — the happy path is exact equality', () => {
 
 describe('negotiateService — third-party services (S7)', () => {
   const ACME = 'com.acme.svc'
-  // SELF-HOSTED, and that is not incidental: a profile declaring a
-  // third-party service is necessarily one the user wrote (the published
-  // release defaults declare only `dev.ucp.shopping`). The URL decides whose
-  // document a defect belongs to, which decides which remedy
-  // SERVICE_VERSION_INCOMPATIBLE names — so a fixture pointing at a release
-  // default while declaring `com.acme.*` would be asserting an impossible
-  // state and would collect the published-profile wording.
-  const SELF_HOSTED = 'https://agent.example.invalid/agent.json'
+  const PROFILE_URL = 'https://agent.example.invalid/agent.json'
 
   function agentWithAcme(versions: string[], transport = 'mcp') {
     return agentProfileFixture({
       version: '2026-08-25',
-      url: SELF_HOSTED,
+      url: PROFILE_URL,
       services: {
         'dev.ucp.shopping': [{ version: '2026-08-25', transport: 'mcp' }],
         [ACME]: versions.map((version) => ({ version, transport })),
@@ -170,7 +162,7 @@ describe('negotiateService — third-party services (S7)', () => {
       expect.objectContaining({
         code: 'SERVICE_VERSION_INCOMPATIBLE',
         layer: 'transport',
-        message: `${ACME}: profile 'agent' declares [2025-11-01], business offers [2025-06-01]`,
+        message: `${ACME}: profile 'agent' declares [2025-11-01], business offers [2025-06-01]. Update the service declaration in profile.json to a version the business offers, then make ${PROFILE_URL} serve the corrected document; if you cannot change that URL, use one you own. Otherwise, accept unavailability.`,
       }) as unknown as Error,
     )
   })
@@ -511,14 +503,10 @@ describe('negotiateService — failure classification', () => {
     ).toThrowError(expect.objectContaining({ code: 'CAPABILITY_NOT_OFFERED' }) as unknown as Error)
   })
 
-  it('an empty declaration blames neither side: SERVICE_VERSION_INCOMPATIBLE', () => {
+  it('reports an empty local declaration as SERVICE_VERSION_INCOMPATIBLE', () => {
     // A profile that declares the key with no entries has nothing to
-    // intersect. Calling that a merchant defect would be a lie.
-    //
-    // Self-hosted URL: an empty `dev.ucp.shopping` declaration only exists in
-    // a document someone edited, and "fix your profile" is the right remedy
-    // precisely because they can. Under a release-default URL the same rung
-    // reports the published-document defect instead — see the KNOWN SEAM test.
+    // intersect. Calling that a merchant defect would be a lie; the local
+    // declaration is the side the reader can correct.
     const agent = agentProfileFixture({
       version: '2026-08-25',
       url: 'https://agent.example.invalid/agent.json',
@@ -531,97 +519,24 @@ describe('negotiateService — failure classification', () => {
     expect(() => negotiateService({ profile, capability: 'dev.ucp.shopping', agent })).toThrowError(
       expect.objectContaining({
         code: 'SERVICE_VERSION_INCOMPATIBLE',
-        message: "dev.ucp.shopping: profile 'agent' declares [], business offers [2026-08-25]",
+        message:
+          "dev.ucp.shopping: profile 'agent' declares [], business offers [2026-08-25]. Update the service declaration in profile.json to a version the business offers, then make https://agent.example.invalid/agent.json serve the corrected document; if you cannot change that URL, use one you own. Otherwise, accept unavailability.",
       }) as unknown as Error,
     )
   })
 })
 
-// ─── Fallout of the AGENT_PROFILE_VERSION_MISMATCH severity split ──────────
+// ─── Version lines that do not meet ────────────────────────────────────────
 //
-// `loadAgentProfile` warns-and-proceeds instead of throwing when a PUBLISHED
-// (release-default) profile carries a `dev.ucp.*` entry off its own version,
-// because a fatal there hard-stops every installed CLI over a document nobody
-// local can edit. The premise is that the condition degrades gracefully: an
-// off-version entry simply fails to match.
-//
-// It mostly does — but not perfectly, and this test pins the seam rather than
-// leaving it as folklore. When the off-version entry is the ONLY entry for
-// that service, negotiation still fails, and it fails with a message whose
-// implied remedy ("update the profile") the user cannot perform.
-describe('negotiateService — a published profile that warned at load', () => {
-  it('degrades to a normal negotiation error when another entry matches', () => {
-    setWarnWriter(() => {})
-    const body = JSON.parse(RELEASES['2026-08-25'].agentProfileJson) as {
-      ucp: Record<string, unknown>
-    }
-    body.ucp.services = {
-      'dev.ucp.shopping': [
-        { version: '2026-08-25', transport: 'mcp' },
-        { version: '2026-04-08', transport: 'mcp' },
-      ],
-    }
-    const agent = loadAgentProfile({ body, url: RELEASES['2026-08-25'].defaultAgentProfileUrl })
-    const profile = business('2026-08-25', {
-      'dev.ucp.shopping': [{ version: '2026-08-25', transport: 'mcp' }],
-    })
-    // The warned-about entry is inert; the matching one wins.
-    expect(negotiateService({ profile, capability: 'dev.ucp.shopping', agent }).version).toBe(
-      '2026-08-25',
-    )
-  })
-
-  it('names the PUBLISHER, not the user, when the off-version entry is the only one', () => {
-    setWarnWriter(() => {})
-    const body = JSON.parse(RELEASES['2026-08-25'].agentProfileJson) as {
-      ucp: Record<string, unknown>
-    }
-    body.ucp.services = { 'dev.ucp.shopping': [{ version: '2026-04-08', transport: 'mcp' }] }
-    const url = RELEASES['2026-08-25'].defaultAgentProfileUrl
-    const agent = loadAgentProfile({ body, url })
-    const profile = business('2026-08-25', {
-      'dev.ucp.shopping': [{ version: '2026-08-25', transport: 'mcp' }],
-    })
-
-    // The BEHAVIOR is the seam described above: this negotiation fails rather
-    // than degrading. Keeping it that way is deliberate — a pre-flight fatal
-    // would break every business, including the ones where the defect is
-    // irrelevant. The remedy must never say "update your profile" about a
-    // document the reader cannot edit: under a release-default URL
-    // `SERVICE_VERSION_INCOMPATIBLE` names the publisher's defect and points
-    // at the one action that IS available — self-host a corrected copy.
-    //
-    // The gate is `isReleaseDefaultProfileUrl`, and it is safe to be that
-    // coarse: with a healthy published profile this rung is unreachable for a
-    // `dev.ucp.*` service (the merchant-defect rung above catches the
-    // contradiction first), and published profiles declare no third-party
-    // services. So a release-default URL here means the published document.
-    let thrown: { code?: string; message?: string; context?: unknown } | undefined
-    try {
-      negotiateService({ profile, capability: 'dev.ucp.shopping', agent })
-    } catch (err) {
-      thrown = err as { code?: string; message?: string; context?: unknown }
-    }
-    expect(thrown?.code).toBe('SERVICE_VERSION_INCOMPATIBLE')
-    expect(thrown?.message).toContain(`the published agent profile at ${url}`)
-    expect(thrown?.message).toContain('not something you can edit')
-    expect(thrown?.message).toContain('--profile-url')
-    // The old copy sent the reader to edit a file they do not own.
-    expect(thrown?.message).not.toMatch(/update (your|the) profile/i)
-    expect(thrown?.context).toMatchObject({ agentProfilePublished: true })
-  })
-
-  it('leaves a SELF-HOSTED profile pointed at the user, with no publisher blame', () => {
-    // The mirror of the case above, reached the only way it CAN be reached
-    // for a self-hosted profile: a third-party service whose version lines do
-    // not meet. (The off-version `dev.ucp.*` shape above is unreachable here —
-    // `loadAgentProfile` makes that fatal for a self-hosted profile, precisely
-    // because the user can fix it.) Here "declares […], business offers […]"
-    // is the whole story: no publisher blame, and no self-hosting advice the
-    // reader has already taken.
+// `loadAgentProfile` rejects a `dev.ucp.*` entry off the profile's own
+// `ucp.version`, and Step 1 selects the business rendering by exact version
+// equality — so for a `dev.ucp.*` capability the declared and rendered
+// versions always meet, and the rung below is reached only by a third-party
+// service, which versions independently of the protocol.
+describe('negotiateService — a third-party service whose versions do not meet', () => {
+  it('points to the editable local profile even at a release-default URL', () => {
     const agent = agentProfileFixture({
       version: '2026-08-25',
-      url: 'https://agent.example.invalid/agent.json',
       name: 'mine',
       services: {
         'dev.ucp.shopping': [{ version: '2026-08-25', transport: 'mcp' }],
@@ -640,9 +555,7 @@ describe('negotiateService — a published profile that warned at load', () => {
     }
     expect(thrown?.code).toBe('SERVICE_VERSION_INCOMPATIBLE')
     expect(thrown?.message).toBe(
-      "com.acme.svc: profile 'mine' declares [2025-11-01], business offers [2025-06-01]",
+      `com.acme.svc: profile 'mine' declares [2025-11-01], business offers [2025-06-01]. Update the service declaration in profile.json to a version the business offers, then make ${RELEASES['2026-08-25'].defaultAgentProfileUrl} serve the corrected document; if you cannot change that URL, use one you own. Otherwise, accept unavailability.`,
     )
-    expect(thrown?.message).not.toContain('published')
-    expect(thrown?.context).toMatchObject({ agentProfilePublished: false })
   })
 })

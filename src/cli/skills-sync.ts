@@ -3,17 +3,19 @@
 //   1. The curated top-level `ucp` skill (skills/ucp/SKILL.md)
 //   2. Any other skill backed by a hand-written skills/<name>/SKILL.md
 //
-// Why this exists: incur 0.4.5 always emits a per-command-group SKILL.md
-// derived from zod schemas. For our CLI those are ~70% boilerplate (inherited
-// root options like --input/--set/--business repeated per subcommand) and
-// stale on every flag rename. We want one comprehensive curated skill, plus
-// optional per-domain skills that we author by hand. There is no incur
-// config knob to disable auto-generation today (verified against incur
-// source as of @incur 0.4.5), so we wrap the built-in at the bin entrypoint
-// and prune what we don't want.
+// Why this exists: `SyncSkills.sync` unconditionally renders one SKILL.md per
+// command group — it buckets the command map by the first `depth` segments of
+// each command path — and only then layers the `include` globs on top. For our
+// CLI those generated files are ~70% boilerplate (inherited root options like
+// --input/--set/--business repeated per subcommand) and go stale on every flag
+// rename. We want one comprehensive curated skill, plus optional per-domain
+// skills that we author by hand. Nothing in the `sync` options suppresses
+// generation — cwd, depth, description, global, include, and rootCommand are
+// the entire surface — so we wrap the built-in at the bin entrypoint and prune
+// what we don't want.
 //
-// When incur ships a `sync.skipGenerated` (or equivalent) option, this
-// module + the bin-entry interception go away.
+// Delete this module and the bin-entry interception once `SyncSkills.sync`
+// accepts an option that suppresses generated skills.
 
 import fs from 'node:fs/promises'
 import path from 'node:path'

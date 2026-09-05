@@ -42,9 +42,9 @@ export interface AgentProfileFixtureOptions {
 /**
  * Build a fetched-and-validated {@link AgentProfile} for tests.
  *
- * Starts from the release's VERBATIM published snapshot (the document the CLI
- * actually presents on the default path) and runs it through the real
- * `loadAgentProfile`, so fixtures cannot declare something the loader would
+ * Starts from the release's VERBATIM published template (the document
+ * `profile init` writes) and runs it through the real `loadAgentProfile`, so
+ * fixtures cannot declare something the loader would
  * have rejected — e.g. a `dev.ucp.*` entry off the profile's own version.
  */
 export function agentProfileFixture(options: AgentProfileFixtureOptions = {}): AgentProfile {

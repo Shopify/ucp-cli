@@ -125,9 +125,9 @@ function safeArray(value: unknown): unknown[] {
 
 // Per-extension hint copy. Keyed by reverse-domain capability id. The input
 // set is `allowlistedExtensions()` in cli.ts — the ACTIVE agent profile's
-// declared capabilities intersected with the business's, so a self-hosted
-// profile declaring `com.acme.loyalty` can reach here. Missing entries
-// silently no-op: `buildExtensionHints` drops any id with no copy, which is
+// declared capabilities intersected with the business's, so a local profile
+// declaring `com.acme.loyalty` can reach here. Missing entries silently no-op:
+// `buildExtensionHints` drops any id with no copy, which is
 // the correct default for a third-party capability this CLI has nothing
 // specific to say about.
 const EXTENSION_HINTS: Record<string, string> = {

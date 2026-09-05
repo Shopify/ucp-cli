@@ -93,8 +93,8 @@ describe('resolveSession — user profile branch', () => {
   })
 
   it("falls back to the latest release's published agent profile when meta.profile_url is absent", async () => {
-    // The fallback must be a REACHABLE document: the business GETs this URL on
-    // every call and negotiates against what it serves, and so does the CLI.
+    // The fallback must be a reachable document because the business reads
+    // it. The CLI reads the named profile's local profile.json instead.
     await saveUserProfile(
       {
         name: 'managed-local',
@@ -274,6 +274,46 @@ describe('resolveSession — business precedence', () => {
     const session = await resolveSession({ homeDir, env: {} })
     expect(session.business).toBeUndefined()
     expect(session.businessSource).toBeUndefined()
+  })
+
+  it('MCP mode drops the active.yaml leg but keeps flag and env', async () => {
+    // `ucp --mcp` is one process for many unrelated conversations; the file is
+    // per-user state that none of them chose. Flags and env vars arrive with
+    // the invocation, so they stay authoritative.
+    await writeActive({ profile: 'prod', business: 'https://active.example.com' }, { homeDir })
+
+    const ignored = await resolveSession({ homeDir, env: {}, inMcpMode: true, profile: 'prod' })
+    expect(ignored.business).toBeUndefined()
+    expect(ignored.businessSource).toBeUndefined()
+
+    const fromEnv = await resolveSession({
+      homeDir,
+      env: { UCP_PROFILE: 'prod', UCP_BUSINESS: 'https://env.example.com' },
+      inMcpMode: true,
+    })
+    expect(fromEnv.profile.name).toBe('prod')
+    expect(fromEnv.business).toBe('https://env.example.com')
+    expect(fromEnv.businessSource).toBe('env')
+
+    const fromFlag = await resolveSession({
+      homeDir,
+      env: {},
+      inMcpMode: true,
+      profile: 'prod',
+      business: 'https://flag.example.com',
+    })
+    expect(fromFlag.business).toBe('https://flag.example.com')
+    expect(fromFlag.businessSource).toBe('flag')
+  })
+
+  it('MCP mode ignores the active profile as well, so none is selected', async () => {
+    // The profile chain has the same file leg. Dropping it is what makes an
+    // argument-less tool call fail closed rather than run as whoever the
+    // machine's owner last selected.
+    await writeActive({ profile: 'prod', business: 'https://active.example.com' }, { homeDir })
+    await expect(resolveSession({ homeDir, env: {}, inMcpMode: true })).rejects.toMatchObject({
+      code: 'PROFILE_NOT_FOUND',
+    })
   })
 
   it('treats empty-string flag/env as unset (falls through precedence)', async () => {

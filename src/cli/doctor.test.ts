@@ -210,7 +210,7 @@ describe('runDoctor — hosted-identity fetch', () => {
     expect(result.ok).toBe(false)
   })
 
-  // The most common self-hosting failure: a 200 serving an HTML error page.
+  // The most common hosting failure: a 200 serving an HTML error page.
   // Not "unreachable", and not a schema problem either.
   it('fails and names a parse failure when the URL serves non-JSON', async () => {
     await saveUserProfile({ name: 'prod', body: SAMPLE_BODY, meta: SAMPLE_META }, { homeDir })
@@ -278,10 +278,11 @@ describe('runDoctor — hosted-identity fetch', () => {
 
 // ─── protocol + profile drift ────────────────────────────────────────
 //
-// Which UCP version an install speaks is a property of the ACTIVE PROFILE,
-// not the build. `protocol` is the only place doctor says so, and
-// `profile-drift` is the only place the local authoring copy meets the hosted
-// identity. Both are diagnostics: nothing here gates a request.
+// Which UCP version an install speaks is a property of the ACTIVE PROFILE.
+// `protocol` is the only place doctor says so, and the only place the local
+// document meets the one the URL serves. Severity follows consequence: a
+// version disagreement makes every request wrong (`fail`), any other
+// difference makes our plan wrong but our requests well-formed (`warn`).
 describe('runDoctor — protocol + profile drift', () => {
   let homeDir: string
 
@@ -315,27 +316,25 @@ describe('runDoctor — protocol + profile drift', () => {
     const check = findCheck(result, 'protocol')
     expect(check.status).toBe('ok')
     expect(check.detail).toContain(`uses UCP ${LATEST}`)
-    // Where the negotiated document came from, and that the URL agrees with
-    // it — the one thing no other check can establish now that the request
-    // path never reads the wire.
-    expect(check.detail).toContain('bundled snapshot')
+    // Which file the version came from, and that the URL agrees with it — the
+    // one thing no other check can establish, because the request path never
+    // reads the wire.
+    expect(check.detail).toContain(join(homeDir, 'profiles', 'prod', 'profile.json'))
     expect(check.detail).toContain('serves the same version (checked live)')
     expect(check.detail).toContain(`ucp-cli supports ${SUPPORTED_VERSIONS.join(', ')}`)
     expect(check.detail).toContain('this is the latest')
     expect(check.detail).not.toContain('NOT the latest')
     expect(check.detail).toContain(RELEASES[LATEST].defaultAgentProfileUrl)
-    expect(check.detail).toContain('published release default')
     expect(result.ok).toBe(true)
   })
 
-  // Every command resolves a release-default URL from the snapshot this build
-  // ships and makes no request at all. Doctor is the exception, and this is
-  // the scenario it exists for: a published default URL whose content changed
-  // under a frozen version is a spec-release violation, the CLI would keep
-  // negotiating as its snapshot while the merchant reads the new document,
-  // and a check that answers from the snapshot is structurally incapable of
-  // seeing it.
-  it('fails when a release-default URL serves a different version than the snapshot', async () => {
+  // Every command declares the local document and makes no request for it.
+  // Doctor is the exception, and this is the scenario it exists for: a
+  // published default URL whose content changed under a frozen version is a
+  // spec-release violation, the CLI would keep declaring the local document
+  // while the merchant reads the new one, and nothing on the request path can
+  // see the difference.
+  it('fails when a release-default URL serves a different version than the local document', async () => {
     const body = publishedProfile(LATEST)
     await saveUserProfile(
       {
@@ -363,8 +362,13 @@ describe('runDoctor — protocol + profile drift', () => {
     expect(check.status).toBe('fail')
     // Both values, and which one each side uses.
     expect(check.detail).toContain('serves UCP 2026-04-08')
-    expect(check.detail).toContain(`negotiates as ${LATEST}`)
-    expect(check.detail).toContain('Upgrade ucp-cli')
+    expect(check.detail).toContain(`negotiates as UCP ${LATEST}`)
+    // The remedy realigns the two documents. Re-pointing meta.profile_url is
+    // offered too, but never "upgrade ucp-cli": the version ucp-cli sends is
+    // the local file's, so an upgrade changes nothing here.
+    expect(check.detail).toContain('--version 2026-04-08 --force')
+    expect(check.detail).toContain('point meta.profile_url')
+    expect(check.detail).not.toMatch(/upgrade ucp-cli/i)
     expect(result.ok).toBe(false)
   })
 
@@ -389,28 +393,24 @@ describe('runDoctor — protocol + profile drift', () => {
     expect(check.detail).toContain('uses UCP 2026-04-08')
     expect(check.detail).toContain(`NOT the latest (${LATEST})`)
     expect(check.detail).toContain('Still fully supported')
-    // The move-forward remedy leads with the one-field change and labels
-    // `init --force` as destructive: it rewrites profile.json from the
-    // release template, so a user with local edits loses them by following
-    // our own advice.
-    expect(check.detail).toContain('point meta.profile_url at')
+    // The move-forward remedy is one command, and it is labelled destructive:
+    // it rewrites profile.json from the published document, so a user with
+    // local edits loses them by following our own advice.
+    expect(check.detail).toContain(`--version ${LATEST} --force`)
     expect(check.detail).toContain(RELEASES[LATEST].defaultAgentProfileUrl)
-    expect(check.detail).toContain(`--version ${LATEST}`)
-    expect(check.detail).toMatch(/REWRITES profile\.json/)
-    // A DELIBERATE pin (profile_url set, hosted document matches) is green.
-    // The version-drift warn below must not fire here, or the check would be
-    // permanently red for everyone who pinned on purpose.
+    expect(check.detail).toMatch(/REWRITES/)
+    expect(check.detail).toContain('discarding local edits')
+    // A DELIBERATE pin (profile_url set, served document matches) is green.
     expect(findCheck(result, 'profile-drift').status).toBe('ok')
     expect(result.ok).toBe(true)
   })
 
-  // The legacy-upgrade population: 0.6.x wrote profile.json at 2026-04-08
-  // (the build clamped there) and no meta.profile_url, so the identity now
-  // resolves to the latest published default and negotiates 2026-08-25.
-  // Before this check doctor was GREEN on exactly this population — and its
-  // only warning blamed "managed upload may not be configured yet", which
-  // named the wrong cause.
-  it('warns when the local ucp.version differs from the hosted identity', async () => {
+  // The legacy-upgrade population: 0.6.x wrote profile.json at 2026-04-08 and
+  // no meta.profile_url, so the profile URL is the latest published default
+  // while the document ucp-cli sends says 2026-04-08. The merchant reads
+  // 2026-08-25 off that URL and validates our 2026-04-08 requests against it:
+  // every call is wrong, so this is a `fail`, not a note.
+  it('fails when the local ucp.version differs from what the profile URL serves', async () => {
     const legacy = publishedProfile('2026-04-08')
     await saveUserProfile(
       {
@@ -427,28 +427,20 @@ describe('runDoctor — protocol + profile drift', () => {
       fetch: serving(publishedProfile(LATEST)),
     })
 
-    expect(findCheck(result, 'protocol').status).toBe('ok')
-    const drift = findCheck(result, 'profile-drift')
-    expect(drift.status).toBe('warn')
-    // Both versions, which one is actually used, and why the file is not it.
-    expect(drift.detail).toContain('local profile.json declares ucp 2026-04-08')
-    expect(drift.detail).toContain(`which serves ${LATEST}`)
-    expect(drift.detail).toContain('never from profile.json')
-    expect(drift.detail).toContain('Editing profile.json changes nothing merchants can see')
-    // Remedy is the one-field change, naming the URL that pins 04-08.
-    expect(drift.detail).toContain('set meta.profile_url')
-    expect(drift.detail).toContain(RELEASES['2026-04-08'].defaultAgentProfileUrl)
-    expect(drift.detail).not.toMatch(/managed upload/)
-    // Still a warn: this is a diagnostic, and the install works.
-    expect(result.ok).toBe(true)
+    const check = findCheck(result, 'protocol')
+    expect(check.status).toBe('fail')
+    // Both versions, and which side reads which.
+    expect(check.detail).toContain('negotiates as UCP 2026-04-08')
+    expect(check.detail).toContain(`serves UCP ${LATEST}`)
+    expect(check.detail).toContain(join(homeDir, 'profiles', 'legacy', 'profile.json'))
+    expect(result.ok).toBe(false)
+    // One voice per fault: `protocol` has ruled, so drift stays quiet.
+    expect(result.checks.find((c) => c.id === 'profile-drift')).toBeUndefined()
   })
 
-  // Self-hosted is the case where the two documents must AGREE, because the
-  // CLI negotiates from the local one and the merchant reads the hosted one.
-  // A version difference there is not a documentation nit; it is the two
-  // sides speaking different releases, so `protocol` fails rather than
-  // `profile-drift` warning.
-  it('fails a self-hosted version mismatch and points at uploading, not at pinning', async () => {
+  // The same fault when the URL is the user's. The remedy differs in what the
+  // reader can do about it, not in severity.
+  it('fails a version mismatch on a URL you own and offers uploading', async () => {
     await saveUserProfile(
       {
         name: 'mine',
@@ -469,15 +461,14 @@ describe('runDoctor — protocol + profile drift', () => {
     expect(check.detail).toContain(`serves UCP ${LATEST}`)
     expect(check.detail).toContain('negotiates as UCP 2026-04-08')
     expect(check.detail).toContain('profile.json')
-    // No command: ucp-cli cannot write to the user's URL, so the remedy must
-    // not name a verb that would imply it can.
-    expect(check.detail).toMatch(/Upload .*profile\.json to https:/)
+    // Uploading is something the reader does, never something ucp-cli offers
+    // to do: it has no command that writes to a URL.
+    expect(check.detail).toMatch(/upload .*profile\.json to https:/i)
     expect(check.detail).not.toMatch(/ucp profile publish/)
-    expect(check.detail).not.toContain('set meta.profile_url')
     expect(result.ok).toBe(false)
   })
 
-  it('fails when the hosted document is outside the window', async () => {
+  it('fails when the served document is outside the window', async () => {
     const hosted = publishedProfile(LATEST) as { ucp: Record<string, unknown> }
     hosted.ucp.version = '2027-01-01'
     hosted.ucp.services = {}
@@ -494,12 +485,11 @@ describe('runDoctor — protocol + profile drift', () => {
     expect(result.ok).toBe(false)
   })
 
-  it('warns on drift against a release default: the edit is inert, or the snapshot is stale', async () => {
-    // Not a false alarm: `profile init` writes the release's verbatim
-    // snapshot, so a clean install reports `matches` (asserted below in
-    // "reports no drift when the local copy matches the hosted bytes"). A diff
-    // here means the user edited a file that cannot affect anything, or the
-    // publisher moved the document out from under this build's snapshot.
+  // Same version on both sides, different content: the requests ucp-cli sends
+  // are well-formed, but the business grants capabilities off a different
+  // declaration than the one we planned against. Worth saying, not worth
+  // stopping a build for — and the URL's owner is not part of the judgement.
+  it('warns on a content difference under a release-default URL', async () => {
     await saveUserProfile(
       {
         name: 'prod',
@@ -517,15 +507,14 @@ describe('runDoctor — protocol + profile drift', () => {
 
     const drift = findCheck(result, 'profile-drift')
     expect(drift.status).toBe('warn')
-    expect(drift.detail).toContain('invisible to them')
-    expect(drift.detail).toContain('--profile-url')
-    expect(drift.detail).toContain('snapshot is stale')
-    // A warn describes state the user should know about; only `fail` gates the
-    // verdict, so an inert local edit must not fail a CI job.
+    expect(drift.detail).toContain('the versions agree')
+    expect(drift.detail).toContain(join(homeDir, 'profiles', 'prod', 'profile.json'))
+    // Only `fail` gates the verdict, so a content difference must not fail a
+    // CI job.
     expect(result.ok).toBe(true)
   })
 
-  it('drift on a SELF-HOSTED URL warns: the hosted copy is what the business reads', async () => {
+  it('warns on a content difference under a URL you own, and says who reads what', async () => {
     await saveUserProfile(
       { name: 'mine', body: SAMPLE_BODY, meta: { profile_url: SELF_HOSTED_URL } },
       { homeDir },
@@ -539,15 +528,15 @@ describe('runDoctor — protocol + profile drift', () => {
 
     const drift = findCheck(result, 'profile-drift')
     expect(drift.status).toBe('warn')
-    expect(drift.detail).toContain('your edits are NOT live')
-    expect(drift.detail).toMatch(/Upload .*profile\.json to https:/)
+    expect(drift.detail).toContain('The business acts on what that URL serves')
+    expect(drift.detail).toMatch(/upload .*profile\.json to https:/i)
     expect(drift.detail).not.toMatch(/ucp profile publish/)
     // A warn describes optional state and must not gate the verdict.
     expect(result.ok).toBe(true)
   })
 
-  it('reports no drift when the local copy matches the hosted bytes', async () => {
-    // What `profile init` produces: profile.json IS the published snapshot,
+  it('reports no drift when the local document matches the served bytes', async () => {
+    // What `profile init` produces: profile.json IS the published document,
     // re-serialized. The comparison is structural, not byte-wise, so the
     // indentation `saveUserProfile` applies is not reported as drift.
     const body = publishedProfile(LATEST)
@@ -583,7 +572,9 @@ describe('runDoctor — protocol + profile drift', () => {
     })
 
     expect(findCheck(result, 'protocol').detail).toContain(SELF_HOSTED_URL)
-    expect(findCheck(result, 'protocol').detail).toContain('self-hosted')
+    expect(findCheck(result, 'protocol').detail).not.toContain(
+      RELEASES[LATEST].defaultAgentProfileUrl,
+    )
   })
 })
 
@@ -592,9 +583,10 @@ describe('runDoctor — protocol + profile drift', () => {
 // The merchant fetches this URL to negotiate with us, so its cache policy is
 // the merchant's fetch rate. UCP's hosting rules make it normative
 // (`Cache-Control: public, max-age>=60`, never private/no-store/no-cache),
-// and a profile served uncacheable turns every call into an origin hit on the
-// user's own host. Advisory only, and only where the user owns the headers.
-describe('runDoctor — self-hosted cache policy', () => {
+// and a profile served uncacheable turns every call into an origin hit on
+// that host. Advisory only — and reported for every URL, so its absence from
+// the output means "not checked", never "fine".
+describe('runDoctor — profile URL cache policy', () => {
   let homeDir: string
 
   beforeEach(async () => {
@@ -663,9 +655,16 @@ describe('runDoctor — self-hosted cache policy', () => {
     expect((await doctorWith(SELF_HOSTED_URL, 'no-store')).ok).toBe(true)
   })
 
-  it('says nothing about a release default — nobody local owns those headers', async () => {
-    const result = await doctorWith(RELEASES[LATEST].defaultAgentProfileUrl, 'no-store')
-    expect(result.checks.find((c) => c.id === 'profile-cache-control')).toBeUndefined()
+  // Reported on a release-default URL too. The headers are somebody else's to
+  // fix, but merchants still refetch that document per request, and the reader
+  // can act on it — by moving to a URL they control.
+  it('reports a release-default URL on the same terms', async () => {
+    const check = findCheck(
+      await doctorWith(RELEASES[LATEST].defaultAgentProfileUrl, 'no-store'),
+      'profile-cache-control',
+    )
+    expect(check.status).toBe('warn')
+    expect(check.detail).toContain('no-store')
   })
 })
 

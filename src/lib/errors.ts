@@ -39,12 +39,10 @@
 //   AGENT_PROFILE_*  OUR hosted document (the URL we advertise as
 //                    `meta.ucp-agent.profile`). The agent acts.
 //
-// No code may mean both. The previous design discriminated the two with
-// `context.kind`, which does not work: `cli.ts`'s error middleware emits
-// `{code, message, retryable}` or `{code, message, cta}` and NEVER
-// serializes `context`, so the discriminator was invisible to the primary
-// audience (agents reading CLI JSON). Anything an agent must branch on has
-// to live in `code`, `message`, or `cta`.
+// No code may mean both. `context.kind` cannot distinguish them for callers:
+// `cli.ts`'s error middleware emits `{code, message, retryable}` or `{code,
+// message, cta}` and NEVER serializes `context`. Anything an agent must branch
+// on has to live in `code`, `message`, or `cta`.
 
 /**
  * Public registry of CLI-emitted error codes. Pre-v1, this should still be
@@ -165,8 +163,9 @@ export const ErrorCodes = {
   /** Caller passed structurally invalid input (bad JSON, missing required flag). */
   INVALID_INPUT: 'INVALID_INPUT',
   /**
-   * No target business resolvable from --business / UCP_BUSINESS / active.yaml.
-   * Carries a {@link Cta} pointing at `ucp use` or `--business`.
+   * No target business resolved from invocation input, UCP_BUSINESS, or the
+   * session sources available in the current mode. Carries a context-appropriate
+   * recovery CTA.
    */
   BUSINESS_NOT_RESOLVED: 'BUSINESS_NOT_RESOLVED',
   /** Caller referenced a profile name that doesn't exist on disk. */
@@ -183,9 +182,9 @@ export const ErrorCodes = {
    * `context.reason` says which sub-case:
    *   - `'network'`         DNS/TLS/connection/abort
    *   - `'http_status'`     reached, non-2xx
-   *   - `'not_json'`        200 with a body that is not JSON (a self-hosted
-   *                         origin serving an HTML error page is the single
-   *                         most common failure here, and it is not really
+   *   - `'not_json'`        200 with a body that is not JSON (an origin
+   *                         serving an HTML error page is the single most
+   *                         common failure here, and it is not really
    *                         "unreachable")
    *   - `'business_reported'` the business told us: JSON-RPC -32001 with
    *                         `data.code: 'profile_unreachable'`
@@ -199,13 +198,8 @@ export const ErrorCodes = {
   /**
    * OUR profile is internally inconsistent: a `dev.ucp.*` entry at a version
    * other than the profile's own `ucp.version` (the snapshot rule we hold
-   * merchants to, applied to ourselves).
-   *
-   * Fatal only when the profile is SELF-HOSTED. When `profileUrl` is a
-   * release default the document is the platform's, not the user's — the
-   * condition degrades into an ordinary negotiation error under
-   * declare/constrain/intersect, so it warns and proceeds rather than
-   * hard-stopping every installed CLI on a publisher's defect.
+   * merchants to, applied to ourselves). The local `profile.json` is the
+   * declaration on every named-profile path, so this is always fatal.
    */
   AGENT_PROFILE_VERSION_MISMATCH: 'AGENT_PROFILE_VERSION_MISMATCH',
   /** OUR hosted document failed its release's platform-profile schema. */
@@ -221,13 +215,10 @@ export const ErrorCodes = {
   AGENT_PROFILE_SERVICE_UNDECLARED: 'AGENT_PROFILE_SERVICE_UNDECLARED',
 } as const
 
-// Deliberately absent: `PROFILE_VERSION_UNSUPPORTED`. It existed only for
-// `parseBusinessProfile`, a helper with no callers, and it encoded a model
-// this rewrite deletes — that a BUSINESS's own `ucp.version` selects the
-// schema we validate it against. It does not: the agent profile's version
-// selects the release, and a business that cannot serve that version is
-// `PROTOCOL_VERSION_INCOMPATIBLE`. Our own document's equivalent condition is
-// `AGENT_PROFILE_VERSION_UNSUPPORTED`.
+// Deliberately absent: `PROFILE_VERSION_UNSUPPORTED`. The agent profile's
+// version selects the release used to validate a business document; a business
+// that cannot serve that version is `PROTOCOL_VERSION_INCOMPATIBLE`. Our own
+// document's equivalent condition is `AGENT_PROFILE_VERSION_UNSUPPORTED`.
 
 /**
  * STABLE — registered codes give autocomplete; arbitrary strings remain valid

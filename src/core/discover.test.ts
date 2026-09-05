@@ -5,9 +5,9 @@
 // verbatim business profile plus negotiated dispatch view out, and the
 // two-layer cache behavior for profile + tools/list.
 //
-// Every test injects an `AgentProfile` — the fetched, validated hosted
-// identity. That is the platform side of negotiation and the thing that
-// selects the protocol version; there is no range anywhere in this file.
+// Tests either inject a validated `AgentProfile` or exercise the explicit
+// no-name template fallback. That profile is the platform side of negotiation
+// and selects one exact protocol version; there is no range in this file.
 //
 // Scenario names (S3′, S4, S5, S6, S8) refer to the negotiation design doc's
 // consumer-experience section.
@@ -84,10 +84,6 @@ interface MockFetchOpts {
    * leaves), keyed by version. Unlisted versions 404.
    */
   versionedProfiles?: Record<string, object>
-  /** Body served at the agent profile URL (Step 0 fetch path). */
-  agentProfile?: object
-  /** Where `agentProfile` is served. Defaults to any `https://shopify.dev/` URL. */
-  agentProfileUrl?: string
 }
 
 function mockFetch(opts: MockFetchOpts = {}): {
@@ -98,16 +94,6 @@ function mockFetch(opts: MockFetchOpts = {}): {
   const fetch = vi.fn(async (url: string | URL | Request, init: RequestInit = {}) => {
     const u = String(url)
     calls.push({ url: u, method: init.method ?? 'GET' })
-    const isAgentProfileUrl =
-      opts.agentProfileUrl === undefined
-        ? u.startsWith('https://shopify.dev/')
-        : u === opts.agentProfileUrl
-    if (opts.agentProfile !== undefined && isAgentProfileUrl) {
-      return new Response(JSON.stringify(opts.agentProfile), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
-    }
     if (u.endsWith('/.well-known/ucp')) {
       return new Response(JSON.stringify(opts.profile ?? SAMPLE_PROFILE), {
         status: 200,
@@ -368,10 +354,9 @@ describe('discover — composition', () => {
     ).rejects.toMatchObject({ code: 'AGENT_PROFILE_SERVICE_UNDECLARED', layer: 'client' })
   })
 
-  it('resolves the hosted agent profile when the caller injects none', async () => {
-    // Step 0: the identity is a URL the business will GET too, so the CLI
-    // negotiates against that same document — on the default path, from the
-    // verbatim snapshot of it that this build ships.
+  it('uses the published template fallback when the caller supplies no profile', async () => {
+    // This exercises the no-name fallback directly; production CLI paths
+    // resolve a named profile and read its profile.json instead.
     const { fetch } = mockFetch()
     const result = await discover(BUSINESS_URL, { cacheDir, fetch })
 
@@ -379,22 +364,15 @@ describe('discover — composition', () => {
   })
 })
 
-// ─── Step 0 costs no round trip on the default path ──────────────────────
+// ─── Step 0 costs no round trip ──────────────────────────────────────────
 //
-// A release default's published body is bundled verbatim
-// (`RELEASES[v].agentProfileTemplate`, byte-identity enforced by the codegen
-// drift gate), so GETting it retrieves bytes we already ship — a round trip on
-// every negotiating command plus an availability dependency on the publisher
-// for commands that never otherwise touch it. Self-hosted URLs are a real
-// document we do not ship, so they are fetched — once, then disk-cached.
+// A named profile is resolved from its local profile.json at every URL. The
+// identity therefore adds no pre-flight fetch or availability dependency;
+// only `ucp doctor` reads the profile URL.
 //
 // These assert on CALL COUNTS, not on outcomes: every other test here would
-// still pass with the GET reinstated.
-
-// The identity is resolved from local bytes on every path, so a negotiation
-// makes exactly the requests the BUSINESS conversation needs and not one
-// more. Asserting the full call list (rather than "no calls to X") is what
-// makes a re-introduced pre-flight GET fail here.
+// still pass if a pre-flight GET were introduced. The full call list proves a
+// negotiation makes exactly the requests the BUSINESS conversation needs.
 describe('discover — the agent identity never costs a request', () => {
   const SELF_HOSTED = 'https://agent.example.invalid/agent.json'
   let cacheDir: string
@@ -419,7 +397,8 @@ describe('discover — the agent identity never costs a request', () => {
     await writeFile(join(dir, 'profile.json'), RELEASES[version].agentProfileJson)
   }
 
-  it('resolves the release default from the bundled snapshot — business traffic only', async () => {
+  it('resolves a release-default URL from profile.json — business traffic only', async () => {
+    await localProfile('agent', '2026-08-25')
     for (const profileUrl of [undefined, RELEASES['2026-08-25'].defaultAgentProfileUrl]) {
       const { fetch, calls } = mockFetch()
       const result = await discover(BUSINESS_URL, {
@@ -435,9 +414,10 @@ describe('discover — the agent identity never costs a request', () => {
     }
   })
 
-  it('resolves a self-hosted URL from the local profile.json — still business traffic only', async () => {
+  it('resolves a URL of your own from the local profile.json — still business traffic only', async () => {
     // profile.json is the 04-08 document, so if the identity came from
-    // anywhere else (a fetch, or the bundled latest) this negotiates 08-25.
+    // anywhere else (a fetch, or the latest published template) this
+    // negotiates 08-25.
     await localProfile('mine', '2026-04-08')
     const leafUrl = `${BUSINESS_URL}/.well-known/ucp/2026-04-08`
     const { fetch, calls } = mockFetch({
