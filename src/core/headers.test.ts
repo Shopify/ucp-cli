@@ -101,15 +101,12 @@ describe('isReservedHeader', () => {
     expect(isReservedHeader(name)).toBe(true)
   })
 
-  it.each([
-    ['User-Agent'],
-    ['Authorization'],
-    ['Api-Key'],
-    ['Cookie'],
-    ['Custom-Anything'],
-  ])('not reserved: %s', (name) => {
-    expect(isReservedHeader(name)).toBe(false)
-  })
+  it.each([['User-Agent'], ['Authorization'], ['Api-Key'], ['Cookie'], ['Custom-Anything']])(
+    'not reserved: %s',
+    (name) => {
+      expect(isReservedHeader(name)).toBe(false)
+    },
+  )
 })
 
 describe('isSensitiveHeaderName', () => {
@@ -128,15 +125,12 @@ describe('isSensitiveHeaderName', () => {
     expect(isSensitiveHeaderName(name)).toBe(true)
   })
 
-  it.each([
-    'User-Agent',
-    'Accept',
-    'Trace-Id',
-    'Tenant-Id',
-    'Region',
-  ])('not sensitive: %s', (name) => {
-    expect(isSensitiveHeaderName(name)).toBe(false)
-  })
+  it.each(['User-Agent', 'Accept', 'Trace-Id', 'Tenant-Id', 'Region'])(
+    'not sensitive: %s',
+    (name) => {
+      expect(isSensitiveHeaderName(name)).toBe(false)
+    },
+  )
 })
 
 describe('redactHeadersForLog', () => {

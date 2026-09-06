@@ -48,17 +48,12 @@ describe('path helpers', () => {
 })
 
 describe('validateProfileName', () => {
-  it.each([
-    'prod',
-    'my-bot',
-    'shop.example',
-    'a1',
-    'a_b',
-    'a-b-c',
-    'default',
-  ])('accepts %s', (name) => {
-    expect(() => validateProfileName(name)).not.toThrow()
-  })
+  it.each(['prod', 'my-bot', 'shop.example', 'a1', 'a_b', 'a-b-c', 'default'])(
+    'accepts %s',
+    (name) => {
+      expect(() => validateProfileName(name)).not.toThrow()
+    },
+  )
 
   it.each([
     ['Prod', 'uppercase'],

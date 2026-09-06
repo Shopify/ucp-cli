@@ -182,16 +182,14 @@ describe('installProxyDispatcher — conditional load', () => {
     expect(state.vars).toEqual(['https_proxy=http://proxy.example:3128'])
   })
 
-  it.each([
-    'http_proxy',
-    'HTTP_PROXY',
-    'https_proxy',
-    'HTTPS_PROXY',
-  ])('triggers on %s (case handling is undici\u2019s job, presence detection is ours)', async (name) => {
-    vi.stubEnv(name, 'http://proxy.example:3128')
-    const { load } = stubLoader()
-    expect((await installProxyDispatcher({ load })).status).toBe('active')
-  })
+  it.each(['http_proxy', 'HTTP_PROXY', 'https_proxy', 'HTTPS_PROXY'])(
+    'triggers on %s (case handling is undici\u2019s job, presence detection is ours)',
+    async (name) => {
+      vi.stubEnv(name, 'http://proxy.example:3128')
+      const { load } = stubLoader()
+      expect((await installProxyDispatcher({ load })).status).toBe('active')
+    },
+  )
 
   it('treats an empty proxy value as unset (`export https_proxy=` idiom)', async () => {
     vi.stubEnv('https_proxy', '')
@@ -242,25 +240,28 @@ describe('installProxyDispatcher — conditional load', () => {
     ['22.19.1', false],
     ['22.19.0-rc.1', true],
     ['22.20.0-nightly20250101', false],
-  ] as const)('gates the load-failure hint on the full Node %s version', async (version, expectsHint) => {
-    // The annotation is version-based, not global-sniffing, so it covers
-    // whichever missing API undici happens to encounter below the floor.
-    vi.stubEnv('https_proxy', 'http://proxy.example:3128')
-    const descriptor = Object.getOwnPropertyDescriptor(process.versions, 'node')
-    Object.defineProperty(process.versions, 'node', { ...descriptor, value: version })
-    try {
-      const state = await installProxyDispatcher({
-        load: () => Promise.reject(new ReferenceError('File is not defined')),
-      })
-      expect(state.status).toBe('error')
-      expect(state.error).toContain('File is not defined')
-      const hint = `(Node v${version}; ucp requires Node >= ${__MIN_NODE_VERSION__})`
-      if (expectsHint) expect(state.error).toContain(hint)
-      else expect(state.error).not.toContain('requires Node')
-    } finally {
-      Object.defineProperty(process.versions, 'node', descriptor as PropertyDescriptor)
-    }
-  })
+  ] as const)(
+    'gates the load-failure hint on the full Node %s version',
+    async (version, expectsHint) => {
+      // The annotation is version-based, not global-sniffing, so it covers
+      // whichever missing API undici happens to encounter below the floor.
+      vi.stubEnv('https_proxy', 'http://proxy.example:3128')
+      const descriptor = Object.getOwnPropertyDescriptor(process.versions, 'node')
+      Object.defineProperty(process.versions, 'node', { ...descriptor, value: version })
+      try {
+        const state = await installProxyDispatcher({
+          load: () => Promise.reject(new ReferenceError('File is not defined')),
+        })
+        expect(state.status).toBe('error')
+        expect(state.error).toContain('File is not defined')
+        const hint = `(Node v${version}; ucp requires Node >= ${__MIN_NODE_VERSION__})`
+        if (expectsHint) expect(state.error).toContain(hint)
+        else expect(state.error).not.toContain('requires Node')
+      } finally {
+        Object.defineProperty(process.versions, 'node', descriptor as PropertyDescriptor)
+      }
+    },
+  )
 
   it('records an error instead of throwing when the proxy URL is malformed', async () => {
     // Real undici here: the throw we are catching is genuinely its own.

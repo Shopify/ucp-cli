@@ -210,7 +210,7 @@ describe('ucp profile init', () => {
     expect(exitCode).toBe(0)
     expect(saves[0]?.meta.profile_url).toBe(RELEASES['2026-04-08'].defaultAgentProfileUrl)
     expect(saves[0]?.body).toStrictEqual(JSON.parse(RELEASES['2026-04-08'].agentProfileJson))
-    expect((saves[0]?.body as { ucp: { version: string } }).ucp.version).toBe('2026-04-08')
+    expect(saves[0]?.body.ucp.version).toBe('2026-04-08')
     expect(JSON.parse(output)).toMatchObject({ version: '2026-04-08' })
   })
 

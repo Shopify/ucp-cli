@@ -44,22 +44,24 @@ describe('release registry shape', () => {
 })
 
 describe('agent profile snapshots', () => {
-  it.each([
-    ...SUPPORTED_VERSIONS,
-  ])('%s: verbatim snapshot parses, matches the template, and declares its release version', (version) => {
-    const entry = RELEASES[version]
-    const parsed = JSON.parse(entry.agentProfileJson)
-    expect(parsed).toStrictEqual(entry.agentProfileTemplate)
-    expect((parsed as { ucp: { version: string } }).ucp.version).toBe(version)
-  })
+  it.each([...SUPPORTED_VERSIONS])(
+    '%s: verbatim snapshot parses, matches the template, and declares its release version',
+    (version) => {
+      const entry = RELEASES[version]
+      const parsed = JSON.parse(entry.agentProfileJson)
+      expect(parsed).toStrictEqual(entry.agentProfileTemplate)
+      expect((parsed as { ucp: { version: string } }).ucp.version).toBe(version)
+    },
+  )
 
-  it.each([
-    ...SUPPORTED_VERSIONS,
-  ])('%s: snapshot validates against its own release platform schema', (version) => {
-    const entry = RELEASES[version]
-    const result = entry.platformProfileSchema.safeParse(entry.agentProfileTemplate)
-    expect(result.success, JSON.stringify(result.error?.issues, null, 2)).toBe(true)
-  })
+  it.each([...SUPPORTED_VERSIONS])(
+    '%s: snapshot validates against its own release platform schema',
+    (version) => {
+      const entry = RELEASES[version]
+      const result = entry.platformProfileSchema.safeParse(entry.agentProfileTemplate)
+      expect(result.success, JSON.stringify(result.error?.issues, null, 2)).toBe(true)
+    },
+  )
 })
 
 describe('reverse-domain patterns', () => {
