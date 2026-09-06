@@ -29,7 +29,6 @@ import {
   agentLabel,
   ENGINE_TRANSPORTS,
   isDevUcpKey,
-  isReleaseDefaultProfileUrl,
   resolveAgentProfile,
 } from './agent.js'
 import { cacheCompute, originToFilename, ucpHomeDir } from './cache.js'
@@ -72,10 +71,10 @@ export interface NegotiatedCapability {
  * There is no `businessVersion`. It encoded the same bit `source` already
  * carries — the biconditional (`businessVersion !== version` ⇔ `source ===
  * 'supported_versions'`) holds by construction — and exposing a second date
- * invited exactly the reasoning this rewrite exists to delete
- * (`businessVersion > version ⇒ I'm behind`). Agents branch on the `source`
- * enum; operators get the business's headline version from the `discover:`
- * vlog line, and the failure case carries it in
+ * invites invalid compatibility inference (`businessVersion > version ⇒ I'm
+ * behind`). Agents branch on the `source` enum rather than comparing dates;
+ * operators get the business's headline version from the `discover:` vlog line,
+ * and the failure case carries it in
  * `PROTOCOL_VERSION_INCOMPATIBLE.context`.
  */
 export interface NegotiatedProtocol {
@@ -118,9 +117,9 @@ export interface DiscoverOptions {
   /**
    * The resolved, validated agent identity (NOT the local `ActiveProfile`
    * pointer). When omitted, `discover` resolves it from `profileUrl` +
-   * `profileName` via `resolveAgentProfile` — the bundled snapshot on the
-   * release-default path, the local `profile.json` when self-hosted, no
-   * network in either case.
+   * `profileName` via `resolveAgentProfile`: a named profile comes from its
+   * local `profile.json`; without a name, a published release template is the
+   * fallback. Neither path uses the network.
    */
   agent?: AgentProfile
   /**
@@ -141,12 +140,12 @@ export interface DiscoverOptions {
   /** Platform profile URL advertised to the business during MCP discovery. */
   profileUrl?: string
   /**
-   * LOCAL name of the profile `profileUrl` belongs to. Two jobs: it supplies
-   * the `profile.json` that IS our identity when `profileUrl` is self-hosted,
-   * and it labels messages — a version mismatch reads `profile 'agent-0408'
-   * speaks 2026-04-08` and the remedy is `--profile agent-0408`, where the
-   * raw URL (`agentLabel`) names no switchable thing. Ignored when `agent` is
-   * injected — that object already carries both.
+   * LOCAL name of the profile `profileUrl` belongs to. Two jobs: it selects
+   * the `profile.json` used for negotiation, and it labels messages — a
+   * version mismatch reads `profile 'agent-0408' speaks 2026-04-08` and the
+   * remedy is `--profile agent-0408`, where the raw URL (`agentLabel`) names
+   * no switchable thing. Ignored when `agent` is injected — that object
+   * already carries both.
    */
   profileName?: string
   /**
@@ -182,17 +181,17 @@ export async function discover(
   const profileCacheDir = join(cacheRoot, 'businesses')
   const toolsListCacheRoot = join(cacheRoot, 'toolslist', originToFilename(normalizedBusiness))
 
-  // Step 0 — agent identity, resolved locally. `resolveAgentProfile` reads
-  // the bundled snapshot for a release-default URL and the local
-  // `profile.json` for a self-hosted one; neither costs a request. Callers
-  // that already hold a resolved AgentProfile inject it.
+  // Step 0 — agent identity, resolved locally. A named profile always comes
+  // from its `profile.json`; only the no-name fallback uses a published
+  // release template. Neither costs a request. Callers that already hold a
+  // resolved AgentProfile inject it.
   const agent =
     options.agent ??
     (await resolveAgentProfile(
       omitUndefined({ url: options.profileUrl, name: options.profileName }),
     ))
-  // The URL advertised on the wire (tools/list, tools/call) is the same
-  // document we just negotiated against — one identity, both sides.
+  // Advertise the URL paired with the local declaration. The business reads
+  // that URL; `ucp doctor` checks that its document agrees with profile.json.
   const advertisedProfileUrl = options.profileUrl ?? agent.url
 
   // Step 1 — business profile selection at the agent's exact version.
@@ -501,7 +500,7 @@ export function negotiateService(options: NegotiateOptions): NegotiatedService {
       },
       cta: {
         description:
-          'The hosted agent profile is the platform side of every negotiation. Declare the service there, and upload the corrected document to your profile URL, before requesting it.',
+          'Your profile is the platform side of every negotiation. Declare the service in profile.json and make the profile URL serve the corrected document before requesting it; if you cannot change that URL, use one you own.',
         commands: [
           { command: 'ucp profile show', description: 'print the active profile document' },
         ],
@@ -584,32 +583,20 @@ export function negotiateService(options: NegotiateOptions): NegotiatedService {
 
     // Two independent version lines that do not meet. Typical for
     // third-party components (`com.acme.svc`): both documents are internally
-    // consistent, they just disagree. The agent updates its profile (or
-    // accepts unavailability).
-    //
-    // Except when the profile is a release default. Then "update your
-    // profile" names a remedy the reader cannot perform: the document is
-    // platform-published and read-only, and reaching this rung means IT is
-    // the defective side (its `dev.ucp.*` entry sits off its own
-    // `ucp.version`; the loader already warned). Keep the behavior — a
-    // pre-flight fatal would break every business including ones where the
-    // defect is irrelevant — and name the actual situation instead.
-    const platformPublished = isReleaseDefaultProfileUrl(agent.url)
+    // consistent, they just disagree. The local profile is the declaration
+    // the reader can update; its URL must serve the same correction for the
+    // business to observe it.
     const declaredList = uniqueSorted([...declaredVersions]).join(', ')
     const offeredList = uniqueSorted(bizEntries.map((e) => e.version)).join(', ')
     throw new UcpError({
       layer: 'transport',
       code: ErrorCodes.SERVICE_VERSION_INCOMPATIBLE,
-      message: platformPublished
-        ? `${capability}: the published agent profile at ${agent.url} declares [${declaredList}] while the business offers [${offeredList}] — that profile is a defect in a platform-published document, not something you can edit. Host a corrected copy at a URL you own (\`ucp profile init --profile-url <your-url>\`, fix the ${capability} entry, upload it to that URL) or accept unavailability.`
-        : `${capability}: ${who} declares [${declaredList}], business offers [${offeredList}]`,
+      message: `${capability}: ${who} declares [${declaredList}], business offers [${offeredList}]. Update the service declaration in profile.json to a version the business offers, then make ${agent.url} serve the corrected document; if you cannot change that URL, use one you own. Otherwise, accept unavailability.`,
       context: {
         capability,
         declaredVersions: uniqueSorted([...declaredVersions]),
         offeredVersions: uniqueSorted(bizEntries.map((e) => e.version)),
         profileUrl: agent.url,
-        /** True when the agent profile is platform-published (read-only to the user). */
-        agentProfilePublished: platformPublished,
         ...(agent.name !== undefined ? { profile: agent.name } : {}),
       },
     })

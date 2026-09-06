@@ -140,10 +140,10 @@ export interface UcpCliDependencies {
   use?: UseDeps
   doctor?: DoctorDeps
   /**
-   * When true, the escalation hook is skipped. MCP servers must not surprise
-   * the host process with subprocesses or browser launches. Set at the bin
-   * entrypoint based on `process.argv.includes('--mcp')`. Test injection
-   * lets specs exercise both branches without spawning real children.
+   * When true, MCP-only safety policy applies: session resolution ignores
+   * active.yaml, and escalation hooks cannot spawn subprocesses or browsers.
+   * Set at the bin entrypoint from `process.argv.includes('--mcp')`; test
+   * injection lets specs exercise both branches without a stdio server.
    */
   inMcpMode?: boolean
   /**
@@ -156,8 +156,15 @@ export interface UcpCliDependencies {
 }
 
 export function createUcpCli(deps: UcpCliDependencies = {}) {
+  const inMcpMode = deps.inMcpMode === true
   const discoverImpl = deps.discover ?? discover
-  const resolveSessionImpl = deps.resolveSession ?? resolveSession
+  const resolveSessionBase = deps.resolveSession ?? resolveSession
+  // An MCP server can multiplex unrelated conversations. Never let one
+  // conversation inherit the process user's active.yaml routing state, or a
+  // local `ucp use` can silently retarget another conversation's operation.
+  // Applied once here so every dispatch path inherits it.
+  const resolveSessionImpl: typeof resolveSession = (options = {}) =>
+    resolveSessionBase(inMcpMode ? { ...options, inMcpMode: true } : options)
   const searchCatalogImpl = withMeta(deps.searchCatalog, searchCatalog)
   const lookupCatalogImpl = withMeta(deps.lookupCatalog, lookupCatalog)
   const getProductImpl = withMeta(deps.getProduct, getProduct)
@@ -352,9 +359,9 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
         if (catalogDefault !== undefined) businessUrl = catalogDefault
       }
       // Bare `discover` is catalog-eligible: the fallback rung above would have
-      // fired had `meta.defaults.catalog` been set, so when it didn't, the init
-      // CTA is the recovery path.
-      if (businessUrl === undefined) return c.error(businessNotResolvedError())
+      // fired had `meta.defaults.catalog` been set, so when it didn't, the
+      // missing-business CTA is the recovery path.
+      if (businessUrl === undefined) return c.error(businessNotResolvedError(inMcpMode))
       const headers = await resolveCallHeaders(c.options, session, businessUrl)
       const discoverResult = await discoverImpl(businessUrl, {
         force: c.options.refresh,
@@ -451,7 +458,6 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
   // for ops without a positional id (search/lookup/create), 'top' for
   // cart/checkout/order ops where id is a sibling of the body, and 'catalog'
   // for get_product where the positional id nests under /catalog on the wire.
-  const inMcpMode = deps.inMcpMode === true
   const resolveHookImpl = deps.resolveEscalationHook ?? resolveEscalationHook
   const runHookImpl = deps.runEscalationHook ?? runEscalationHook
 
@@ -466,6 +472,7 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
           discoverImpl,
           idPlacement,
           bodyKey,
+          inMcpMode,
         )
       }
       // Resolve --view BEFORE id check + dispatch so a typo'd projection
@@ -488,7 +495,7 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
           message: `${helper.toolName} requires a positional id; pass it as the first argument`,
         })
       }
-      const prep = await prepareOperation(c, resolveSessionImpl, bodyKey)
+      const prep = await prepareOperation(c, resolveSessionImpl, bodyKey, inMcpMode)
       if (!prep.ok) return c.error(prep.error)
       const wrapped = wrapOperationInput(prep.input, bodyKey)
       const merged = mergeId(wrapped, c.args.id, idPlacement)
@@ -500,9 +507,9 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       // Capture the trusted negotiated view via the internal side-channel.
       // Filled by `callOperation` after `discover()` resolves (BEFORE any
       // OPERATION_NOT_OFFERED throw), so CTAs on transport-layer failures
-      // still have advertised-capability context. The intersection with our
-      // bundled-profile capability set happens at the CTA boundary — keeps
-      // the side-channel a pure pass-through of the typed discover result.
+      // still have advertised-capability context. The intersection with the
+      // active profile's capability set happens at the CTA boundary — this
+      // keeps the side-channel a pure pass-through of the typed discover result.
       let discovered: DiscoveredBusiness | undefined
       const result = await helper(prep.business, merged, {
         force: prep.force,
@@ -709,10 +716,12 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
 
   cli.command(order)
 
+  // `profile *` is hidden from MCP clients per command in cli/profile.ts.
   cli.command(buildProfileCli(deps.profile ?? {}))
 
   cli.command('use', {
     description: 'Pin a business for the session (subsequent commands skip --business)',
+    mcp: false,
     args: z.object({
       business: z
         .string()
@@ -747,12 +756,9 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
   // the per-check array that is the entire point of the command. incur only
   // calls its exit handler on error paths, so a success return leaves this
   // value untouched and the process exits with it.
-  //
-  // Not applied under `--mcp`: there the checks are a tool result, and a
-  // stdio server that has answered one doctor call must not later exit
-  // nonzero because of it.
   cli.command('doctor', {
     description: 'Verify your install is healthy and businesses are reachable',
+    mcp: false,
     args: z.object({}),
     options: z.object({
       skipNetwork: z
@@ -767,7 +773,7 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
         ...(deps.doctor ?? {}),
         skipNetwork: c.options.skipNetwork,
       })
-      if (!result.ok && !inMcpMode) process.exitCode = 1
+      if (!result.ok) process.exitCode = 1
       return result
     },
   })
@@ -909,6 +915,7 @@ async function prepareOperation(
   c: OperationContext,
   resolveSessionImpl: typeof resolveSession,
   bodyKey: OperationBodyKey | undefined,
+  inMcpMode: boolean,
 ): Promise<PreparedOperation> {
   const session = await resolveSessionImpl(
     omitUndefined({
@@ -932,7 +939,7 @@ async function prepareOperation(
       }
     }
     if (business === undefined) {
-      return { ok: false, error: businessNotResolvedError() }
+      return { ok: false, error: businessNotResolvedError(inMcpMode) }
     }
   }
   vlog(
@@ -995,6 +1002,7 @@ async function inputSchemaOperation(
   discoverImpl: typeof discover,
   idPlacement: 'top' | 'catalog' | undefined,
   bodyKey: OperationBodyKey | undefined,
+  inMcpMode: boolean,
 ): Promise<unknown> {
   const session = await resolveSessionImpl(
     omitUndefined({
@@ -1013,7 +1021,7 @@ async function inputSchemaOperation(
       const catalogDefault = session.profile.meta?.defaults?.catalog
       if (catalogDefault !== undefined) businessUrl = catalogDefault
     }
-    if (businessUrl === undefined) return c.error(businessNotResolvedError())
+    if (businessUrl === undefined) return c.error(businessNotResolvedError(inMcpMode))
   }
 
   const profileUrl = requireProfileUrl(session.profile.profileUrl)
@@ -1130,16 +1138,11 @@ interface ErrorEnvelopeOpts {
 // `discovered.expectedCapabilities` is exactly that intersection, computed in
 // `discover()` from the identity that profile resolves to.
 //
-// Threat model, stated plainly — the previous comment defended against the
-// wrong party. The property that matters is THE BUSINESS CANNOT EXPAND THE
-// SET: under `active ∩ business` a merchant publishing `com.evil.exfiltrate`
-// contributes nothing unless our own profile already declares it. Only the
-// user's profile can add an id, and the user is the principal — they wrote
-// (or chose to point at) that document. Freezing the set at compile time from
-// the bundled template protected the user from themselves while leaving the
-// actual threat unstated, and it broke the legitimate case: a user who
-// declares `com.acme.loyalty` in their own hosted profile and whose merchant
-// negotiates it was invisible to the CTA layer.
+// Threat model: THE BUSINESS CANNOT EXPAND THE SET. Under `active ∩ business`,
+// a merchant publishing `com.evil.exfiltrate` contributes nothing unless the
+// user's local profile already declares it. The user controls that declaration,
+// so a negotiated third-party capability such as `com.acme.loyalty` is allowed
+// to reach the CTA layer.
 //
 // This is a PRESENTATION gate, not a security boundary for payloads. Payload
 // pre-flight is `isAllowedUnknownExtensionKey` (a shape check against the
@@ -1216,7 +1219,7 @@ function canonicalizeBusinessForEcho(
 }
 
 // Build the BUSINESS_NOT_RESOLVED error envelope. Used at the run-handler
-// boundary via `return c.error(businessNotResolvedError())`. Two design
+// boundary via `return c.error(businessNotResolvedError(inMcpMode))`. Two design
 // notes worth preserving:
 //
 //  1. `c.error()` returns incur's error sentinel (NOT a thrown exception),
@@ -1229,15 +1232,31 @@ function canonicalizeBusinessForEcho(
 //  2. The CTA block is constructed inside the function (not hoisted to
 //     module scope) on purpose. Top-level await in the bin entrypoint
 //     below suspends ESM evaluation; a module-scope `const` declared
-//     after the entry would still be in TDZ when run handlers fire, and
-//     a `var`-bound one would silently be `undefined` — exactly how this
-//     bug bit us before. Building the value at call time eliminates the
-//     ordering hazard entirely.
+//     after the entry can still be in TDZ when run handlers fire, while a
+//     `var`-bound one can silently be `undefined`. Building the value at call
+//     time eliminates the ordering hazard.
 // Fires for non-catalog ops with no resolved business, or catalog ops on a
-// user profile without `meta.defaults.catalog`. Recovery is the same either
-// way: bind a business via `ucp use` or `--business`. No `--catalog` re-init
-// rung — heavier than just binding a business for the current call.
-function businessNotResolvedError(): ErrorEnvelopeOpts {
+// profile without `meta.defaults.catalog`. MCP calls cannot use process-global
+// active.yaml state, so their recovery only names invocation-scoped inputs.
+function businessNotResolvedError(inMcpMode: boolean): ErrorEnvelopeOpts {
+  if (inMcpMode) {
+    return {
+      code: ErrorCodes.BUSINESS_NOT_RESOLVED,
+      message: 'no target business resolved',
+      cta: {
+        description:
+          "Pass business in this tool call, or set UCP_BUSINESS in the MCP server host configuration. Resolution order: business → UCP_BUSINESS → (catalog tools) selected profile's meta.defaults.catalog.",
+        commands: [
+          {
+            // Incur renders CTA commands in CLI syntax in both transports;
+            // name the equivalent MCP argument explicitly in the description.
+            command: 'ucp <op> --business <url> ...',
+            description: 'retry this MCP tool with arguments.business set to the target URL',
+          },
+        ],
+      },
+    }
+  }
   return {
     code: ErrorCodes.BUSINESS_NOT_RESOLVED,
     message: 'no target business resolved',
@@ -1321,26 +1340,37 @@ export async function runUcpCli(
     write(`${versionLine()}\n`)
     return
   }
-  // `--mcp` toggles MCP stdio mode in incur. The escalation hook must be a
-  // no-op in that mode (see src/core/escalation.ts). Detecting at the executable
-  // boundary and threading via `inMcpMode` keeps run handlers importable and
-  // side-effect free for tests/library consumers.
+  // `--mcp` toggles MCP stdio mode in incur. Detecting it at the executable
+  // boundary and threading one `inMcpMode` value keeps MCP session isolation
+  // and no-subprocess policy consistent while leaving run handlers importable
+  // and side-effect free for tests/library consumers.
   const inMcpMode = argv.includes('--mcp')
   // `--verbose` flips on stderr trace output (see src/core/verbose.ts). Muted
   // in MCP mode — stderr during stdio JSON-RPC has no human reader and would
-  // confuse log scrapers attached to the host. Two reasons we detect from
-  // argv at entry rather than registering with incur:
-  //   1. `--mcp` mode bypasses incur's per-command argv parsing (tool calls
-  //      arrive as JSON-RPC, not CLI args). The verbose decision for the
-  //      server lifetime has to be made at process boot.
-  //   2. `UCP_VERBOSE=1` enables the same trace for host configs that can't
+  // confuse log scrapers attached to the host.
+  //
+  // It cannot be handed to incur as a declared option. incur does expose a
+  // custom-globals hook (`Cli.create({ globals, globalAlias })`), but
+  // `verbose` sits on its reserved built-in name list, so declaring it throws
+  // at construction: "Global option 'verbose' conflicts with a built-in flag."
+  // The name is reserved and unimplemented — incur never parses `--verbose`
+  // and never prints it in help — so `ucp --help` has no slot for it, and
+  // README (Development → Debug tracing) is its canonical documentation.
+  //
+  // Registering it under some other name would still not serve this call
+  // site:
+  //   1. incur fills in global values only after command resolution, and
+  //      middleware runs inside command execution — both within
+  //      `cli.serve(...)`, i.e. after the proxy trace below has already run.
+  //   2. `--mcp` returns from incur's run path before any global value is
+  //      produced, and the MCP server never reads globals (tool calls arrive
+  //      as JSON-RPC, not CLI args), so the server-lifetime verbose decision
+  //      has to be made at process boot.
+  //   3. `UCP_VERBOSE=1` enables the same trace for host configs that can't
   //      pass flags — and that detection naturally lives next to the flag.
-  // Strip --verbose from the argv handed to incur because it's not a
-  // registered incur option; unrecognized tokens get forwarded to the
-  // per-command schema, which would reject them. The flag is also not
-  // listed in `ucp --help` Global Options — incur 0.4.5 hard-codes that
-  // block (Help.js:262) with no extension hook. Documented in README under
-  // Development → Debug tracing until upstream exposes a registration API.
+  //
+  // Strip it from the argv handed to incur: an undeclared flag reaches the
+  // per-command schema, which rejects it with "Unknown flag: --verbose".
   const verboseRequested =
     argv.includes('--verbose') ||
     process.env.UCP_VERBOSE === '1' ||

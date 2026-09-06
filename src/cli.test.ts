@@ -9,16 +9,16 @@
 // BUSINESS_NOT_RESOLVED error+CTA produced when none resolve. The session
 // resolver itself is stubbed; we're verifying the wiring, not the resolver.
 
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ResolvedSession, ResolveSessionOptions } from './cli/session.js'
 import { createUcpCli, isSkillsAddInvocation } from './cli.js'
 import { saveUserProfile, writeActive } from './core/profile-store.js'
 import { setVerboseWriter } from './core/verbose.js'
-import { serveCli } from './test-utils.js'
+import { serveCli, userProfile } from './test-utils.js'
 
 const PROFILE_URL = 'https://agent.example.com/.well-known/ucp'
 
@@ -314,9 +314,9 @@ describe('createUcpCli — business resolution', () => {
     expect(exitCode).toBe(1)
     const parsed = JSON.parse(output)
     expect(parsed.code).toBe('BUSINESS_NOT_RESOLVED')
-    // CTA is the recovery hint agents grep for. Both `ucp use` and
-    // `--business` paths must be advertised so agents can pick the form
-    // that matches their flow.
+    // On the CLI path both persistent (`ucp use`) and per-call (`--business`)
+    // recovery remain available.
+    expect(parsed.cta?.description).toContain('~/.ucp/active.yaml')
     expect(parsed.cta?.commands).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ command: expect.stringContaining('ucp use') }),
@@ -406,6 +406,131 @@ describe('createUcpCli — business resolution', () => {
     const parsed = JSON.parse(output)
     expect(parsed.code).toBe('BUSINESS_NOT_RESOLVED')
     expect(parsed.cta?.commands?.length).toBeGreaterThan(0)
+  })
+})
+
+// One MCP stdio server serves unrelated agent conversations, so a tool call
+// that omits `business` must fail closed rather than inherit whatever the
+// machine's `ucp use` last wrote. The real `resolveSession` runs here against
+// a temp $UCP_HOME on purpose: a stubbed resolver can only show that the CLI
+// passed a flag, which stays green while session.ts ignores it.
+describe('createUcpCli — MCP mode ignores active.yaml', () => {
+  const ACTIVE_BUSINESS = 'https://active.example.invalid'
+  let home: string
+
+  beforeEach(async () => {
+    home = mkdtempSync(join(tmpdir(), 'ucp-cli-mcp-active-'))
+    vi.stubEnv('UCP_HOME', home)
+    // The developer's / runner's own session vars would otherwise decide
+    // these assertions: resolveSession reads process.env by default.
+    vi.stubEnv('UCP_PROFILE', undefined)
+    vi.stubEnv('UCP_BUSINESS', undefined)
+    await saveUserProfile(userProfile('agent'), { homeDir: home })
+    await writeActive({ profile: 'agent', business: ACTIVE_BUSINESS }, { homeDir: home })
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  it('fails closed on a cart op instead of inheriting the active business', async () => {
+    const cli = createUcpCli({
+      inMcpMode: true,
+      createCart: async () => {
+        throw new Error('cart helper must not fire against an inherited business')
+      },
+    })
+
+    const { output, exitCode } = await serveCli(cli, ['cart', 'create', '--profile', 'agent'])
+    expect(exitCode).toBe(1)
+    const parsed = JSON.parse(output)
+    expect(parsed.code).toBe('BUSINESS_NOT_RESOLVED')
+    expect(parsed.cta?.description).toContain('Pass business in this tool call')
+    expect(parsed.cta?.description).toContain('UCP_BUSINESS')
+    expect(parsed.cta?.description).not.toContain('active.yaml')
+    expect(parsed.cta?.commands).toEqual([
+      expect.objectContaining({
+        command: expect.stringContaining('--business'),
+        description: expect.stringContaining('arguments.business'),
+      }),
+    ])
+    expect(parsed.cta?.commands).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ command: expect.stringContaining('ucp use') }),
+      ]),
+    )
+  })
+
+  it('uses the same MCP-safe CTA on the input-schema path', async () => {
+    const cli = createUcpCli({
+      inMcpMode: true,
+      createCart: async () => {
+        throw new Error('cart helper must not fire while printing its input schema')
+      },
+    })
+
+    const { output, exitCode } = await serveCli(cli, [
+      'cart',
+      'create',
+      '--profile',
+      'agent',
+      '--input-schema',
+    ])
+    expect(exitCode).toBe(1)
+    const parsed = JSON.parse(output)
+    expect(parsed.code).toBe('BUSINESS_NOT_RESOLVED')
+    expect(parsed.cta?.description).toContain('Pass business in this tool call')
+    expect(parsed.cta?.description).not.toContain('active.yaml')
+    expect(parsed.cta?.commands).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ command: expect.stringContaining('ucp use') }),
+      ]),
+    )
+  })
+
+  it('ignores the active profile too (nothing selects one in MCP mode)', async () => {
+    const cli = createUcpCli({
+      inMcpMode: true,
+      createCart: async () => {
+        throw new Error('cart helper must not fire without a profile')
+      },
+    })
+
+    const { output, exitCode } = await serveCli(cli, ['cart', 'create'])
+    expect(exitCode).toBe(1)
+    expect(JSON.parse(output).code).toBe('PROFILE_NOT_FOUND')
+  })
+
+  it('still honors UCP_PROFILE / UCP_BUSINESS in MCP mode', async () => {
+    vi.stubEnv('UCP_PROFILE', 'agent')
+    vi.stubEnv('UCP_BUSINESS', 'https://env.example.invalid')
+    const dispatched: string[] = []
+    const cli = createUcpCli({
+      inMcpMode: true,
+      createCart: async (business) => {
+        dispatched.push(business)
+        return {}
+      },
+    })
+
+    const { exitCode } = await serveCli(cli, ['cart', 'create'])
+    expect(exitCode).toBe(0)
+    expect(dispatched).toEqual(['https://env.example.invalid'])
+  })
+
+  it('honors the same active.yaml on the normal CLI path', async () => {
+    const dispatched: string[] = []
+    const cli = createUcpCli({
+      createCart: async (business) => {
+        dispatched.push(business)
+        return {}
+      },
+    })
+
+    const { exitCode } = await serveCli(cli, ['cart', 'create'])
+    expect(exitCode).toBe(0)
+    expect(dispatched).toEqual([ACTIVE_BUSINESS])
   })
 })
 
@@ -676,9 +801,8 @@ describe('createUcpCli — catalog fallback (meta.defaults.catalog)', () => {
 })
 
 // End-to-end test that the `_onDiscover` side-channel flows from helper to
-// buildCta, and that `allowlistedExtensions` in cli.ts reads the ACTIVE
-// AGENT PROFILE's negotiated capability set (`expectedCapabilities`) rather
-// than a compile-time-frozen copy of the bundled template. The test feeds a
+// buildCta, and that `allowlistedExtensions` reads the ACTIVE AGENT PROFILE's
+// negotiated capability set (`expectedCapabilities`). The test feeds a
 // synthetic DiscoveredBusiness through the helper stub and asserts what the
 // emitted CTA description does — and does not — claim is active.
 describe('createUcpCli — extension-hint pipeline (negotiated → allowlist → CTA)', () => {
@@ -689,9 +813,9 @@ describe('createUcpCli — extension-hint pipeline (negotiated → allowlist →
   //   `advertised`  what the BUSINESS published at /.well-known/ucp (lossless,
   //                 stays in `profile` whatever we do with it)
   //   `expected`    `agent.capabilities ∩ advertised` — computed by discover()
-  //                 from the HOSTED agent profile, and the field the CTA
-  //                 allowlist reads. Defaults to `advertised` (the
-  //                 "profile declares everything the business does" case).
+  //                 from the local profile declaration, and the field the CTA
+  //                 allowlist reads. Defaults to `advertised` (the "profile
+  //                 declares everything the business does" case).
   //
   // Modelling both is the point: passing `expected` explicitly is how a test
   // says "the active profile does / does not declare this".
@@ -758,12 +882,10 @@ describe('createUcpCli — extension-hint pipeline (negotiated → allowlist →
     expect(parsed.cta?.description).not.toMatch(/evil\.example\.com/)
   })
 
-  it('the ACTIVE PROFILE decides, not the bundled template', async () => {
-    // `dev.shopify.catalog.global` IS in the bundled/published template, so a
-    // compile-time-frozen allowlist would surface its hint here.
-    // The active profile does not declare it, so the server never negotiated
-    // it, so the CTA must not claim it is active. This is the assertion that
-    // fails if the allowlist ever goes back to reading a frozen constant.
+  it('the ACTIVE PROFILE decides which extension hints are eligible', async () => {
+    // The release template includes `dev.shopify.catalog.global`, but the
+    // active profile does not declare it. The CTA must therefore omit its hint
+    // even when the business advertises it.
     const cli = createUcpCli({
       resolveSession: async () => ({
         profile: { name: 'agent', profileUrl: PROFILE_URL_LOCAL },
@@ -1868,18 +1990,6 @@ describe('createUcpCli — doctor exit code', () => {
     })
     expect(processExitCode).toBeUndefined()
     expect((JSON.parse(output) as { ok: boolean }).ok).toBe(true)
-  })
-
-  // Under `--mcp` the checks are a tool result. A stdio server that answered
-  // one doctor call must not later exit nonzero because of it.
-  it('does not set the process exit code in MCP mode', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'ucp-doctor-exit-mcp-'))
-    const { output, processExitCode } = await doctorExitCode(['doctor', '--skip-network'], {
-      inMcpMode: true,
-      doctor: { homeDir: home, env: {} },
-    })
-    expect(processExitCode).toBeUndefined()
-    expect((JSON.parse(output) as { ok: boolean }).ok).toBe(false)
   })
 })
 

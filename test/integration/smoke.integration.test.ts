@@ -203,11 +203,10 @@ describe('smoke: compiled binary', () => {
   })
 })
 
-// `ucp --mcp` boots an MCP stdio server (incur built-in). These tests pin
-// down whether the same session-resolution chain (option → UCP_BUSINESS →
-// active.yaml) that drives the CLI also drives MCP tool dispatch — agents
-// running ucp under Claude Desktop / Cursor / etc. must inherit a bound
-// session, otherwise every tool call would have to ship `business` inline.
+// `ucp --mcp` boots an MCP stdio server (incur built-in). MCP hosts can
+// multiplex unrelated agent conversations through one process, so these tests
+// pin both its deliberately narrow commerce surface and its isolation from
+// per-user active.yaml routing state.
 //
 // Caveat: incur's Mcp.callTool path (Mcp.js callTool branch on !result.ok)
 // strips UcpError → text-only `{content:[{type:'text', text:msg}], isError:true}`.
@@ -307,11 +306,11 @@ describe('smoke: --mcp stdio', () => {
     return env
   }
 
-  // Regression pin for the incur 0.4.x 'progressive' discovery default flip,
-  // which silently replaced the per-command tool surface with four
-  // search/inspect/execute meta-tools. The per-command names below are the
-  // published agent contract; cli.ts pins discovery: 'direct' to keep it.
-  // If this fails with ~4 tools, an incur bump flipped the default again.
+  // incur defaults MCP tool discovery to 'progressive', which publishes four
+  // search/inspect/execute meta-tools in place of one tool per command. The
+  // per-command names below are this CLI's agent contract, so cli.ts pins
+  // discovery: 'direct'. A failure listing ~4 meta-tools means that pin
+  // stopped taking effect and the contract silently changed.
   it('exposes one tool per command under tools/list (direct discovery)', async () => {
     const home = await mkdtemp(join(tmpdir(), 'ucp-mcp-tools-'))
     await mkdir(home, { recursive: true })
@@ -325,28 +324,39 @@ describe('smoke: --mcp stdio', () => {
       const response = (await mcp.waitForResponseId(1)) as {
         result: { tools: { name: string }[] }
       }
-      const names = response.result.tools.map((t) => t.name)
-      for (const expected of ['catalog_search', 'cart_create', 'checkout_complete', 'discover']) {
-        expect(names).toContain(expected)
-      }
-      expect(names.length).toBeGreaterThanOrEqual(20)
+      const names = response.result.tools.map((t) => t.name).sort()
+      expect(names).toEqual([
+        'cart_cancel',
+        'cart_create',
+        'cart_get',
+        'cart_update',
+        'catalog_get_product',
+        'catalog_lookup',
+        'catalog_search',
+        'checkout_cancel',
+        'checkout_complete',
+        'checkout_create',
+        'checkout_get',
+        'checkout_update',
+        'discover',
+        'order_get',
+      ])
     } finally {
       await mcp.close()
     }
   })
 
-  // The single user-facing promise of `--mcp`: an agent that has already run
-  // `ucp use <url>` doesn't have to re-supply `business` on every tool call.
-  // If session resolution silently broke under MCP, agents would
-  // see BUSINESS_NOT_RESOLVED on every call until they noticed the env gap.
-  it('resolves business from active.yaml when tools/call omits business', async () => {
+  // active.yaml is process-global while an MCP server may serve many unrelated
+  // conversations. An omitted business must fail closed instead of inheriting
+  // whichever target a local CLI invocation most recently selected.
+  it('ignores all active.yaml session state during tools/call', async () => {
     const home = await mkdtemp(join(tmpdir(), 'ucp-mcp-session-'))
     await mkdir(home, { recursive: true })
     const env = envFor(home)
     await execFileAsync('node', [CLI_PATH, 'profile', 'init', '--name', 'agent'], { env })
-    // Bind a session pointing at an unreachable host. We're proving that
-    // resolution succeeded (call gets past the BUSINESS_NOT_RESOLVED gate)
-    // — not that the downstream HTTP call works.
+    // Seed values that would be unmistakable if ambient state leaked into
+    // dispatch. Calls below omit both fields, then supply only the profile, so
+    // the assertions independently cover profile and business resolution.
     await writeFile(
       `${home}/active.yaml`,
       'profile: agent\nbusiness: https://shop.example.invalid\n',
@@ -361,19 +371,35 @@ describe('smoke: --mcp stdio', () => {
         id: 1,
         method: 'tools/call',
         params: {
-          name: 'catalog_search',
-          arguments: { input: '{"query":"boots"}' },
+          name: 'cart_create',
+          arguments: { input: '{"line_items":[]}' },
         },
       })
-      const response = (await mcp.waitForResponseId(1)) as {
+      const withoutProfile = (await mcp.waitForResponseId(1)) as {
         result: { content: { text: string }[]; isError: boolean }
       }
-      expect(response.result.isError).toBe(true)
-      const text = response.result.content[0]?.text ?? ''
-      // Two anti-assertions: must NOT be the no-session error, must show
-      // we got past resolution to the network layer.
-      expect(text).not.toMatch(/no target business resolved/)
-      expect(text).toMatch(/shop\.example\.invalid|fetch failed/)
+      expect(withoutProfile.result.isError).toBe(true)
+      expect(withoutProfile.result.content[0]?.text).toMatch(/no local profile selected/)
+
+      mcp.send({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'cart_create',
+          arguments: { profile: 'agent', input: '{"line_items":[]}' },
+        },
+      })
+      const withoutBusiness = (await mcp.waitForResponseId(2)) as {
+        result: { content: { text: string }[]; isError: boolean }
+      }
+      expect(withoutBusiness.result.isError).toBe(true)
+      const text = withoutBusiness.result.content[0]?.text ?? ''
+      expect(text).toMatch(/no target business resolved/)
+      expect(text).toMatch(/Pass business in this tool call/)
+      expect(text).toMatch(/UCP_BUSINESS/)
+      expect(text).not.toMatch(/ucp use|active\.yaml/)
+      expect(text).not.toMatch(/shop\.example\.invalid|fetch failed/)
     } finally {
       await mcp.close()
     }

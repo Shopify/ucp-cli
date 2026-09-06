@@ -4,4 +4,4 @@
 declare const __CLI_VERSION__: string
 declare const __BUILD_NUMBER__: string
 declare const __DEFAULT_CATALOG_URL__: string
-declare const __MIN_NODE_MAJOR__: number
+declare const __MIN_NODE_VERSION__: string

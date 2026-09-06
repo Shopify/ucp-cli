@@ -1,30 +1,25 @@
 // Agent identity: which document ucp-cli negotiates AS, resolved with zero
 // network.
 //
-// The wire contract is one URL. Every request carries
-// `meta.ucp-agent.profile`, the business GETs it, and negotiates against
-// whatever it serves. The URL must be externally reachable; that is the whole
-// obligation. The CLI's job is to know WHICH URL to send — the user's if they
-// brought one, a release default otherwise.
+// ONE contract, and it does not depend on who owns the URL. Every request
+// carries `meta.ucp-agent.profile` — a URL, never a body — the business GETs
+// it, and negotiates against whatever it serves. Locally,
+// `~/.ucp/profiles/<name>/profile.json` is the claim about what that URL
+// serves, and it is the document ucp-cli negotiates from. The two must agree;
+// `ucp doctor` is what compares them, and is the only fetcher
+// ({@link fetchAgentProfileLive}).
 //
-// The CLI does NOT fetch that URL at request time. It never needed to — the
-// bytes are already local either way:
+// Reading disk rather than the wire at request time is deliberate. The
+// merchant may hold the document in cache, so a pre-flight GET would let a
+// blip on the URL hard-block a request that would have succeeded. What the
+// round trip would buy — a sharper `expectedCapabilities` — is ADVISORY (the
+// authority is `ucp.capabilities` in the response), and a URL that has
+// drifted from the local file is an authoring bug with a check of its own.
 //
-//   release default → `RELEASES[v].agentProfileTemplate`, the verbatim
-//                     snapshot this build ships of that document. A hand-edit
-//                     to the local `profile.json` is invisible to merchants
-//                     here, so reading disk would predict capabilities the
-//                     user does not have.
-//   self-hosted     → the local `profile.json` — the user's own declaration
-//                     of what they serve.
-//
-// A pre-flight GET was strictly worse than the protocol requires: the
-// merchant may hold the document in cache, so a blip on the user's URL would
-// hard-block a request that would have succeeded. What the round trip bought
-// — a sharper `expectedCapabilities` — is ADVISORY (the authority is
-// `ucp.capabilities` in the response), and a hosted document that has drifted
-// from the local one is an authoring bug `ucp doctor` exists to catch. Doctor
-// is the only fetcher: {@link fetchAgentProfileLive}.
+// `RELEASES[v].agentProfileTemplate` is the published document for release v,
+// shipped verbatim. It is what `profile init` writes to disk, and the
+// identity of last resort for a caller that supplies a URL and no profile
+// name — never something that overrides a `profile.json` that exists.
 //
 // Version model: a platform profile declares exactly ONE `ucp.version` and
 // the business validates that exact version (no ranges, no date-order
@@ -37,10 +32,10 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { z } from 'incur'
-import { ErrorCodes, UcpError } from '../lib/errors.js'
+import { ErrorCodes, isUcpError, UcpError } from '../lib/errors.js'
 import type { Transport } from '../lib/types.js'
 import { formatZodIssues } from '../lib/zod-format.js'
-import { ucpFetch } from './http-client.js'
+import { refusedRedirect, ucpFetch } from './http-client.js'
 import { type ProfileStoreOptions, profileDir } from './profile-store.js'
 import {
   LATEST,
@@ -80,7 +75,7 @@ export interface AgentServiceEntry {
 export interface AgentProfile {
   /** Local profile name, for messages/diagnostics. Absent when only a URL is known. */
   name?: string
-  /** URL the body was fetched from — the hosted identity both sides read. */
+  /** The identity URL sent on every request; the business reads what it serves. */
   url: string
   /** The exact spec release the profile declares (`ucp.version`). */
   version: Version
@@ -101,21 +96,6 @@ export interface AgentProfile {
 /** `dev.ucp.*` names the protocol's own services/capabilities — the ones the snapshot rule binds to `ucp.version`. */
 export function isDevUcpKey(key: string): boolean {
   return key === 'dev.ucp' || key.startsWith('dev.ucp.')
-}
-
-/**
- * True when `url` is a release's PUBLISHED default agent profile — i.e. a
- * document the user did not write and cannot edit.
- *
- * Severity of a self-consistency defect depends on this: the user is the
- * principal for a self-hosted profile (fatal, they can fix it), but on the
- * default path `profileUrl` is Shopify's published profile, and a pre-flight
- * fatal there means one publisher defect hard-stops every installed CLI
- * before a single call with an error telling the agent to edit a file it does
- * not own. Same treatment the loader already gives non-engine transports.
- */
-export function isReleaseDefaultProfileUrl(url: string): boolean {
-  return releaseByDefaultProfileUrl(url) !== undefined
 }
 
 /** The release whose published default profile lives at `url`, if any. */
@@ -162,8 +142,7 @@ export interface LoadAgentProfileInput {
  *   - `AGENT_PROFILE_SCHEMA_INVALID`      envelope or release-schema parse failure
  *   - `AGENT_PROFILE_VERSION_UNSUPPORTED` a release ucp-cli does not support
  *   - `AGENT_PROFILE_VERSION_MISMATCH`    a `dev.ucp.*` entry at a version ≠
- *     the profile's own `ucp.version` (snapshot rule). FATAL only when the
- *     profile is self-hosted — see {@link isReleaseDefaultProfileUrl}.
+ *     the profile's own `ucp.version` (snapshot rule).
  *
  * Declared transports outside {@link ENGINE_TRANSPORTS} warn and are left in
  * place — negotiation ignores them (declare/constrain/intersect), and the
@@ -219,12 +198,11 @@ export function loadAgentProfile(input: LoadAgentProfileInput): AgentProfile {
   // Third-party entries (com.acme.*) carry their own version lines and are
   // exempt — that independence is the point of the reverse-DNS registry.
   //
-  // Severity splits on hosting. Self-hosted: fatal, the user is the principal
-  // can correct the document at its URL. Release default: warn and proceed — the off-version
-  // entry simply fails to match under declare/constrain/intersect and
-  // degrades into an ordinary negotiation error, which beats hard-stopping
-  // every installed CLI over a defect in a document nobody local can edit.
-  const selfHosted = !isReleaseDefaultProfileUrl(input.url)
+  // Fatal, unconditionally: this is the document ucp-cli sends as its
+  // identity, it comes from a file the reader can edit, and an off-version
+  // `dev.ucp.*` entry silently drops that capability at negotiation time. The
+  // published templates ucp-cli ships all satisfy the rule (asserted in
+  // agent.test.ts), so the no-profile-name fallback cannot trip it.
   for (const [registry, entries] of [
     ['services', services],
     ['capabilities', capabilityEntries],
@@ -234,12 +212,6 @@ export function loadAgentProfile(input: LoadAgentProfileInput): AgentProfile {
       const off = list.filter((e) => e.version !== version)
       if (off.length === 0) continue
       const detail = `${label} uses UCP ${version} but declares ${key} at [${off.map((e) => e.version).join(', ')}] — dev.ucp.* entries must match the profile's own version`
-      if (!selfHosted) {
-        uwarn(
-          `${detail}. That document is a published release default, not yours — those entries simply will not negotiate.`,
-        )
-        continue
-      }
       throw new UcpError({
         layer: 'client',
         code: ErrorCodes.AGENT_PROFILE_VERSION_MISMATCH,
@@ -252,10 +224,10 @@ export function loadAgentProfile(input: LoadAgentProfileInput): AgentProfile {
         },
         cta: {
           description:
-            "This is your own hosted profile. Align every dev.ucp.* entry with the profile's `ucp.version`, then upload the corrected document to your profile URL — the business fetches this same document.",
+            "Align every dev.ucp.* entry with the profile's `ucp.version`. This document is what ucp-cli declares, and the business reads the copy at the profile URL — so the corrected version has to end up in both places.",
           commands: [
             { command: 'ucp profile show', description: 'print the active profile document' },
-            { command: 'ucp doctor', description: 'compare the local copy against the hosted one' },
+            { command: 'ucp doctor', description: 'compare the local document against the URL' },
           ],
         },
       })
@@ -316,7 +288,7 @@ export interface ResolveAgentProfileOptions {
    */
   url?: string
   /**
-   * Local profile name. Supplies `profile.json` when `url` is self-hosted,
+   * Local profile name. Selects the `profile.json` that IS our declaration,
    * and names the profile in messages (`profile 'x'` instead of a raw URL).
    */
   name?: string
@@ -326,14 +298,16 @@ export interface ResolveAgentProfileOptions {
 
 /**
  * Resolve the identity every negotiation runs against. **No network, ever.**
- * The URL selects the source and the source is always local: a release
- * default (or no URL at all) → that release's bundled snapshot; self-hosted →
- * `~/.ucp/profiles/<name>/profile.json`. Module header has the why.
  *
- * Both sources are the same JSON shape, so {@link loadAgentProfile} validates
- * either and every `AGENT_PROFILE_*` code keeps its meaning — including
- * `AGENT_PROFILE_VERSION_MISMATCH`, still fatal only when self-hosted (the
- * user is the principal there and can correct the hosted document).
+ * A named profile is answered by its own `profile.json`, at every URL. That
+ * file is the one thing the reader controls, so an edit to it either takes
+ * effect or gets reported by `ucp doctor` — it is never silently discarded.
+ *
+ * Without a name there is no local document to read — a `discover({profileUrl})`
+ * call that passes neither `profileName` nor `agent`, which no CLI path does
+ * (every command resolves a named profile first). The published template then
+ * stands in: for the release that URL belongs to, or {@link LATEST} when the
+ * URL is not one ucp-cli publishes a template for.
  */
 export async function resolveAgentProfile(
   options: ResolveAgentProfileOptions = {},
@@ -343,29 +317,28 @@ export async function resolveAgentProfile(
     options.url ?? RELEASES[LATEST].defaultAgentProfileUrl,
     'agent profile URL',
   ).toString()
-  const rel = releaseByDefaultProfileUrl(url)
 
-  if (rel === undefined && name !== undefined) {
+  if (name !== undefined) {
     const store: ProfileStoreOptions =
       options.homeDir === undefined ? {} : { homeDir: options.homeDir }
     const path = join(profileDir(name, store), 'profile.json')
     return validated(await readLocalProfileBody(name, path), url, name, path)
   }
+
+  const rel = releaseByDefaultProfileUrl(url)
   if (rel === undefined) {
-    // Self-hosted URL with no local profile to read it from — only reachable
-    // through the library entry (`discover({profileUrl})` with neither
-    // `profileName` nor `agent`). Warn rather than fail: the URL on the wire
-    // is still right and the merchant negotiates against what it serves; only
-    // our own prediction is generic.
+    // Nothing local says what this URL serves. Warn rather than fail: the URL
+    // on the wire is still right and the merchant negotiates against what it
+    // serves; only our own prediction is generic.
     uwarn(
-      `${url} is self-hosted but no local profile was named, so ucp-cli negotiates with its bundled UCP ${LATEST} declaration. Pass the profile name (or a resolved agent profile) to negotiate with the document you host.`,
+      `no local profile was named for ${url}, so ucp-cli declares the published UCP ${LATEST} document. Pass the profile name (or a resolved agent profile) to declare the document that URL serves.`,
     )
   }
   // structuredClone for the same reason `profile init` clones it: the template
   // is one shared object per release and must not become reachable from a
   // returned profile.
   const template = (rel ?? RELEASES[LATEST]).agentProfileTemplate
-  return validated(structuredClone(template), url, name, 'bundled snapshot')
+  return validated(structuredClone(template), url, undefined, 'published release template')
 }
 
 /**
@@ -383,14 +356,15 @@ async function readLocalProfileBody(name: string, path: string): Promise<unknown
     throw new UcpError({
       layer: 'client',
       code: ErrorCodes.PROFILE_NOT_FOUND,
-      message: `profile "${name}" has no readable profile.json at ${path}; that file is what ucp-cli declares when the profile URL is self-hosted`,
+      message: `profile "${name}" has no readable profile.json at ${path}; that file is the document ucp-cli declares on every request`,
       cause: err as Error,
       cta: {
-        description: 'Re-create the local profile, or point it at a release default.',
+        description:
+          'Re-create the local document, then make sure the profile URL serves the same thing.',
         commands: [
           {
             command: `ucp profile init --name ${name} --force`,
-            description: 'rewrite profile.json',
+            description: 'rewrite profile.json from the published release document',
           },
         ],
       },
@@ -449,10 +423,10 @@ const FETCH_TIMEOUT_MS = 30_000
 /**
  * Why the hosted agent profile could not be used as our identity. Carried as
  * `AGENT_PROFILE_UNREACHABLE`'s `context.reason` and named in the message,
- * because the sub-cases have different remedies and were previously
- * distinguishable only by regexing prose. `'not_json'` is the important one:
- * a 200 serving an HTML error page is the most common self-hosting failure
- * and is not really "unreachable".
+ * because the sub-cases have different remedies and a caller must be able to
+ * branch on them without regexing prose. `'not_json'` is the important one: a
+ * 200 serving an HTML error page is the most common hosting failure and is
+ * not really "unreachable".
  *
  * `'business_reported'` is the only one that still arises on the request
  * path, and it is not ours to predict: it is the merchant telling us, over
@@ -462,7 +436,25 @@ export type AgentProfileUnreachableReason =
   | 'network'
   | 'http_status'
   | 'not_json'
+  | 'redirect'
   | 'business_reported'
+
+/**
+ * The hop behind an `AGENT_PROFILE_UNREACHABLE` carrying
+ * `reason: 'redirect'`, or `undefined` for any other error. Lives beside the
+ * throw site that encodes it so `ucp doctor` can state the status and the
+ * target in its own words instead of re-deriving them from the message.
+ *
+ * The hop itself is not copied into this error: it is already on the wrapped
+ * refusal, so {@link refusedRedirect} decodes it from the `cause` rather than
+ * a second, unvalidated copy that could disagree with the first.
+ */
+export function agentProfileRedirect(err: unknown) {
+  if (!isUcpError(err) || err.code !== ErrorCodes.AGENT_PROFILE_UNREACHABLE) return undefined
+  const context = err.context as { reason?: unknown } | undefined
+  if (context?.reason !== 'redirect') return undefined
+  return refusedRedirect(err.cause)
+}
 
 /**
  * GET the hosted agent profile and validate what it serves. **`ucp doctor`
@@ -473,9 +465,10 @@ export type AgentProfileUnreachableReason =
  * validity, the declared version, and the `Cache-Control` the merchant's
  * fetch of the same URL will see.
  *
- * Unreachable / non-2xx / non-JSON → `AGENT_PROFILE_UNREACHABLE` with a
- * `reason`. There is no cache and no memo to bypass: every call reads the
- * wire, which is the point of a drift detector.
+ * Unreachable / non-2xx / non-JSON / redirect → `AGENT_PROFILE_UNREACHABLE`
+ * with a `reason`; {@link agentProfileRedirect} decodes the redirect. There
+ * is no cache and no memo to bypass: every call reads the wire, which is the
+ * point of a drift detector.
  *
  * Business-scoped auth headers are deliberately NOT accepted here — this GET
  * goes to the agent's own host, and forwarding per-business credentials to it
@@ -526,6 +519,18 @@ export async function fetchAgentProfileLive(
       traceLabel: 'agent-profile',
     })
   } catch (err) {
+    // A refused redirect is our own hosting misconfiguration, not a network
+    // fault, and it keeps the `client` layer every AGENT_PROFILE_* code
+    // carries — the seam src/lib/error-layers.test.ts exists to hold. The
+    // refusal's own message is the detail: it already names the Location and
+    // the fixes.
+    const redirect = refusedRedirect(err)
+    if (redirect !== undefined) {
+      throw unreachable('redirect', (err as Error).message, {
+        cause: err as Error,
+        http_status: redirect.status,
+      })
+    }
     throw unreachable('network', (err as Error).message, { cause: err as Error })
   }
   if (!response.ok)

@@ -7,22 +7,25 @@
 // the output.
 //
 // Returns a structured envelope so machine consumers (CI, agents) can
-// pattern-match on individual checks. `ok` is the AND of all `fail` checks;
-// `warn` statuses don't gate `ok` because they describe state the user may
-// have chosen (e.g. a hosted document that has moved ahead of the local
-// authoring copy). `ok: false` exits nonzero — see the `doctor` command in
-// src/cli.ts.
+// pattern-match on individual checks. `ok` is the AND of all `fail` checks,
+// which makes `fail` the ONLY machine-actionable severity: a consumer writing
+// `if (result.ok)` never enumerates `checks` and never sees a warn. So
+// anything that makes our requests wrong is a `fail`, and `warn` is reserved
+// for state a human should know about but a build should not stop for.
+// `ok: false` exits nonzero — see the `doctor` command in src/cli.ts.
 
 import { access, constants, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import {
   type AgentProfile,
+  agentProfileRedirect,
   fetchAgentProfileLive,
-  isReleaseDefaultProfileUrl,
   resolveAgentProfile,
 } from '../core/agent.js'
 import { MIN_CACHE_SECONDS } from '../core/cache.js'
+import { type RefusedRedirect, usableRedirectTarget } from '../core/http-client.js'
+import { isSupportedNodeVersion } from '../core/node-version.js'
 import {
   activeYamlPath,
   type ProfileStoreOptions,
@@ -33,7 +36,7 @@ import {
   readUserProfile,
 } from '../core/profile-store.js'
 import { describeProxyState, proxyState } from '../core/proxy.js'
-import { LATEST, RELEASES, release, SUPPORTED_VERSIONS } from '../core/releases.js'
+import { LATEST, RELEASES, SUPPORTED_VERSIONS } from '../core/releases.js'
 import { isUcpError } from '../lib/errors.js'
 
 export interface DoctorDeps {
@@ -99,12 +102,11 @@ export async function runDoctor(deps: DoctorDeps = {}): Promise<DoctorResult> {
 
   // 6. Protocol negotiation. Which UCP version this install uses is a
   // property of the ACTIVE PROFILE, not the install, and nothing else in
-  // doctor's output said so. `protocol` answers it — and, since nothing on
-  // the request path reads the wire any more, is the only thing that verifies
-  // the URL we advertise works and agrees with what we negotiate from.
-  // `profile-drift` compares the hosted document against the local authoring
-  // copy. Last because it is the only check whose failure is fully explained
-  // by the ones above (proxy, hosting).
+  // doctor's output said so. `protocol` answers it — and, since the request
+  // path never reads the wire, is the only thing that verifies the URL we
+  // advertise works and serves what we declare. `profile-drift` compares the
+  // rest of that document against the local one. Last because it is the only
+  // check whose failure is fully explained by the ones above (proxy, hosting).
   //
   // There is deliberately no second, softer reachability probe of the same
   // URL: a HEAD `warn` next to a GET `fail` produced contradictory verdict
@@ -120,18 +122,18 @@ export async function runDoctor(deps: DoctorDeps = {}): Promise<DoctorResult> {
 }
 
 // Below the engines floor is a `fail`, not a warn: the contract is declared,
-// the runtime is EOL, and breakage arrives as cryptic dependency errors (on
-// Node 18 the proxy dispatcher dies with "File is not defined"). A CI gate
-// going red on an unsupported runtime is the check working as intended.
+// and breakage arrives as cryptic dependency errors (on Node 18 the proxy
+// dispatcher dies with "File is not defined"). A CI gate going red on an
+// unsupported runtime is the check working as intended.
 function checkRuntime(): Check {
   const version = process.versions.node
-  const supported = Number(version.split('.', 1)[0]) >= __MIN_NODE_MAJOR__
+  const supported = isSupportedNodeVersion(version)
   return {
     id: 'runtime',
     status: supported ? 'ok' : 'fail',
     detail: supported
       ? `Node v${version}`
-      : `Node v${version} — ucp requires Node >= ${__MIN_NODE_MAJOR__}`,
+      : `Node v${version} — ucp requires Node >= ${__MIN_NODE_VERSION__}`,
   }
 }
 
@@ -211,33 +213,25 @@ async function checkProfile(name: string | undefined, opts: ProfileStoreOptions)
 //
 // Two checks, one fetch, one boundary between them:
 //
-//   `protocol`      can this URL be used as an identity, and does what it
-//                   serves agree with the document ucp-cli will actually
-//                   negotiate from?
+//   `protocol`      can this URL be used as an identity, and does it serve
+//                   the release ucp-cli will actually send?
 //
-//   `profile-drift` does your local authoring copy match what your URL
-//                   publishes?
+//   `profile-drift` does the rest of that document match the local one?
 //
-// `protocol` is the one that carries correctness. Nothing on the request path
-// reads the wire any more (core/agent.ts): a release-default URL is answered
-// from the bundled snapshot, a self-hosted one from the local `profile.json`.
-// That is strictly less fragile — a blip on the user's host no longer blocks
-// a call the merchant would have accepted — but it moves one obligation here.
-// The merchant DOES fetch the URL, so if the URL serves a different
-// `ucp.version` than the document we negotiate from, the two sides disagree
-// about who we are and nothing else in the CLI will ever notice. Doctor
-// checks it explicitly, live, and names both versions.
+// `protocol` is the one that carries correctness, and its severities follow
+// consequence, not who owns the URL. The request path never reads the wire
+// (core/agent.ts): `profile.json` is what ucp-cli declares, at every URL. The
+// business, meanwhile, reads the URL. So if the URL cannot be read, or serves
+// a different `ucp.version`, the two sides disagree about who we are and
+// nothing else in the CLI will ever notice — both are `fail`, and the message
+// names both versions. The business GETs this URL on every call and
+// hard-fails `-32001 profile_unreachable` if it 404s, so a red `protocol` is
+// a prediction of total failure, not a local inconvenience.
 //
-// It also stays the reachability probe: the business GETs this URL on every
-// call and hard-fails `-32001 profile_unreachable` if it 404s, so a red
-// `protocol` is a prediction of total failure, not a local inconvenience.
-//
-// `profile-drift` is authoring hygiene and never gates a request. Its reading
-// splits on WHO OWNS THE URL: on a release default the local copy is
-// decorative — the CLI negotiates from the bundled snapshot and never reads
-// profile.json there, so edits to it are invisible to merchants — while for a
-// self-hosted URL a diff means the copy you serve is stale, and the copy you
-// serve is what the merchant reads.
+// `profile-drift` is what remains once the versions agree: a declaration the
+// business will act on (it reads the URL) that differs from the one ucp-cli
+// plans against. `warn`, because the requests we send are still well-formed
+// and only `fail` gates the verdict.
 async function checkProtocol(
   name: string | undefined,
   opts: ProfileStoreOptions,
@@ -258,10 +252,9 @@ async function checkProtocol(
   // reports the persistent configuration, not one invocation's override).
   const url =
     env.UCP_AGENT_PROFILE_URL ?? local.meta.profile_url ?? RELEASES[LATEST].defaultAgentProfileUrl
-  const published = isReleaseDefaultProfileUrl(url)
-  // Named in the remedies below: `meta.profile_url` is the ONLY field that
-  // selects which document is our identity, so "edit this one line" is the
-  // non-destructive move in every case where a version is wrong.
+  // Both paths are named in the remedies below, because the two files answer
+  // different questions: `profile.json` is what ucp-cli declares,
+  // `meta.profile_url` is where the business goes to read it.
   const metaPath = join(profileDir(name, opts), 'meta.json')
   const bodyPath = join(profileDir(name, opts), 'profile.json')
 
@@ -276,7 +269,7 @@ async function checkProtocol(
       {
         id: 'protocol',
         status: 'fail',
-        detail: `${describeError(err)} — this is the document ucp-cli negotiates from${published ? '' : ` (${bodyPath})`}, so every command fails until it is fixed.`,
+        detail: `${describeError(err)} — ${bodyPath} is the document ucp-cli negotiates from, so every command fails until it is fixed.`,
       },
     ]
   }
@@ -285,6 +278,12 @@ async function checkProtocol(
   try {
     live = await fetchAgentProfileLive({ url, name, fetch: fetchImpl })
   } catch (err) {
+    // A refused redirect reports as `profile-redirect` and nothing else. It is
+    // one fault with one remedy, and `protocol` beside it would be a second,
+    // vaguer voice on the same fetch — the rule applied to `active-profile`
+    // above. The verdict is identical either way: both are `fail`.
+    const redirect = agentProfileRedirect(err)
+    if (redirect !== undefined) return [checkRedirect(redirect, url, metaPath)]
     // `fail`, not `warn`: the business GETs this URL to negotiate with us. If
     // it cannot be read, the business cannot read it either.
     //
@@ -299,16 +298,14 @@ async function checkProtocol(
     return [{ id: 'protocol', status: 'fail', detail: describeError(err) }]
   }
 
-  // THE check. Both sides read a document; they must be the same document's
-  // version or we are negotiating as somebody the merchant does not see.
+  // THE check. Both sides read a document; they must agree on its version or
+  // we are negotiating as somebody the business does not see.
   if (live.agent.version !== wire.version) {
     return [
       {
         id: 'protocol',
         status: 'fail',
-        detail: published
-          ? `${url} serves UCP ${live.agent.version}, but this build of ucp-cli ships a UCP ${wire.version} snapshot of that document and negotiates as ${wire.version}. The business fetches the URL, so it sees ${live.agent.version} while ucp-cli speaks ${wire.version}. Upgrade ucp-cli, or point meta.profile_url (${metaPath}) at a release default this build ships.`
-          : `${url} serves UCP ${live.agent.version}, but ucp-cli negotiates as UCP ${wire.version} — the version in ${bodyPath}, which is the document it reads at request time. The business fetches the URL, so it sees ${live.agent.version} while ucp-cli speaks ${wire.version}. Upload ${bodyPath} to ${url} yourself, or edit profile.json to match what you serve.`,
+        detail: `${url} serves UCP ${live.agent.version}, but ucp-cli negotiates as UCP ${wire.version} — the version in ${bodyPath}, the document it declares. The business fetches the URL, so it reads ${live.agent.version} while ucp-cli speaks ${wire.version}. Make them agree: \`ucp profile init --name ${name} --version ${live.agent.version} --force\` REWRITES ${bodyPath} as the published UCP ${live.agent.version} document (discarding local edits); or upload ${bodyPath} to ${url} when that URL is yours; or point meta.profile_url (${metaPath}) at a URL serving UCP ${wire.version}.`,
       },
     ]
   }
@@ -320,75 +317,45 @@ async function checkProtocol(
       status: 'ok',
       detail: [
         `profile "${name}" uses UCP ${wire.version}`,
-        `from ${published ? 'the bundled snapshot of' : bodyPath}`,
-        `${published ? `${url} (published release default)` : `— sent as ${url} (self-hosted)`},`,
+        `from ${bodyPath}, sent as ${url},`,
         `which serves the same version (checked live);`,
         `ucp-cli supports ${SUPPORTED_VERSIONS.join(', ')} —`,
-        // An older release in the window is VALID, not a problem: the window
-        // is a set, not a floor. So this is a note with a command, never a
-        // warn — a red doctor for a deliberately pinned profile would train
-        // users to ignore the output.
+        // An older supported release is VALID, not a problem: ucp-cli supports
+        // a set of releases, not a floor. So this is a note with a command,
+        // never a warn — a red doctor for a deliberately pinned profile would
+        // train users to ignore the output.
         latest
           ? 'this is the latest.'
-          : `NOT the latest (${LATEST}). Still fully supported; to move, point meta.profile_url at ${RELEASES[LATEST].defaultAgentProfileUrl} (${metaPath}) — a one-field change that keeps your local profile.json. \`ucp profile init --name ${name} --version ${LATEST} --force\` also works but REWRITES profile.json from the release template, discarding local edits.`,
+          : `NOT the latest (${LATEST}). Still fully supported; to move, \`ucp profile init --name ${name} --version ${LATEST} --force\` REWRITES ${bodyPath} as the published UCP ${LATEST} document (discarding local edits) and points meta.profile_url (${metaPath}) at ${RELEASES[LATEST].defaultAgentProfileUrl}.`,
       ].join(' '),
     },
   ]
 
-  const cacheCheck = checkCacheControl(live.cacheControl, url, published)
-  if (cacheCheck !== undefined) checks.push(cacheCheck)
-
-  // Version first, and always a warn — but only where `protocol` has not
-  // already ruled on it. On a release-default URL the hosted and negotiated
-  // versions agree by construction (both are that release), so a local
-  // profile.json at a different version is the silent case: the classic
-  // profile created by 0.6.x, whose profile.json says 2026-04-08 and whose
-  // meta.json has no profile_url, so it presents the latest published default
-  // and negotiates 2026-08-25. Without this branch that install is green
-  // everywhere. Self-hosted needs no branch here: profile.json IS the
-  // negotiated document, so a version difference against the hosted copy is
-  // exactly the `protocol` failure above.
-  const localVersion = local.body.ucp.version
-  if (published && localVersion !== wire.version) {
-    const pinUrl = release(localVersion)?.defaultAgentProfileUrl
-    checks.push({
-      id: 'profile-drift',
-      status: 'warn',
-      detail: `local profile.json declares ucp ${localVersion}, but this profile sends ${url}, which serves ${wire.version} — and on a published release default ucp-cli negotiates from its bundled snapshot of that document, never from profile.json. Editing profile.json changes nothing merchants can see. To speak ${localVersion}, set meta.profile_url to that release's published profile URL${pinUrl === undefined ? '' : ` (${pinUrl})`} in ${metaPath}; to make your own edits the identity, host the document at a URL you own and point meta.profile_url there.`,
-    })
-    return checks
-  }
+  checks.push({
+    id: 'profile-redirect',
+    status: 'ok',
+    detail: `${url} serves the document itself, with no redirect`,
+  })
+  checks.push(checkCacheControl(live.cacheControl, url))
 
   // Deep equality on parsed JSON, not bytes: `profile init` re-serializes the
-  // snapshot with its own indentation, so a byte compare would flag every
-  // clean install. Key ORDER differences are likewise not drift — the
+  // published document with its own indentation, so a byte compare would flag
+  // every clean install. Key ORDER differences are likewise not drift — the
   // documents are JSON objects, and no UCP reader depends on member order.
-  const drifted = !deepEqual(local.body as unknown, live.agent.body as unknown)
-  if (!drifted) {
+  // `wire.body` rather than the store's copy: it is the exact object
+  // negotiation runs against, parsed by the same release schema as the fetched
+  // one, so neither side of the comparison can pick up a stray default.
+  if (deepEqual(wire.body as unknown, live.agent.body as unknown)) {
     checks.push({
       id: 'profile-drift',
       status: 'ok',
       detail: `local profile.json matches ${url}`,
     })
-  } else if (published) {
-    // `warn`, not `ok`: a clean install has no drift here, because `profile
-    // init` writes the release's verbatim snapshot. So this fires for exactly
-    // two reasons, and the user wants to hear about both: they edited the file
-    // expecting an effect it cannot have, or the publisher moved the document
-    // and the snapshot this build ships is stale. Reporting `ok` beside a
-    // detail that says "your edits are invisible" is the contradiction the
-    // deleted `profile-url` check was killed for. Only `fail` gates the exit
-    // code, so surfacing it costs no CI job.
-    checks.push({
-      id: 'profile-drift',
-      status: 'warn',
-      detail: `local profile.json differs from the document published at ${url}. Merchants read that URL, not your disk, so these edits are invisible to them — and ucp-cli negotiates from its own verified copy of that URL, so they change nothing locally either. To make your edits real, host them yourself: \`ucp profile init --profile-url <your-url>\`. If you did not edit it, the published document has moved and this build's snapshot is stale.`,
-    })
   } else {
     checks.push({
       id: 'profile-drift',
       status: 'warn',
-      detail: `hosted ${url} differs from the local profile.json — ucp-cli negotiates from the local copy while the business reads the hosted one, so your edits are NOT live. Upload ${bodyPath} to ${url} yourself — ucp-cli has no command that writes to your URL.`,
+      detail: `${url} serves a document that differs from ${bodyPath} beyond ucp.version (the versions agree). The business acts on what that URL serves; ucp-cli plans against the local file — so a capability you added locally is not one the business will grant, and one it grants is not one ucp-cli will use. Upload ${bodyPath} to ${url} when that URL is yours — ucp-cli has no command that writes to a URL. Otherwise copy what that URL serves into ${bodyPath} (\`ucp profile init --name ${name} --version ${wire.version} --force\` does it for a published release document).`,
     })
   }
   return checks
@@ -399,26 +366,57 @@ function describeError(err: unknown): string {
   return isUcpError(err) ? `${err.code}: ${err.message}` : (err as Error).message
 }
 
-// Hosting advisory, self-hosted URLs only.
+// Hosting rule 2 on the profile URL — the pair to checkCacheControl's rule 3
+// below, reported from the same single GET.
+//
+// UCP overview §"Profile Requirements / Hosting": profile endpoints MUST NOT
+// use redirects (3xx), repeated in the fetching rules for every URL an
+// exchange dereferences.
+//
+// Who hits it, precisely: doctor is the only part of ucp-cli that fetches this
+// URL (fetchAgentProfileLive), and it refused the hop itself via `ucpFetch`.
+// Commerce requests do not fetch it — they advertise it in
+// `meta.ucp-agent.profile`, and a conforming business dereferencing it is
+// independently bound by the same MUST NOT, so it cannot resolve the agent
+// identity and the request cannot negotiate. Local commands (`profile list`,
+// `profile show`) are untouched.
+//
+// `fail`, unlike the cache-control advisory: a redirecting profile URL is
+// unreadable to the business the URL exists for, and only `fail` gates
+// doctor's verdict.
+function checkRedirect(redirect: RefusedRedirect, url: string, metaPath: string): Check {
+  const spec = 'UCP forbids redirects (3xx) on published profiles'
+  const target =
+    redirect.location === null ? 'no `Location` header' : `\`Location: ${redirect.location}\``
+  const destination = usableRedirectTarget(url, redirect.location)
+  const remedy =
+    destination !== null
+      ? `Serve the document at ${url} itself, or point meta.profile_url (${metaPath}) at ${destination} once that URL serves the document.`
+      : redirect.location === null
+        ? `Serve the document at ${url} itself, or point meta.profile_url (${metaPath}) at a URL that does.`
+        : `Serve the document at ${url} itself, over https. Profile URLs are https, so the target named here cannot go in meta.profile_url (${metaPath}) either.`
+  return {
+    id: 'profile-redirect',
+    status: 'fail',
+    detail: `${url} answers HTTP ${redirect.status} with ${target} — ${spec}. Doctor is the only part of ucp-cli that fetches this URL, and it refused the hop rather than following it; commerce requests only advertise the URL, and a conforming business dereferencing it is bound by the same rule, so it cannot resolve your identity and those requests cannot negotiate. Local profile commands (\`ucp profile list\`, \`ucp profile show\`) are unaffected. ${remedy}`,
+  }
+}
+
+// Hosting advisory on the profile URL.
 //
 // UCP overview §"Profile Requirements / Hosting": published artifacts MUST
 // carry `Cache-Control: public` with `max-age` of at least 60 seconds and
 // MUST NOT be served `private`/`no-store`/`no-cache`. That rule exists
 // because merchants fetch this URL per request; a document served
 // uncacheable turns every one of your requests into an extra origin hit on
-// your own host, and is the first thing to look at when a merchant rate-limits
+// that host, and is the first thing to look at when a merchant rate-limits
 // discovery.
 //
 // `warn`, not `fail`: it degrades the merchant's fetch pattern, not this
-// install's ability to transact, and doctor's `ok` gates CI. Never emitted for
-// a release default — that document's headers are the publisher's business,
-// and a check nobody local can act on is noise.
-function checkCacheControl(
-  cacheControl: string | null,
-  url: string,
-  published: boolean,
-): Check | undefined {
-  if (published) return undefined
+// install's ability to transact, and doctor's `ok` gates CI. Reported for
+// every URL — the header is a fact about the identity this profile presents,
+// and reporting it only sometimes would make its absence ambiguous.
+function checkCacheControl(cacheControl: string | null, url: string): Check {
   const id = 'profile-cache-control'
   const spec = 'UCP requires `Cache-Control: public, max-age>=60` on published profiles'
   if (cacheControl === null) {

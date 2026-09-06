@@ -1,38 +1,52 @@
 // The switch-profiles hint for PROTOCOL_VERSION_INCOMPATIBLE.
 //
-// The rule under test is where a local profile's version comes from: its
-// HOSTED URL, never `profile.json`. The end-to-end wire assertions live in
-// `src/cli-errors.test.ts`; this suite pins the derivation itself, because
-// the tempting shortcut (read `ucp.version` out of profile.json) produces a
-// hint that is confidently wrong exactly when the local copy is stale.
+// The rule under test is where a local profile's version comes from:
+// `profile.json`, exactly like request-time negotiation. The end-to-end wire
+// assertions live in `src/cli-errors.test.ts`; this suite pins the derivation
+// itself so the profile URL cannot override the local declaration.
 
 import { describe, expect, it } from 'vitest'
 
 import type { UserProfile } from '../core/profile-store.js'
-import { LATEST, RELEASES } from '../core/releases.js'
+import { LATEST, RELEASES, type Version } from '../core/releases.js'
 import { userProfile } from '../test-utils.js'
 import { buildProfileSwitchCta, localProfilesSpeaking } from './profile-hint.js'
 
 const URL_0408 = RELEASES['2026-04-08'].defaultAgentProfileUrl
 const URL_0825 = RELEASES['2026-08-25'].defaultAgentProfileUrl
 
-function store(profiles: Record<string, Partial<UserProfile['meta']>>) {
+interface StoredProfile {
+  version: Version
+  profileUrl?: string
+}
+
+function profileBody(version: Version): UserProfile['body'] {
+  return JSON.parse(RELEASES[version].agentProfileJson) as UserProfile['body']
+}
+
+function store(profiles: Record<string, StoredProfile>) {
   return {
     listProfiles: async () => Object.keys(profiles).sort(),
     readUserProfile: async (name: string) => {
-      const meta = profiles[name]
-      if (meta === undefined) throw new Error(`no such profile: ${name}`)
-      return userProfile(name, { meta })
+      const profile = profiles[name]
+      if (profile === undefined) throw new Error(`no such profile: ${name}`)
+      return userProfile(name, {
+        body: profileBody(profile.version),
+        meta: profile.profileUrl === undefined ? {} : { profile_url: profile.profileUrl },
+      })
     },
   }
 }
 
 describe('localProfilesSpeaking', () => {
-  it('resolves a version from a release-default profile URL', async () => {
+  it('reads the version from profile.json even when the URL implies another release', async () => {
     const matches = await localProfilesSpeaking(
       ['2026-04-08'],
       'agent',
-      store({ agent: { profile_url: URL_0825 }, 'agent-0408': { profile_url: URL_0408 } }),
+      store({
+        agent: { version: '2026-08-25', profileUrl: URL_0825 },
+        'agent-0408': { version: '2026-04-08', profileUrl: URL_0825 },
+      }),
     )
     expect(matches).toStrictEqual([{ name: 'agent-0408', version: '2026-04-08' }])
   })
@@ -41,44 +55,45 @@ describe('localProfilesSpeaking', () => {
     const matches = await localProfilesSpeaking(
       ['2026-04-08'],
       'agent-0408',
-      store({ 'agent-0408': { profile_url: URL_0408 } }),
+      store({ 'agent-0408': { version: '2026-04-08', profileUrl: URL_0408 } }),
     )
     expect(matches).toStrictEqual([])
   })
 
-  it('excludes profiles at versions the business does not offer', async () => {
+  it('excludes profiles whose profile.json version is not offered', async () => {
     const matches = await localProfilesSpeaking(
       ['2026-04-08'],
       'agent',
-      store({ agent: { profile_url: URL_0825 }, other: { profile_url: URL_0825 } }),
-    )
-    expect(matches).toStrictEqual([])
-  })
-
-  it('omits SELF-HOSTED profiles', async () => {
-    // Their version is readable (it is their own profile.json, which the
-    // request path uses) — the hint just does not list them: switching to a
-    // profile whose local copy may disagree with what it publishes points the
-    // user at a version merchants will not see. `ucp doctor` reports that
-    // disagreement instead.
-    const matches = await localProfilesSpeaking(
-      ['2026-04-08', '2026-08-25'],
-      'agent',
       store({
-        agent: { profile_url: URL_0825 },
-        mine: { profile_url: 'https://you.example/agent.json' },
+        agent: { version: '2026-08-25', profileUrl: URL_0825 },
+        other: { version: '2026-08-25', profileUrl: URL_0408 },
       }),
     )
     expect(matches).toStrictEqual([])
   })
 
-  it('omits profiles with no profile_url', async () => {
+  it('includes a matching profile when the URL is the user’s', async () => {
     const matches = await localProfilesSpeaking(
       ['2026-04-08'],
       'agent',
-      store({ agent: { profile_url: URL_0825 }, deferred: {} }),
+      store({
+        agent: { version: '2026-08-25', profileUrl: URL_0825 },
+        mine: { version: '2026-04-08', profileUrl: 'https://you.example/agent.json' },
+      }),
     )
-    expect(matches).toStrictEqual([])
+    expect(matches).toStrictEqual([{ name: 'mine', version: '2026-04-08' }])
+  })
+
+  it('includes a matching profile with no profile_url', async () => {
+    const matches = await localProfilesSpeaking(
+      ['2026-04-08'],
+      'agent',
+      store({
+        agent: { version: '2026-08-25', profileUrl: URL_0825 },
+        deferred: { version: '2026-04-08' },
+      }),
+    )
+    expect(matches).toStrictEqual([{ name: 'deferred', version: '2026-04-08' }])
   })
 
   it('is best-effort: an unreadable profile is skipped, not fatal', async () => {
@@ -88,7 +103,10 @@ describe('localProfilesSpeaking', () => {
       listProfiles: async () => ['broken', 'agent-0408'],
       readUserProfile: async (name: string) => {
         if (name === 'broken') throw new Error('meta.json is not valid JSON')
-        return userProfile(name, { meta: { profile_url: URL_0408 } })
+        return userProfile(name, {
+          body: profileBody('2026-04-08'),
+          meta: { profile_url: URL_0408 },
+        })
       },
     })
     expect(matches).toStrictEqual([{ name: 'agent-0408', version: '2026-04-08' }])

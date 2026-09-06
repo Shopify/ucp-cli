@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import type { CacheEntry } from './cache.js'
 import { type BusinessProfile, fetchBusinessProfile, parsePlatformProfile } from './profile.js'
-import { LATEST, RELEASES, SUPPORTED_VERSIONS } from './releases.js'
+import { RELEASES, SUPPORTED_VERSIONS } from './releases.js'
 
 // `profile init --version <v>` writes `RELEASES[v].agentProfileJson` verbatim.
 // These pin what that artifact is for EVERY release in the window, not just

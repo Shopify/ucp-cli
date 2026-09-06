@@ -6,8 +6,23 @@ import { fileURLToPath } from 'node:url'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const pkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf-8'))
 
+/** @param {unknown} engine */
+export function parseNodeEngineFloor(engine) {
+  const match =
+    typeof engine === 'string'
+      ? /^\s*>=\s*((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\s*$/.exec(engine)
+      : null
+  if (match?.[1] === undefined) {
+    throw new Error(
+      `Cannot parse package.json engines.node=${JSON.stringify(engine)}; expected ">=major.minor.patch"`,
+    )
+  }
+  return match[1]
+}
+
 export function buildDefines() {
   const cliVersion = pkg.version
+  const minimumNodeVersion = parseNodeEngineFloor(pkg.engines?.node)
   let buildNumber = '0'
   try {
     buildNumber = execSync('git rev-list --count HEAD', {
@@ -31,9 +46,9 @@ export function buildDefines() {
     // requiring `ucp profile init --catalog`. Runtime source of truth is the
     // synthetic profile; this define is the build-time provenance.
     __DEFAULT_CATALOG_URL__: JSON.stringify(pkg.ucp.default_catalog_url),
-    // Major-version floor parsed from engines. npm only *warns* on engines at
-    // install time, so the CLI checks this itself (doctor `runtime` check,
-    // proxy load-failure hint) — package.json stays the single source.
-    __MIN_NODE_MAJOR__: JSON.stringify(Number(pkg.engines.node.match(/\d+/)[0])),
+    // Keep the complete engines floor: npm only *warns* at install time, so
+    // the CLI checks it itself (doctor `runtime` check, proxy load-failure
+    // hint). A major-only check can silently admit excluded Node releases.
+    __MIN_NODE_VERSION__: JSON.stringify(minimumNodeVersion),
   }
 }

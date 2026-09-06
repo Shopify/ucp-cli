@@ -21,7 +21,7 @@ import { z } from 'incur'
 import { type ErrorCode, UcpError } from '../lib/errors.js'
 import type { ErrorLayer } from '../lib/types.js'
 import { formatZodIssues } from '../lib/zod-format.js'
-import { ucpFetch } from './http-client.js'
+import { refusedRedirect, ucpFetch } from './http-client.js'
 import { proxyErrorContext, proxyErrorNote } from './proxy.js'
 import { vlog } from './verbose.js'
 
@@ -149,7 +149,8 @@ export interface FetchCachedOptions<T = unknown> {
  * envelope is the {@link cacheEntrySchema} shape.
  *
  * Throws `UcpError(layer, code, ...)` on every failure mode using the
- * caller-supplied codes.
+ * caller-supplied codes, except a redirect refused by `ucpFetch`
+ * (`TRANSPORT_REDIRECT_REFUSED`), which propagates unchanged.
  */
 export async function fetchCached<T = unknown>(
   url: string,
@@ -184,6 +185,11 @@ export async function fetchCached<T = unknown>(
       traceLabel: 'cache',
     })
   } catch (err) {
+    // A refused redirect arrives already diagnosed: it names the Location and
+    // the remedy. Re-wrapping would bury that in a `cause` the error envelope
+    // never serializes and label a permanent misconfiguration `retryable`, so
+    // it passes through as itself.
+    if (refusedRedirect(err) !== undefined) throw err
     // Profile discovery is the first network call in every flow, so it is where
     // an ignored or broken proxy surfaces first. Annotate so the envelope can't
     // be misread as "merchant unreachable". Absent entirely when no proxy is

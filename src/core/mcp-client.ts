@@ -14,7 +14,7 @@
 
 import { ErrorCodes, UcpError } from '../lib/errors.js'
 import type { CtaBlock } from '../lib/types.js'
-import { ucpFetch } from './http-client.js'
+import { refusedRedirect, ucpFetch } from './http-client.js'
 import { proxyErrorContext, proxyErrorNote } from './proxy.js'
 import { parseHttpsUrl } from './url.js'
 import { vlog } from './verbose.js'
@@ -100,6 +100,15 @@ export async function mcpRpc<T = unknown>(opts: McpRpcOptions): Promise<T> {
       traceLabel: 'mcp',
     })
   } catch (err) {
+    // A refused redirect already names the Location and the remedy, and it is
+    // not a network fault: the endpoint answered. Passing it through keeps one
+    // code per remedy, which is what an agent grouping by `code` relies on.
+    //
+    // UCP's no-redirect rule covers the documents an exchange dereferences,
+    // not this endpoint — refusing here is ucp-cli's own policy (see the
+    // module header of http-client.ts). A Business that wants operations at
+    // another URL declares that endpoint in its profile.
+    if (refusedRedirect(err) !== undefined) throw err
     throw new UcpError({
       layer: 'transport',
       code: ErrorCodes.TRANSPORT_NETWORK_ERROR,

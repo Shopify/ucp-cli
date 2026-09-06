@@ -46,7 +46,7 @@ interface InitPromptDefaults {
 
 interface InitPromptResult {
   name?: string
-  /** Optional HTTPS URL means the user will host profile.json themselves. */
+  /** Optional HTTPS URL where the user will publish profile.json. */
   profileUrl?: string
 }
 
@@ -109,7 +109,7 @@ function profileInitRequiresNameError(): {
     message: 'profile init needs a profile name in non-interactive mode',
     cta: {
       description:
-        'Pass a profile name. Omit --profile-url to present the stock published profile for the release; pass --profile-url when you host profile.json yourself.',
+        "Pass a profile name. Omit --profile-url to use the release's published profile URL; pass --profile-url when the URL is yours.",
       commands: [
         {
           command: `ucp profile init --name ${DEFAULT_PROFILE_NAME}`,
@@ -117,7 +117,7 @@ function profileInitRequiresNameError(): {
         },
         {
           command: `ucp profile init --name ${DEFAULT_PROFILE_NAME} --profile-url https://example.com/.well-known/ucp`,
-          description: 'create a local profile for a self-hosted HTTPS URL',
+          description: 'create a local profile for an HTTPS URL you own',
         },
       ],
     },
@@ -158,9 +158,15 @@ export function buildProfileCli(deps: ProfileCliDependencies = {}) {
   const writeAct = deps.writeActive ?? writeActive
   const prompt = deps.promptInit ?? promptForInit
 
+  // Every command here carries `mcp: false`: profile management is local CLI
+  // state, not a commerce operation, and one MCP stdio server serves many
+  // unrelated agent conversations — none of them may repoint the operator's
+  // active profile out from under the others. Any command added below needs
+  // the same annotation, or it silently becomes an agent-callable tool.
   return Cli.create('profile', { description: 'Profile management' })
     .command('list', {
       description: 'List configured profiles (active is marked)',
+      mcp: false,
       args: z.object({}),
       options: z.object({}),
       async run() {
@@ -176,6 +182,7 @@ export function buildProfileCli(deps: ProfileCliDependencies = {}) {
     })
     .command('show', {
       description: 'Display a profile (defaults to active)',
+      mcp: false,
       args: z.object({ name: z.string().optional() }),
       options: z.object({}),
       async run(c) {
@@ -200,16 +207,17 @@ export function buildProfileCli(deps: ProfileCliDependencies = {}) {
     })
     .command('init', {
       description: 'Create a local profile',
+      mcp: false,
       args: z.object({}),
       options: z.object({
         name: z.string().optional().describe('Profile name (filesystem-safe identifier).'),
         profileUrl: optionalHttpsOption('--profile-url').describe(
-          'Public HTTPS URL if you will host profile.json yourself. THE ONLY WAY to advertise a custom capability set: the URL is the identity both sides read, so whoever controls it controls what this agent claims (there is no signing). Omit to present the stock published profile for --version.',
+          'Public HTTPS URL where businesses read profile.json. Use a URL you own to advertise a custom capability set; whoever controls the URL controls what this agent claims (there is no signing). Omit to use the published URL for --version.',
         ),
         version: supportedVersionOption()
           .default(LATEST)
           .describe(
-            `UCP release this profile speaks (${SUPPORTED_VERSIONS.join(', ')}; default ${LATEST}). This is the whole of version selection: it picks meta.profile_url, and negotiation runs against whatever that URL serves. On the default path the identity is "a stock <version> agent" — self-host with --profile-url to change it.`,
+            `UCP release template to write (${SUPPORTED_VERSIONS.join(', ')}; default ${LATEST}). The written profile.json declares the release this profile uses. Omit --profile-url to use that release's published profile URL.`,
           ),
         activate: z
           .boolean()
@@ -269,23 +277,20 @@ export function buildProfileCli(deps: ProfileCliDependencies = {}) {
 
         const profilesBefore = await list()
         const now = new Date().toISOString()
-        // profile.json is the verbatim document `rel.defaultAgentProfileUrl`
-        // serves. Cloned, not shared: the user is expected to edit this file,
-        // and handing out the registry's singleton would let one edit leak
-        // into every later init in the same process. On the default path the
-        // file is decorative — the CLI negotiates from its bundled snapshot of
-        // that URL — so pointing --profile-url at a URL you own, and uploading
-        // this file there, is what makes an edit take effect on either side.
+        // profile.json starts as the verbatim document the release's default
+        // URL serves. Cloned, not shared: the user is expected to edit this
+        // file, and handing out the registry's singleton would let one edit
+        // leak into every later init in the same process. The CLI negotiates
+        // from this file; the profile URL must serve the same document for the
+        // business to see the same declaration.
         const body = structuredClone(rel.agentProfileTemplate)
         const meta: ProfileMeta = {
           created_at: priorCreatedAt ?? now,
           updated_at: now,
           ...(c.options.catalog !== undefined ? { defaults: { catalog: c.options.catalog } } : {}),
-          // Version selection is ENTIRELY this URL choice; no version is
-          // persisted as a scalar. The business GETs this URL and reads
-          // `ucp.version` off what it serves; the CLI reads the same version
-          // locally — from its bundled snapshot of a release default, or from
-          // this profile's own profile.json when the URL is yours.
+          // The CLI reads `ucp.version` from profile.json; the business reads
+          // it from this URL. Init writes a matching pair, and `ucp doctor`
+          // reports any later disagreement.
           profile_url:
             profileUrl !== undefined
               ? requireHttpsString(profileUrl, 'profile URL')
@@ -309,9 +314,8 @@ export function buildProfileCli(deps: ProfileCliDependencies = {}) {
           created: true,
           activated: shouldActivate,
           path: profileDir(profile.name),
-          // `version` echoes what was written, but `profile_url` is the field
-          // that DECIDES it — the CLI and the business both read the version
-          // off whatever that URL serves.
+          // `version` echoes the `ucp.version` written to profile.json;
+          // `profile_url` names the copy businesses read.
           version: c.options.version,
           ...(profile.meta.profile_url !== undefined
             ? { profile_url: profile.meta.profile_url }
@@ -321,6 +325,7 @@ export function buildProfileCli(deps: ProfileCliDependencies = {}) {
     })
     .command('use', {
       description: 'Switch the active profile',
+      mcp: false,
       args: z.object({ name: z.string() }),
       options: z.object({}),
       async run(c) {

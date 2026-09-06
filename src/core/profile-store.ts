@@ -7,19 +7,12 @@
 //       profile.json   — agent profile body (the artifact the user hosts)
 //       meta.json      — { profile_url?, defaults?, created_at? }
 //
-// Role split, load-bearing (see src/core/agent.ts). `meta.profile_url` is the
-// URL every request advertises; `profile.json` is the document that URL is
-// supposed to serve. Which of them ucp-cli negotiates from depends on who
-// owns the URL:
-//   - a release default → the bundled copy of that published document, which
-//     CI pins byte-identical to what the URL serves. profile.json is then a
-//     redundant local copy, and editing it changes nothing merchants can see;
-//   - a URL you own → profile.json IS the declaration ucp-cli negotiates with,
-//     read fresh per invocation, because it is the only copy the CLI has.
-//     Uploading it to that URL is what makes the merchant agree; until then
-//     the two sides read different documents and `doctor` is what says so.
-// Nothing here fetches, and nothing here uploads: the request path never
-// reads the wire, and no ucp-cli command ever writes to a profile URL.
+// Role split, load-bearing (see src/core/agent.ts). `profile.json` is the
+// declaration ucp-cli negotiates from for every named profile, and
+// `meta.profile_url` is the URL every request advertises for businesses to
+// read. The two documents must agree; `ucp doctor` compares them. Nothing here
+// fetches or uploads: the request path never reads the wire, and no ucp-cli
+// command writes to a profile URL.
 //
 // Plus the session-state pair:
 //
@@ -71,10 +64,10 @@ export const profileMetaSchema = z
     // session.ts supplies runtime fallbacks where appropriate.
     created_at: z.string().optional(),
     updated_at: z.string().optional(),
-    // Optional for forward/backward compatibility: `profile init` always
-    // writes it now (it is the whole of version selection), but a profile
-    // authored by an older CLI may omit it, in which case session resolution
-    // falls back to the latest release default.
+    // Optional for forward/backward compatibility: `profile init` writes it
+    // so the remote identity is explicit, but an older profile may omit it,
+    // in which case session resolution falls back to the latest release
+    // default.
     profile_url: httpsUrlSchema.optional(),
     // `defaults.catalog` is the business URL catalog ops fall back to when
     // no business is resolved. Discovery hits `<catalog>/.well-known/ucp`

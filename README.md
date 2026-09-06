@@ -105,16 +105,20 @@ ucp profile init --name legacy --version 2026-04-08   # create a profile pinned 
 ucp discover shop.example.com --profile legacy        # ...and use it
 ```
 
-The CLI sends that URL on every request and merchants fetch it, so it must be publicly reachable. `~/.ucp/profiles/<name>/profile.json` is your local copy of what is hosted there — keeping the two in sync is your responsibility, and `ucp doctor` checks it.
+Each profile has two halves, and one contract between them:
 
-Hosting the profile yourself is the only way to advertise your own capability set; on the default URL the document is Shopify's, so editing your local copy changes nothing merchants can see. Nothing is signed, so **whoever controls that URL controls this agent's identity.**
+- `~/.ucp/profiles/<name>/profile.json` — the document the CLI declares. Its `ucp.version` is the release you speak; its services and capabilities are what you offer to negotiate.
+- `meta.profile_url` — where that document lives on the web. The CLI sends this URL on every request, merchants fetch it, and they negotiate against whatever it serves.
+
+**The two must say the same thing.** Keeping them equal is your job — `ucp doctor` is what checks: `protocol` fails when the URL is unreachable or serves a different `ucp.version` than you send, `profile-drift` warns when the rest of the document differs. `profile init` starts them in agreement by writing the release's published document to disk.
+
+To advertise a capability set of your own, put the document at a URL you control. Nothing is signed, so **whoever controls that URL controls this agent's identity.**
 
 ```sh
 ucp profile init --name mine --profile-url https://you.example/agent.json
 # edit ~/.ucp/profiles/mine/profile.json
 # upload it to that URL yourself — scp, S3, whatever you host with
-ucp doctor           # verifies the two agree: `protocol` fails if the URL disagrees
-                     # with what you'd send; `profile-drift` warns while it is stale
+ucp doctor           # confirms the two agree
 ```
 
 Two scopes for picking which business an operation targets:
@@ -329,4 +333,4 @@ pnpm build && pnpm link --global
 
 `--verbose` (or `UCP_VERBOSE=1`) prints discover/cache/transport trace lines to stderr. Useful when an operation silently no-ops, a cache hit looks stale, or the request that hit the wire doesn't match what you expected. The flag is muted under `--mcp` (stdio JSON-RPC has no human reader and trace lines would confuse log scrapers).
 
-Not listed in `ucp --help`'s Global Options because incur 0.4.5 hard-codes that block with no extension hook — the flag is intercepted in the launcher before incur sees argv. Until upstream exposes a registration API, this is the canonical doc for it.
+`ucp --help` does not list it. `verbose` is a reserved built-in flag name in incur, so it cannot be declared as a custom global option, and incur neither parses nor documents the flag itself. The launcher intercepts it before incur sees argv, which makes this section its canonical documentation.
