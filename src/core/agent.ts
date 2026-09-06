@@ -32,10 +32,10 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { z } from 'incur'
-import { ErrorCodes, UcpError } from '../lib/errors.js'
+import { ErrorCodes, isUcpError, UcpError } from '../lib/errors.js'
 import type { Transport } from '../lib/types.js'
 import { formatZodIssues } from '../lib/zod-format.js'
-import { ucpFetch } from './http-client.js'
+import { refusedRedirect, ucpFetch } from './http-client.js'
 import { type ProfileStoreOptions, profileDir } from './profile-store.js'
 import {
   LATEST,
@@ -436,7 +436,25 @@ export type AgentProfileUnreachableReason =
   | 'network'
   | 'http_status'
   | 'not_json'
+  | 'redirect'
   | 'business_reported'
+
+/**
+ * The hop behind an `AGENT_PROFILE_UNREACHABLE` carrying
+ * `reason: 'redirect'`, or `undefined` for any other error. Lives beside the
+ * throw site that encodes it so `ucp doctor` can state the status and the
+ * target in its own words instead of re-deriving them from the message.
+ *
+ * The hop itself is not copied into this error: it is already on the wrapped
+ * refusal, so {@link refusedRedirect} decodes it from the `cause` rather than
+ * a second, unvalidated copy that could disagree with the first.
+ */
+export function agentProfileRedirect(err: unknown) {
+  if (!isUcpError(err) || err.code !== ErrorCodes.AGENT_PROFILE_UNREACHABLE) return undefined
+  const context = err.context as { reason?: unknown } | undefined
+  if (context?.reason !== 'redirect') return undefined
+  return refusedRedirect(err.cause)
+}
 
 /**
  * GET the hosted agent profile and validate what it serves. **`ucp doctor`
@@ -447,9 +465,10 @@ export type AgentProfileUnreachableReason =
  * validity, the declared version, and the `Cache-Control` the merchant's
  * fetch of the same URL will see.
  *
- * Unreachable / non-2xx / non-JSON → `AGENT_PROFILE_UNREACHABLE` with a
- * `reason`. There is no cache and no memo to bypass: every call reads the
- * wire, which is the point of a drift detector.
+ * Unreachable / non-2xx / non-JSON / redirect → `AGENT_PROFILE_UNREACHABLE`
+ * with a `reason`; {@link agentProfileRedirect} decodes the redirect. There
+ * is no cache and no memo to bypass: every call reads the wire, which is the
+ * point of a drift detector.
  *
  * Business-scoped auth headers are deliberately NOT accepted here — this GET
  * goes to the agent's own host, and forwarding per-business credentials to it
@@ -500,6 +519,18 @@ export async function fetchAgentProfileLive(
       traceLabel: 'agent-profile',
     })
   } catch (err) {
+    // A refused redirect is our own hosting misconfiguration, not a network
+    // fault, and it keeps the `client` layer every AGENT_PROFILE_* code
+    // carries — the seam src/lib/error-layers.test.ts exists to hold. The
+    // refusal's own message is the detail: it already names the Location and
+    // the fixes.
+    const redirect = refusedRedirect(err)
+    if (redirect !== undefined) {
+      throw unreachable('redirect', (err as Error).message, {
+        cause: err as Error,
+        http_status: redirect.status,
+      })
+    }
     throw unreachable('network', (err as Error).message, { cause: err as Error })
   }
   if (!response.ok)

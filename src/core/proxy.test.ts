@@ -62,11 +62,12 @@ interface FixtureProxy extends FixtureServer {
    * the request scheme: http is forwarded in absolute form, https is
    * tunnelled (see {@link FixtureProxy.tunneled}).
    *
-   * Two things produce an http dispatch, neither of them ordinary use: the
-   * loopback escape hatch in core/url.ts
-   * (`UCP_TEST_ALLOW_INSECURE_LOCALHOST`, loopback hosts only), and a
-   * redirect from an https origin to an http one — `fetch` follows that hop
-   * itself, so parseHttpsUrl never sees the downgraded URL.
+   * Exactly one thing produces an http dispatch, and it is not ordinary use:
+   * the loopback escape hatch in core/url.ts
+   * (`UCP_TEST_ALLOW_INSECURE_LOCALHOST`, loopback hosts only). A redirect
+   * cannot add a second: `ucpFetch` refuses redirect responses rather than
+   * following them (core/http-client.ts), so an `http` `Location` is never
+   * dispatched.
    */
   forwarded: string[]
   /**

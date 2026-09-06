@@ -11,7 +11,13 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { fetchAgentProfileLive, loadAgentProfile, resolveAgentProfile } from './agent.js'
+import { ErrorCodes, UcpError } from '../lib/errors.js'
+import {
+  agentProfileRedirect,
+  fetchAgentProfileLive,
+  loadAgentProfile,
+  resolveAgentProfile,
+} from './agent.js'
 import { LATEST, RELEASES } from './releases.js'
 import { setWarnWriter } from './verbose.js'
 
@@ -353,6 +359,57 @@ describe('fetchAgentProfileLive — AGENT_PROFILE_UNREACHABLE carries a reason',
       code: 'AGENT_PROFILE_UNREACHABLE',
       context: { reason: 'not_json' },
     })
+  })
+
+  // Our own hosting, so it stays on the `client` layer with the rest of the
+  // AGENT_PROFILE_* family rather than escaping as the transport-layer
+  // refusal core/http-client.ts raises.
+  it("reason 'redirect' for a 3xx, decodable by agentProfileRedirect", async () => {
+    const fetch = fetchStub(
+      () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: 'https://cdn.example.com/profile.json' },
+        }),
+    )
+    const err = await fetchAgentProfileLive({ url: SELF_HOSTED, name: 'mine', fetch }).catch(
+      (e: unknown) => e,
+    )
+    expect(err).toMatchObject({
+      code: 'AGENT_PROFILE_UNREACHABLE',
+      layer: 'client',
+      http_status: 302,
+      context: { url: SELF_HOSTED, reason: 'redirect', profile: 'mine' },
+      message: expect.stringContaining('https://cdn.example.com/profile.json') as unknown as string,
+    })
+    expect(agentProfileRedirect(err)).toEqual({
+      status: 302,
+      location: 'https://cdn.example.com/profile.json',
+    })
+  })
+
+  // The decoder reads the refusal it wrapped rather than a copy stored beside
+  // it, so anything that claims `redirect` without carrying a decodable one is
+  // `undefined` — a remedy printing `HTTP undefined` is worse than no remedy.
+  it('agentProfileRedirect returns undefined unless the cause carries the refusal', () => {
+    const claimsRedirect = (cause?: Error): UcpError =>
+      new UcpError({
+        layer: 'client',
+        code: ErrorCodes.AGENT_PROFILE_UNREACHABLE,
+        message: 'could not be read (redirect: ...)',
+        context: { url: SELF_HOSTED, reason: 'redirect' },
+        ...(cause !== undefined ? { cause } : {}),
+      })
+    const missingStatus = new UcpError({
+      layer: 'transport',
+      code: ErrorCodes.TRANSPORT_REDIRECT_REFUSED,
+      message: 'refused',
+      context: { url: SELF_HOSTED, location: 'https://cdn.example.com/profile.json' },
+    })
+    expect(agentProfileRedirect(claimsRedirect())).toBeUndefined()
+    expect(agentProfileRedirect(claimsRedirect(new Error('boom')))).toBeUndefined()
+    expect(agentProfileRedirect(claimsRedirect(missingStatus))).toBeUndefined()
+    expect(agentProfileRedirect(new Error('boom'))).toBeUndefined()
   })
 
   it('names the reason in the message too, because `context` never reaches the wire', async () => {

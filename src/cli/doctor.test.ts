@@ -268,9 +268,90 @@ describe('runDoctor — hosted-identity fetch', () => {
     expect(findCheck(result, 'protocol').detail).toContain(RELEASES[LATEST].defaultAgentProfileUrl)
   })
 
+  // Hosting rule 2 beside checkCacheControl's rule 3, off the same single GET.
+  // Doctor is the only place ucp-cli fetches this URL, and it refuses the hop
+  // itself; commerce requests only advertise the URL, and a conforming
+  // business dereferencing it is bound by the same MUST NOT, so they cannot
+  // negotiate. Local commands are unaffected — so the detail must not claim
+  // "every command fails".
+  it('fails, names the Location, and cites the rule when the profile URL redirects', async () => {
+    await saveUserProfile({ name: 'prod', body: SAMPLE_BODY, meta: SAMPLE_META }, { homeDir })
+    await writeActive({ profile: 'prod' }, { homeDir })
+    const fakeFetch = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 301,
+          headers: { location: 'https://cdn.example.com/profile.json' },
+        }),
+    )
+    const result = await runDoctor({
+      homeDir,
+      env: {},
+      fetch: fakeFetch as unknown as typeof fetch,
+    })
+    // One fault, one voice: exactly one `profile-redirect` check, and no
+    // second, vaguer `protocol` fail on the same GET.
+    expect(result.checks.filter((c) => c.id === 'profile-redirect')).toHaveLength(1)
+    expect(result.checks.find((c) => c.id === 'protocol')).toBeUndefined()
+    const check = findCheck(result, 'profile-redirect')
+    expect(check.status).toBe('fail')
+    expect(result.ok).toBe(false)
+    expect(check.detail).toContain(SELF_HOSTED_URL)
+    expect(check.detail).toContain('HTTP 301')
+    expect(check.detail).toContain('https://cdn.example.com/profile.json')
+    expect(check.detail).toContain('UCP forbids redirects (3xx) on published profiles')
+    expect(check.detail).toContain('meta.json')
+    // The actor chain, not a blanket claim about the CLI's whole surface:
+    // doctor refused the hop, commerce requests only advertise the URL, and
+    // the business that dereferences it is the one that cannot negotiate.
+    expect(check.detail).toMatch(/Doctor[^.]*refused the hop/)
+    expect(check.detail).toMatch(/commerce requests only advertise/)
+    expect(check.detail).toContain('cannot negotiate')
+    // Scope, stated in the output rather than only in the source comments.
+    expect(check.detail).toMatch(/[Ll]ocal profile commands[^.]*unaffected/)
+    expect(check.detail).not.toContain('every command')
+  })
+
+  // Profile URLs are https, so an http target can never be the URL to
+  // advertise — the remedy must not name it.
+  it('does not offer an http redirect target as the profile URL to advertise', async () => {
+    await saveUserProfile({ name: 'prod', body: SAMPLE_BODY, meta: SAMPLE_META }, { homeDir })
+    await writeActive({ profile: 'prod' }, { homeDir })
+    const fakeFetch = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: 'http://mybot.example.com/profile.json' },
+        }),
+    )
+    const result = await runDoctor({
+      homeDir,
+      env: {},
+      fetch: fakeFetch as unknown as typeof fetch,
+    })
+    const check = findCheck(result, 'profile-redirect')
+    expect(check.status).toBe('fail')
+    expect(check.detail).toContain('`Location: http://mybot.example.com/profile.json`')
+    expect(check.detail).toContain('over https')
+  })
+
+  it('reports profile-redirect ok when the URL serves the document itself', async () => {
+    await saveUserProfile({ name: 'prod', body: SAMPLE_BODY, meta: SAMPLE_META }, { homeDir })
+    await writeActive({ profile: 'prod' }, { homeDir })
+    const fakeFetch = vi.fn(async () => jsonResponse(publishedProfile(LATEST)))
+    const result = await runDoctor({
+      homeDir,
+      env: {},
+      fetch: fakeFetch as unknown as typeof fetch,
+    })
+    const check = findCheck(result, 'profile-redirect')
+    expect(check.status).toBe('ok')
+    expect(check.detail).toContain(SELF_HOSTED_URL)
+  })
+
   it('skipNetwork omits every hosted-identity check', async () => {
     const result = await runDoctor({ homeDir, skipNetwork: true, env: {} })
-    for (const id of ['protocol', 'profile-drift', 'profile-cache-control']) {
+    for (const id of ['protocol', 'profile-drift', 'profile-cache-control', 'profile-redirect']) {
       expect(result.checks.find((c) => c.id === id)).toBeUndefined()
     }
   })

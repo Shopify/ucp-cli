@@ -17,8 +17,14 @@
 import { access, constants, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { type AgentProfile, fetchAgentProfileLive, resolveAgentProfile } from '../core/agent.js'
+import {
+  type AgentProfile,
+  agentProfileRedirect,
+  fetchAgentProfileLive,
+  resolveAgentProfile,
+} from '../core/agent.js'
 import { MIN_CACHE_SECONDS } from '../core/cache.js'
+import { type RefusedRedirect, usableRedirectTarget } from '../core/http-client.js'
 import { isSupportedNodeVersion } from '../core/node-version.js'
 import {
   activeYamlPath,
@@ -272,6 +278,12 @@ async function checkProtocol(
   try {
     live = await fetchAgentProfileLive({ url, name, fetch: fetchImpl })
   } catch (err) {
+    // A refused redirect reports as `profile-redirect` and nothing else. It is
+    // one fault with one remedy, and `protocol` beside it would be a second,
+    // vaguer voice on the same fetch — the rule applied to `active-profile`
+    // above. The verdict is identical either way: both are `fail`.
+    const redirect = agentProfileRedirect(err)
+    if (redirect !== undefined) return [checkRedirect(redirect, url, metaPath)]
     // `fail`, not `warn`: the business GETs this URL to negotiate with us. If
     // it cannot be read, the business cannot read it either.
     //
@@ -319,6 +331,11 @@ async function checkProtocol(
     },
   ]
 
+  checks.push({
+    id: 'profile-redirect',
+    status: 'ok',
+    detail: `${url} serves the document itself, with no redirect`,
+  })
   checks.push(checkCacheControl(live.cacheControl, url))
 
   // Deep equality on parsed JSON, not bytes: `profile init` re-serializes the
@@ -347,6 +364,42 @@ async function checkProtocol(
 /** `code: message` for a UcpError, plain message otherwise. */
 function describeError(err: unknown): string {
   return isUcpError(err) ? `${err.code}: ${err.message}` : (err as Error).message
+}
+
+// Hosting rule 2 on the profile URL — the pair to checkCacheControl's rule 3
+// below, reported from the same single GET.
+//
+// UCP overview §"Profile Requirements / Hosting": profile endpoints MUST NOT
+// use redirects (3xx), repeated in the fetching rules for every URL an
+// exchange dereferences.
+//
+// Who hits it, precisely: doctor is the only part of ucp-cli that fetches this
+// URL (fetchAgentProfileLive), and it refused the hop itself via `ucpFetch`.
+// Commerce requests do not fetch it — they advertise it in
+// `meta.ucp-agent.profile`, and a conforming business dereferencing it is
+// independently bound by the same MUST NOT, so it cannot resolve the agent
+// identity and the request cannot negotiate. Local commands (`profile list`,
+// `profile show`) are untouched.
+//
+// `fail`, unlike the cache-control advisory: a redirecting profile URL is
+// unreadable to the business the URL exists for, and only `fail` gates
+// doctor's verdict.
+function checkRedirect(redirect: RefusedRedirect, url: string, metaPath: string): Check {
+  const spec = 'UCP forbids redirects (3xx) on published profiles'
+  const target =
+    redirect.location === null ? 'no `Location` header' : `\`Location: ${redirect.location}\``
+  const destination = usableRedirectTarget(url, redirect.location)
+  const remedy =
+    destination !== null
+      ? `Serve the document at ${url} itself, or point meta.profile_url (${metaPath}) at ${destination} once that URL serves the document.`
+      : redirect.location === null
+        ? `Serve the document at ${url} itself, or point meta.profile_url (${metaPath}) at a URL that does.`
+        : `Serve the document at ${url} itself, over https. Profile URLs are https, so the target named here cannot go in meta.profile_url (${metaPath}) either.`
+  return {
+    id: 'profile-redirect',
+    status: 'fail',
+    detail: `${url} answers HTTP ${redirect.status} with ${target} — ${spec}. Doctor is the only part of ucp-cli that fetches this URL, and it refused the hop rather than following it; commerce requests only advertise the URL, and a conforming business dereferencing it is bound by the same rule, so it cannot resolve your identity and those requests cannot negotiate. Local profile commands (\`ucp profile list\`, \`ucp profile show\`) are unaffected. ${remedy}`,
+  }
 }
 
 // Hosting advisory on the profile URL.

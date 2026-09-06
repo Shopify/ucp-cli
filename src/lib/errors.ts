@@ -113,6 +113,20 @@ export const ErrorCodes = {
   TRANSPORT_NETWORK_ERROR: 'TRANSPORT_NETWORK_ERROR',
   /** Endpoint returned 2xx but the body was not parseable as JSON. */
   TRANSPORT_INVALID_JSON: 'TRANSPORT_INVALID_JSON',
+  /**
+   * A URL answered a redirect status — `301`, `302`, `303`, `307`, `308` — and
+   * `ucpFetch` declined to follow it. On the documents an exchange
+   * dereferences — profile, identity (`jwks_uri` / CIMD), and `schema`
+   * URLs — that enforces UCP's prohibition. On a negotiated service
+   * endpoint the prohibition does not reach, and the refusal is ucp-cli's own
+   * policy: a hop is an out-of-band replacement for the endpoint the profile
+   * declared. One code for every outbound path because the remedy is the same
+   * wherever it lands: serve the requested resource at the URL that was asked
+   * for, or put the final https URL in the declaration that supplied the
+   * refused one. `context.location` carries the refused target, `http_status`
+   * the redirect status.
+   */
+  TRANSPORT_REDIRECT_REFUSED: 'TRANSPORT_REDIRECT_REFUSED',
   /** Body parses as JSON but isn't a JSON-RPC 2.0 envelope (missing jsonrpc/result/error). */
   MCP_INVALID_RESPONSE: 'MCP_INVALID_RESPONSE',
   /**
@@ -186,6 +200,10 @@ export const ErrorCodes = {
    *                         serving an HTML error page is the single most
    *                         common failure here, and it is not really
    *                         "unreachable")
+   *   - `'redirect'`        answered a redirect status (301/302/303/307/308);
+   *                         UCP forbids redirects on profile URLs, and
+   *                         `ucp doctor`'s own fetch of the URL (the only one
+   *                         ucp-cli makes) refuses to follow it
    *   - `'business_reported'` the business told us: JSON-RPC -32001 with
    *                         `data.code: 'profile_unreachable'`
    */
@@ -265,6 +283,7 @@ export const ERROR_LAYERS: Readonly<Record<keyof typeof ErrorCodes, ErrorLayer |
     TRANSPORT_HTTP_ERROR: 'transport',
     TRANSPORT_NETWORK_ERROR: 'transport',
     TRANSPORT_INVALID_JSON: 'transport',
+    TRANSPORT_REDIRECT_REFUSED: 'transport',
     MCP_INVALID_RESPONSE: 'transport',
     MCP_RPC_ERROR: 'transport',
     AUTH_REQUIRED: 'transport',

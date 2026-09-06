@@ -413,6 +413,32 @@ describe('mcpRpc — error mapping', () => {
     )
   })
 
+  // Not UCP's MUST NOT — that covers the documents an exchange dereferences,
+  // not this endpoint. This is ucp-cli's own policy: the negotiated profile is
+  // where this endpoint comes from, so a 3xx is an out-of-band replacement for
+  // a declared value, and a merchant who wants operations elsewhere declares
+  // that endpoint instead. The refusal passes through untouched so one code
+  // carries one remedy — relabelling it TRANSPORT_NETWORK_ERROR would say the
+  // endpoint was unreachable when it answered.
+  it('passes a refused redirect through instead of calling it a network error', async () => {
+    const fetch = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 307,
+          headers: { location: 'https://shop.example.invalid/v2/mcp' },
+        }),
+    ) as unknown as typeof globalThis.fetch
+
+    await expect(mcpRpc({ endpoint: ENDPOINT, method: 'tools/list', fetch })).rejects.toMatchObject(
+      {
+        code: 'TRANSPORT_REDIRECT_REFUSED',
+        layer: 'transport',
+        http_status: 307,
+        message: expect.stringContaining('https://shop.example.invalid/v2/mcp'),
+      },
+    )
+  })
+
   it('throws INVALID_INPUT when endpoint is not https', async () => {
     await expect(
       mcpRpc({ endpoint: 'http://shop.example.invalid/ucp/mcp', method: 'tools/list' }),

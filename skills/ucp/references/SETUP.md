@@ -108,7 +108,7 @@ These are operator fixes, which is why `references/REFERENCE.md` collapses the w
 
 | Code | Meaning | Fix |
 |---|---|---|
-| `AGENT_PROFILE_UNREACHABLE` | At request time this means one thing: **the merchant** could not fetch your profile URL and said so (`business_reported`). `ucp doctor` raises the same code for what it finds itself — `network`, `http_status`, `not_json` (a 200 serving an HTML error page — the most common hosting mistake) | Fix hosting at that URL, or point at a reachable one with `--profile-url`. `ucp doctor` probes it |
+| `AGENT_PROFILE_UNREACHABLE` | At request time this means one thing: **the merchant** could not fetch your profile URL and said so (`business_reported`). `ucp doctor` raises the same code for what it finds itself — `network`, `http_status`, `not_json` (a 200 serving an HTML error page — the most common hosting mistake), `redirect` (the URL answers a redirect, which UCP forbids on profiles) | Fix hosting at that URL, or point at a reachable one with `--profile-url`. `ucp doctor` probes it |
 | `AGENT_PROFILE_VERSION_UNSUPPORTED` | The profile document declares a UCP version `ucp-cli` does not support | `ucp profile init --name <name> --version <v>` at a supported version (`ucp --version` prints them), or upgrade the CLI |
 | `AGENT_PROFILE_SCHEMA_INVALID` | The profile document failed its release's schema | Fix `profile.json` (and upload it to your profile URL if that URL is yours) |
 | `AGENT_PROFILE_VERSION_MISMATCH` | The profile document is internally inconsistent: a `dev.ucp.*` entry at a version other than its own `ucp.version`. Those entries can never negotiate, so this is fatal before the first call | Align the entry versions with the profile's `ucp.version` in `profile.json`, then make the profile URL serve the corrected document (`ucp profile show`, `ucp doctor`) |
@@ -123,6 +123,7 @@ These are operator fixes, which is why `references/REFERENCE.md` collapses the w
 |---|---|
 | `protocol` | can this URL be used as an identity, and does it serve the release you send? Reports the version in force, whether `ucp-cli` supports it, whether it is the latest, and the resolved URL. **Fails** when the URL cannot be fetched or used (transport failure / HTTP status / non-JSON / schema-invalid / a UCP version `ucp-cli` does not support — the merchant fetches the same URL, so this predicts total failure), **and when the `ucp.version` it serves differs from the one in your `profile.json`**, which is what `ucp-cli` sends. That last one is the check that keeps both sides speaking the same release; its message names both versions |
 | `profile-drift` | the versions agree — does the rest of the served document match `profile.json`? **Warn**: your requests stay well-formed, but the merchant grants capabilities off the document at the URL while `ucp-cli` plans against your file, so the two disagree about what you can do |
+| `profile-redirect` | does the profile URL serve the document itself, without a hop? UCP forbids redirects (3xx) on published profiles. `ucp doctor` is the only part of `ucp-cli` that fetches this URL, and it refuses the hop itself; your commerce requests only advertise the URL, and a conforming merchant dereferencing it is bound by the same rule — so it cannot resolve your identity and those requests cannot negotiate (local commands like `ucp profile list` are unaffected). **Fail**, and the detail names the `Location` plus both fixes: serve the document at the URL you advertise, or advertise the URL that serves it |
 | `profile-cache-control` | does the document at the profile URL carry `Cache-Control: public, max-age>=60`, as UCP's hosting rules require? **Warn** only — merchants fetch this URL per request, and `no-store`/missing/short policies just make them refetch it every time |
 
 Only `fail` gates the verdict (`ok: false`, exit 1). A `warn` never does — read the `checks` array when you want it.
@@ -133,7 +134,7 @@ An older-but-supported release (e.g. 2026-04-08 while 2026-08-25 is latest) is `
 
 ```sh
 ucp doctor                   # full check; exit 1 when ok:false
-ucp doctor --skip-network    # local-only (CI, offline); omits the three hosted-identity checks
+ucp doctor --skip-network    # local-only (CI, offline); omits every hosted-identity check
 ```
 
 The `--help` output is authoritative for current check coverage.

@@ -274,6 +274,30 @@ describe('fetchCached', () => {
     })
   })
 
+  // Not the caller's fetchFailed code: a redirecting profile URL is a
+  // permanent hosting fault, and wrapping it would mark it `retryable` and
+  // bury the Location in a `cause` the error envelope never serializes.
+  it('passes a refused redirect through, naming the Location, not retryable', async () => {
+    const fetch = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 301,
+          headers: { location: 'https://www.example.com/.well-known/ucp' },
+        }),
+    ) as unknown as typeof globalThis.fetch
+    const err = await fetchCached('https://example.com/.well-known/ucp', {
+      cacheDir,
+      errorCodes: codes,
+      fetch,
+    }).catch((e: unknown) => e)
+    expect(err).toMatchObject({
+      code: 'TRANSPORT_REDIRECT_REFUSED',
+      http_status: 301,
+      retryable: false,
+    })
+    expect((err as Error).message).toContain('https://www.example.com/.well-known/ucp')
+  })
+
   it('throws fetchFailed code on HTTP 5xx with retryable=true', async () => {
     const mock = makeMockFetch([{ status: 503, body: 'unavailable' }])
     await expect(
