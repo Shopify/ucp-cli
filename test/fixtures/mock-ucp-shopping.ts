@@ -153,10 +153,15 @@ const UPDATE_CHECKOUT_SCHEMA = {
 
 const COMPLETE_CHECKOUT_SCHEMA = {
   type: 'object',
-  required: ['id'],
+  required: ['meta', 'id', 'checkout'],
   properties: {
-    id: { type: 'string' },
     meta: { type: 'object' },
+    id: { type: 'string' },
+    checkout: {
+      type: 'object',
+      required: ['payment'],
+      properties: { payment: { type: 'object' } },
+    },
   },
 }
 
