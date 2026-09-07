@@ -279,8 +279,34 @@ describe('eval: purchase journey', () => {
 
   // ─── Step 5: complete + escalation ────────────────────────────────────────
 
-  it('step 5 — complete_checkout: requires_escalation envelope + CTA copy + exits 0', async () => {
-    const { json, code, stderr } = await j.run(['checkout', 'complete', MOCK_CHECKOUT_ID])
+  it('step 5a — complete --input-schema: exposes required payment without wire fields', async () => {
+    const { json, code } = await j.run(['checkout', 'complete', '--input-schema'])
+    expect(code).toBe(0)
+
+    const data = (json as Record<string, unknown>).result as Record<string, unknown>
+    const tool = data.tool as Record<string, unknown>
+    const schema = tool.inputSchema as Record<string, unknown>
+    expect(schema).toMatchObject({
+      type: 'object',
+      required: ['payment'],
+      properties: { payment: { type: 'object' } },
+    })
+    const properties = schema.properties as Record<string, unknown>
+    expect(properties).not.toHaveProperty('checkout')
+    expect(properties).not.toHaveProperty('meta')
+    expect(properties).not.toHaveProperty('id')
+  })
+
+  it('step 5b — complete_checkout: accepts an unwrapped payment body and exits 0', async () => {
+    // The mock's wire schema requires checkout.payment. Success with this
+    // CLI-facing body proves the dispatcher wraps it before local validation.
+    const { json, code, stderr } = await j.run([
+      'checkout',
+      'complete',
+      MOCK_CHECKOUT_ID,
+      '--input',
+      '{"payment":{}}',
+    ])
 
     // CLI exits 0 — requires_escalation is a normal UCP checkout response.
     expect(code).toBe(0)

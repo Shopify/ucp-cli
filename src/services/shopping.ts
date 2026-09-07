@@ -63,7 +63,7 @@ export const cancelCart = op('cancel_cart', 'cart')
 //   create_checkout   → { meta, checkout }
 //   get_checkout      → { meta, id }
 //   update_checkout   → { meta, id, checkout }
-//   complete_checkout → { meta, id }             (idempotency-key required)
+//   complete_checkout → { meta, id, checkout }   (idempotency-key required)
 //   cancel_checkout   → { meta, id }             (idempotency-key required)
 
 export const createCheckout = op('create_checkout', 'checkout')

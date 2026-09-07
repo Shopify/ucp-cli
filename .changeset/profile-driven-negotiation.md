@@ -45,6 +45,8 @@ Upgrading also raises the runtime floor to Node.js `22.19.0` (breaking change 7)
 
    Direct refusals raise `TRANSPORT_REDIRECT_REFUSED`, naming the status and the refused `Location`. A redirecting agent profile URL surfaces in `ucp doctor` as a single failing `profile-redirect` check. Serve documents directly and put each final HTTPS URL in the declaration that names it.
 
+Fixed `checkout complete` body handling so it accepts input consistently with other write operations.
+
 ## Error codes
 
 Eight codes are added relative to `0.8.0`, and none are removed: `AGENT_PROFILE_SCHEMA_INVALID`, `AGENT_PROFILE_SERVICE_UNDECLARED`, `AGENT_PROFILE_UNREACHABLE`, `AGENT_PROFILE_VERSION_MISMATCH`, `AGENT_PROFILE_VERSION_UNSUPPORTED`, `PROFILE_VERSION_MISMATCH`, `SERVICE_VERSION_INCOMPATIBLE`, and `TRANSPORT_REDIRECT_REFUSED`.

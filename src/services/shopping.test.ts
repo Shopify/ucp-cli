@@ -81,6 +81,11 @@ const META_REQ = { ...META, required: ['ucp-agent', 'idempotency-key'] }
 
 const CART_BODY = { type: 'object' }
 const CHECKOUT_BODY = { type: 'object' }
+const COMPLETE_CHECKOUT_BODY = {
+  type: 'object',
+  required: ['payment'],
+  properties: { payment: { type: 'object' } },
+}
 const CATALOG_BODY = { type: 'object' }
 
 function topLevel(props: Record<string, object>, required = Object.keys(props)) {
@@ -167,8 +172,12 @@ const ROWS: Row[] = [
   {
     fn: completeCheckout,
     tool: 'complete_checkout',
-    input: { id: 'co_x' },
-    schema: topLevel({ meta: META_REQ, id: { type: 'string' } }),
+    input: { id: 'co_x', checkout: { payment: {} } },
+    schema: topLevel({
+      meta: META_REQ,
+      id: { type: 'string' },
+      checkout: COMPLETE_CHECKOUT_BODY,
+    }),
   },
   {
     fn: cancelCheckout,

@@ -689,7 +689,7 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       description: 'Complete a checkout and place the order',
       args: argsId,
       options: operationOptions,
-      run: opRun(completeCheckoutImpl, 'top'),
+      run: opRun(completeCheckoutImpl, 'top', 'checkout'),
     })
     .command('cancel', {
       description: 'Cancel a checkout',
