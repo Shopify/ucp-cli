@@ -75,7 +75,7 @@
     "json-schema-to-zod": "^2.8.1",
     "lint-staged": "^17.0.8",
     "tsup": "^8.5.1",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vite": "^8.1.2",
     "vitest": "^4.1.9",
     "zod": "^4.4.3"
