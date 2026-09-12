@@ -23,7 +23,7 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { agentProfileFixture } from '../test-utils.js'
+import { profileFixture } from '../test-utils.js'
 import {
   cancelCart,
   cancelCheckout,
@@ -46,9 +46,9 @@ const PROFILE_URL = 'https://agent.example.com/.well-known/ucp'
 // The platform side of negotiation: Shopify's published 2026-08-25 agent
 // profile, fetched-and-validated. It declares `dev.ucp.shopping` over mcp at
 // that exact version, which is what the PROFILE fixture below offers.
-const AGENT = agentProfileFixture({ version: '2026-08-25' })
+const RUNTIME_PROFILE = profileFixture({ version: '2026-08-25', url: PROFILE_URL })
 
-const PROFILE = {
+const BUSINESS_PROFILE = {
   ucp: {
     version: '2026-08-25',
     services: {
@@ -208,7 +208,7 @@ function makeFetch(toolName: string, schema: object, resultBody: unknown = { ok:
     const body =
       typeof init.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : undefined
     if (body !== undefined) calls.push(body)
-    if (u.endsWith('/.well-known/ucp')) return jsonResponse(PROFILE)
+    if (u.endsWith('/.well-known/ucp')) return jsonResponse(BUSINESS_PROFILE)
     if (body?.method === 'tools/list') {
       return jsonResponse({
         jsonrpc: '2.0',
@@ -233,7 +233,7 @@ describe.each(ROWS)('$tool', ({ fn, tool, input, schema }) => {
 
   it('dispatches via the expected tool name with user input passed through', async () => {
     const { fetch, calls } = makeFetch(tool, schema)
-    await fn(BUSINESS_URL, input, { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL })
+    await fn(BUSINESS_URL, input, { cacheDir, profile: RUNTIME_PROFILE, fetch })
 
     const toolsCall = calls.find((c) => c.method === 'tools/call')
     expect(toolsCall).toBeDefined()
@@ -248,7 +248,7 @@ describe.each(ROWS)('$tool', ({ fn, tool, input, schema }) => {
   it('throws OPERATION_NOT_OFFERED when tools/list omits the expected tool', async () => {
     const fetch = vi.fn(async (url: string | URL | Request, init: RequestInit = {}) => {
       const u = String(url)
-      if (u.endsWith('/.well-known/ucp')) return jsonResponse(PROFILE)
+      if (u.endsWith('/.well-known/ucp')) return jsonResponse(BUSINESS_PROFILE)
       const body =
         typeof init.body === 'string' ? (JSON.parse(init.body) as { id?: unknown }) : undefined
       return jsonResponse({
@@ -259,7 +259,7 @@ describe.each(ROWS)('$tool', ({ fn, tool, input, schema }) => {
     }) as unknown as typeof globalThis.fetch
 
     await expect(
-      fn(BUSINESS_URL, input, { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL }),
+      fn(BUSINESS_URL, input, { cacheDir, profile: RUNTIME_PROFILE, fetch }),
     ).rejects.toMatchObject({ code: 'OPERATION_NOT_OFFERED', layer: 'transport' })
   })
 })

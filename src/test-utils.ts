@@ -8,9 +8,21 @@
 
 import type { ProfileCliDependencies } from './cli/profile.js'
 import type { createUcpCli } from './cli.js'
-import { type AgentProfile, loadAgentProfile } from './core/agent.js'
+import {
+  type AgentProfile,
+  createDiyProfile,
+  loadAgentProfile,
+  type Profile,
+  type ProfileSource,
+} from './core/agent.js'
+import { classifyStoredProfile, type ProfileKind } from './core/legacy-profile.js'
 import type { PlatformProfile } from './core/profile.js'
-import type { ActiveSession, UserProfile } from './core/profile-store.js'
+import type {
+  ActiveSession,
+  DiyUserProfile,
+  ProfileMeta,
+  UserProfile,
+} from './core/profile-store.js'
 import { LATEST, RELEASES, type Version } from './core/releases.js'
 
 const BLANK_BODY: PlatformProfile = {
@@ -18,17 +30,45 @@ const BLANK_BODY: PlatformProfile = {
   keys: [],
 }
 
-const BLANK_META = {
+const BLANK_META: ProfileMeta = {
   created_at: '2026-05-01T00:00:00.000Z',
 }
 
-export function userProfile(name: string, overrides: Partial<UserProfile> = {}): UserProfile {
-  return { name, body: BLANK_BODY, meta: BLANK_META, ...overrides }
+interface UserProfileOverrides {
+  body?: PlatformProfile | undefined
+  meta?: ProfileMeta | undefined
+  kind?: ProfileKind | undefined
+}
+
+/**
+ * A stubbed `readUserProfile` result. `kind` is CLASSIFIED, not defaulted, so
+ * a stub cannot claim a kind the real store would never return for the same
+ * two documents; pass `kind` explicitly to model a marked profile.
+ */
+export function userProfile(name: string): DiyUserProfile
+export function userProfile(name: string, overrides: UserProfileOverrides): UserProfile
+export function userProfile(name: string, overrides: UserProfileOverrides = {}): UserProfile {
+  const body = overrides.body ?? BLANK_BODY
+  const meta = overrides.meta ?? BLANK_META
+  const kind = overrides.kind ?? classifyStoredProfile(body, meta).kind
+  if (kind === 'managed') {
+    return {
+      name,
+      meta,
+      kind,
+      ...(overrides.body !== undefined ? { body: overrides.body } : {}),
+    }
+  }
+  return { name, body, meta, kind }
 }
 
 export interface AgentProfileFixtureOptions {
   /** Spec release the profile declares. Defaults to {@link LATEST}. */
   version?: Version
+  /** Body provenance. Defaults to a locally authored DIY rendering. */
+  source?: ProfileSource
+  /** Explicit URL-override provenance. Defaults false. */
+  urlOverride?: boolean
   /** Local profile name used in messages. Defaults to `'agent'`. */
   name?: string
   /** Hosted URL. Defaults to the release's published agent-profile URL. */
@@ -58,7 +98,38 @@ export function agentProfileFixture(options: AgentProfileFixtureOptions = {}): A
   return loadAgentProfile({
     body,
     url: options.url ?? release.defaultAgentProfileUrl,
+    source: options.source ?? 'diy',
+    urlOverride: options.urlOverride ?? false,
     name: options.name ?? 'agent',
+  })
+}
+
+/**
+ * One rendering of a runtime {@link Profile}, asserting it exists.
+ * `Profile.renderings` is `Partial` by contract (a DIY Profile fills exactly
+ * one key), so tests that know which key they seeded say so here instead of
+ * spreading non-null assertions.
+ */
+export function rendering(profile: Profile, version: Version): AgentProfile {
+  const found = profile.renderings[version]
+  if (found === undefined) {
+    throw new Error(
+      `test fixture has no UCP ${version} rendering (has: ${Object.keys(profile.renderings).join(', ') || 'none'})`,
+    )
+  }
+  return found
+}
+
+export type ProfileFixtureOptions = Omit<AgentProfileFixtureOptions, 'source'>
+
+/** Build a singleton DIY runtime Profile around {@link agentProfileFixture}. */
+export function profileFixture(options: ProfileFixtureOptions = {}): Profile {
+  const agent = agentProfileFixture(options)
+  return createDiyProfile({
+    body: agent.body,
+    url: agent.url,
+    urlOverride: agent.urlOverride,
+    name: agent.name ?? 'agent',
   })
 }
 
@@ -88,10 +159,12 @@ export function defaultProfileDeps(): ProfileCliDependencies {
     listProfiles: async () => [],
     profileExists: async () => false,
     readUserProfile: async (name: string) => userProfile(name),
+    readProfileMeta: async () => BLANK_META,
     saveUserProfile: async (input) =>
       userProfile(input.name, { meta: input.meta, body: input.body }),
     readActive: async () => ({}),
     writeActive: async () => {},
+    env: {},
   }
 }
 

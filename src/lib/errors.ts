@@ -16,8 +16,10 @@
 //      IncurError with a required `layer: ErrorLayer` field. Every internal
 //      throw site uses this so PROTOCOL §4.2's "MUST emit one of the four"
 //      requirement is enforced at the call site, not via a centralized
-//      catch-and-translate that might miss code paths. Dispatcher middleware
-//      reads `.layer` off the caught error directly.
+//      catch-and-translate that might miss code paths. `layer` stays
+//      in-process — the dispatcher middleware never reads it and it is
+//      never serialized — so the throw sites plus `error-layers.test.ts`
+//      are what enforce it.
 //
 //   3. Incur's own `Errors` namespace — additional throwable classes
 //      (ValidationError, ParseError) for cases that don't yet need a UCP layer
@@ -34,15 +36,22 @@
 //
 // ── Naming rule (adopted after the 2026-09 API review) ─────────────────────
 //
-//   PROFILE_*        the BUSINESS's document (`/.well-known/ucp` and its
-//                    `supported_versions` leaves). Merchant acts, or nobody.
-//   AGENT_PROFILE_*  OUR hosted document (the URL we advertise as
-//                    `meta.ucp-agent.profile`). The agent acts.
+//   PROFILE_FETCH_FAILED / PROFILE_INVALID_JSON / PROFILE_SCHEMA_INVALID /
+//   PROFILE_VERSION_MISMATCH concern the BUSINESS's discovery document
+//   (`/.well-known/ucp` and `supported_versions` leaves).
+//   AGENT_PROFILE_* concerns OUR hosted rendering (the URL advertised as
+//   `meta.ucp-agent.profile`).
+//   PROFILE_NOT_FOUND / PROFILE_ALREADY_EXISTS / PROFILE_INVALID_NAME /
+//   PROFILE_INIT_REQUIRES_NAME concern the local Profile store and commands.
 //
-// No code may mean both. `context.kind` cannot distinguish them for callers:
-// `cli.ts`'s error middleware emits `{code, message, retryable}` or `{code,
-// message, cta}` and NEVER serializes `context`. Anything an agent must branch
-// on has to live in `code`, `message`, or `cta`.
+// The prefix alone is therefore not provenance; callers branch on the full
+// code. No individual code may mean both sides. `context.kind` cannot rescue
+// an ambiguous code because the emitted envelope is flat `{code, message}`
+// plus an independently optional `retryable` and `cta` (both may appear on
+// one error), and it NEVER serializes `layer`, `context`, or `http_status`.
+// Anything an agent must branch on has to live in `code`, `message`, or
+// `cta` — and even `cta` is advisory, since the CLI framework appends its own maintenance
+// commands (skills staleness, update available) to whatever cta is emitted.
 
 /**
  * Public registry of CLI-emitted error codes. Pre-v1, this should still be
@@ -62,11 +71,11 @@ export const ErrorCodes = {
    */
   PROFILE_SCHEMA_INVALID: 'PROFILE_SCHEMA_INVALID',
   /**
-   * The business does not offer the exact version the active agent profile
-   * speaks: neither the top-level `/.well-known/ucp` `ucp.version` nor any
-   * `supported_versions` key equals the profile's `ucp.version`. Recovery is
-   * agent-side: switch to a profile whose version the business offers (the
-   * message carries a hint when a local profile qualifies) or upgrade the CLI.
+   * The Business offer has no exact release in common with the active runtime
+   * Profile's eligible rendering set. A DIY or URL-only ad-hoc Profile
+   * contributes one rendering; managed contributes every installed rendering.
+   * Body provenance and explicit URL precedence are independent: any active
+   * URL override must be removed/fixed before Profile switching can help.
    */
   PROTOCOL_VERSION_INCOMPATIBLE: 'PROTOCOL_VERSION_INCOMPATIBLE',
   /**
@@ -214,18 +223,19 @@ export const ErrorCodes = {
    */
   AGENT_PROFILE_VERSION_UNSUPPORTED: 'AGENT_PROFILE_VERSION_UNSUPPORTED',
   /**
-   * OUR profile is internally inconsistent: a `dev.ucp.*` entry at a version
-   * other than the profile's own `ucp.version` (the snapshot rule we hold
-   * merchants to, applied to ourselves). The local `profile.json` is the
-   * declaration on every named-profile path, so this is always fatal.
+   * OUR selected rendering is internally inconsistent: a `dev.ucp.*` entry at
+   * a version other than its own `ucp.version` (the snapshot rule we hold
+   * merchants to, applied to ourselves). This is always fatal; bundled
+   * renderings are regression-tested never to contain the defect.
    */
   AGENT_PROFILE_VERSION_MISMATCH: 'AGENT_PROFILE_VERSION_MISMATCH',
   /** OUR hosted document failed its release's platform-profile schema. */
   AGENT_PROFILE_SCHEMA_INVALID: 'AGENT_PROFILE_SCHEMA_INVALID',
   /**
    * A service was explicitly requested (`--capability`, operation dispatch),
-   * the BUSINESS offers it, and OUR profile does not declare it — so there is
-   * no platform side to negotiate with. Add the service to the profile.
+   * the BUSINESS offers it, and OUR selected rendering does not declare it —
+   * so there is no platform side to negotiate with. A DIY document can be
+   * edited and published; managed/URL renderings require leaving that source.
    *
    * When neither side has the id the answer is `CAPABILITY_NOT_OFFERED`
    * instead: a typo is not a "go edit your profile" problem.
@@ -324,23 +334,26 @@ export interface UcpErrorOptions {
   /** Underlying cause for the cause chain. */
   cause?: Error
   /**
-   * HTTP status when the error originated from an HTTP response.
-   * Surfaces in `error.http_status` on the wire envelope (PROTOCOL §4.3
-   * transport layer). Only meaningful for `layer: 'transport'`.
+   * HTTP status when the error originated from an HTTP response. Only
+   * meaningful for `layer: 'transport'`. IN-PROCESS DIAGNOSTIC ONLY: the
+   * current CLI middleware does not serialize it, so anything a caller must
+   * see has to be folded into `message` (or `cta`) at the throw site.
    */
   http_status?: number
   /**
    * Diagnostic context — response body, validation field-paths, anything
-   * that helps the caller act on the error. Surfaces unchanged as
-   * `error.context` on the wire envelope (PROTOCOL §4.3, transport
-   * layer). Distinct from incur `BaseError.details: string`, which is
-   * the cause-chain message extraction; ours is structured payload.
+   * that helps in-process code act on the error (the CLI middleware reads
+   * `context.kind` to pick a recovery cta, for instance). IN-PROCESS ONLY:
+   * it is never serialized onto the emitted error, which is why
+   * `src/cli-errors.test.ts` pins remedies to `code`/`message`/`cta`.
+   * Distinct from incur `BaseError.details: string`, which is the
+   * cause-chain message extraction; ours is structured payload.
    */
   context?: unknown
   /**
    * Recovery hint — what the agent should do next. First-class field
-   * (not nested in `context`) so agents can reliably destructure
-   * `error.cta` without spelunking diagnostic blobs. Wire shape matches
+   * (not nested in `context`) so agents can reliably destructure the flat
+   * `cta` without spelunking diagnostic blobs. Wire shape matches
    * {@link CtaBlock} on error envelopes (PROTOCOL §4.3): `description`
    * plus an ordered `commands[]`, each with `command` + optional
    * `description`.
@@ -350,9 +363,12 @@ export interface UcpErrorOptions {
 
 /**
  * Throwable error carrying a {@link ErrorLayer}. Extends incur's IncurError
- * so it flows through `cli.serve()`'s existing catch path; dispatcher
- * dispatcher middleware reads `.layer`, `.http_status`, and `.context`
- * to populate the outbound error envelope.
+ * so it flows through `cli.serve()`'s existing catch path. `.layer`,
+ * `.http_status`, and `.context` are in-process fields, never serialized:
+ * `cli.ts`'s error middleware reads `.context` (and `.cta`) to choose what to
+ * re-emit and never reads `.layer`, which is the per-site classification that
+ * the throw sites and `error-layers.test.ts` enforce. Only `code`, `message`,
+ * `retryable`, and `cta` are emitted on the error the caller sees.
  *
  * Throw at the call site that knows the layer, not at a centralized
  * wrapper. A required field at construction can't be skipped.

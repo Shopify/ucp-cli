@@ -9,13 +9,15 @@ import { describe, expect, it } from 'vitest'
 import type { ResolvedSession, ResolveSessionOptions } from './cli/session.js'
 import { createUcpCli, type ShoppingHelperDep, type UcpCliDependencies } from './cli.js'
 import * as shoppingHelpers from './services/shopping.js'
-import { serveCli } from './test-utils.js'
+import { profileFixture, serveCli } from './test-utils.js'
 
 const BUSINESS_URL = 'https://shop.example.com'
 const PROFILE_URL = 'https://agent.example.com/.well-known/ucp'
+const PROFILE = profileFixture({ url: PROFILE_URL })
 
 const resolveSession = async (options: ResolveSessionOptions = {}): Promise<ResolvedSession> => ({
-  profile: { name: 'agent', profileUrl: PROFILE_URL },
+  profile: PROFILE,
+  profileMeta: {},
   ...(options.business !== undefined ? { business: options.business } : {}),
 })
 

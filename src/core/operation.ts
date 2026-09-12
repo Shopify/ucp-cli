@@ -26,7 +26,7 @@ import { vlog } from './verbose.js'
 
 export type CallOperationCallerOptions = Pick<
   DiscoverOptions,
-  'agent' | 'cacheDir' | 'fetch' | 'force' | 'headers' | 'profileUrl' | 'profileName' | 'signal'
+  'cacheDir' | 'fetch' | 'force' | 'headers' | 'profile' | 'signal'
 > & {
   /**
    * `--dry-run`: run the full pre-flight (discover → meta inject → schema
@@ -35,7 +35,8 @@ export type CallOperationCallerOptions = Pick<
    * including the `meta.idempotency-key` UUID and `meta.ucp-agent` envelope.
    * Validation still fires — a payload that would fail SCHEMA_VALIDATION_FAILED
    * with a real call also fails here. That's deliberate: dry-run should match
-   * a real call's behavior up to (but not including) network I/O.
+   * a real call through discovery and validation, stopping only before the
+   * operation's `tools/call`. Cold or forced discovery can still use network.
    */
   dryRun?: boolean
   /**
@@ -49,36 +50,20 @@ export type CallOperationCallerOptions = Pick<
   _onDiscover?: (discovered: DiscoveredBusiness) => void
 }
 
-// Caller-facing options keep `profileUrl` optional so help/diagnostics paths
-// can omit it; dispatch requires it. forwardCallOptions narrows to the
-// dispatcher contract and rejects undefined optional keys explicitly so we
-// don't transmit `key: undefined` (which exactOptionalPropertyTypes treats as
-// distinct from absence and which the dispatcher rejects).
-export function forwardCallOptions(
-  options: CallOperationCallerOptions,
-  opName: string,
-): CallOperationOptions {
-  if (options.profileUrl === undefined) {
-    throw new UcpError({
-      layer: 'client',
-      code: ErrorCodes.INVALID_INPUT,
-      message: `${opName} operation requires a profile URL`,
-    })
-  }
-  return {
-    profileUrl: options.profileUrl,
-    ...omitUndefined({
-      agent: options.agent,
-      cacheDir: options.cacheDir,
-      fetch: options.fetch,
-      force: options.force,
-      headers: options.headers,
-      profileName: options.profileName,
-      signal: options.signal,
-      dryRun: options.dryRun,
-      _onDiscover: options._onDiscover,
-    }),
-  }
+// Keep the forwarding seam explicit so undefined optional keys are omitted
+// (exactOptionalPropertyTypes treats `key: undefined` as distinct from
+// absence). Profile selection, including its URL, belongs to discovery.
+export function forwardCallOptions(options: CallOperationCallerOptions): CallOperationOptions {
+  return omitUndefined({
+    cacheDir: options.cacheDir,
+    fetch: options.fetch,
+    force: options.force,
+    headers: options.headers,
+    profile: options.profile,
+    signal: options.signal,
+    dryRun: options.dryRun,
+    _onDiscover: options._onDiscover,
+  })
 }
 
 export interface CallOperationInput {
@@ -92,9 +77,8 @@ export interface CallOperationInput {
 // once and exposes typed per-tool functions. Keeping the helpers as named
 // exports — not a Map — preserves IDE auto-import and tree-shaking.
 //
-// `opName` is purely diagnostic: it's the short label that appears in the
-// "missing profile URL" error message and aligns with the body sub-domain
-// the helper operates on (e.g. 'cart', 'checkout', 'catalog').
+// `opName` aligns with the body sub-domain the helper operates on (e.g.
+// 'cart', 'checkout', 'catalog') and is used by CLI view resolution.
 //
 // The returned function carries `capability`, `toolName`, and `opName` as own
 // properties. `--input-schema` reads capability/toolName to look up the
@@ -119,22 +103,14 @@ export function serviceOp(capability: string, toolName: string, opName: string):
       input: Record<string, unknown>,
       options: CallOperationCallerOptions = {},
     ): Promise<unknown> =>
-      callOperation(
-        businessUrl,
-        { capability, toolName, input },
-        forwardCallOptions(options, opName),
-      ),
+      callOperation(businessUrl, { capability, toolName, input }, forwardCallOptions(options)),
     { capability, toolName, opName },
   )
   return helper
 }
 
 export interface CallOperationOptions
-  extends Pick<
-    DiscoverOptions,
-    'agent' | 'cacheDir' | 'fetch' | 'force' | 'headers' | 'profileName' | 'signal'
-  > {
-  profileUrl: string
+  extends Pick<DiscoverOptions, 'cacheDir' | 'fetch' | 'force' | 'headers' | 'profile' | 'signal'> {
   dryRun?: boolean
   /** See {@link CallOperationCallerOptions._onDiscover}. */
   _onDiscover?: (discovered: DiscoveredBusiness) => void
@@ -184,18 +160,16 @@ export function isDryRunPreview(value: unknown): value is DryRunPreview {
 export async function callOperation<T = unknown>(
   businessUrl: string,
   input: CallOperationInput,
-  options: CallOperationOptions,
+  options: CallOperationOptions = {},
 ): Promise<T> {
   const resolved = await discover(businessUrl, {
     capabilities: [input.capability],
-    profileUrl: options.profileUrl,
     ...omitUndefined({
-      agent: options.agent,
       cacheDir: options.cacheDir,
       fetch: options.fetch,
       force: options.force,
       headers: options.headers,
-      profileName: options.profileName,
+      profile: options.profile,
       signal: options.signal,
     }),
   })
@@ -220,7 +194,7 @@ export async function callOperation<T = unknown>(
     })
   }
 
-  const args = withProfileMetadata(input.input, options.profileUrl)
+  const args = withProfileMetadata(input.input, resolved.protocol.agentProfileUrl)
   validateOperationInput({
     business: resolved.business,
     capability: input.capability,
@@ -241,7 +215,7 @@ export async function callOperation<T = unknown>(
     // surface for what is fundamentally a debug detour.
     const preview: DryRunPreview = {
       dry_run: true,
-      note: 'No network call issued. `arguments` is exactly what would hit the wire, including the auto-injected meta.idempotency-key and meta.ucp-agent. Re-run without --dry-run to dispatch. Envelope root carries `business`/`endpoint`/`transport` — the canonical dispatch target.',
+      note: "The operation's tools/call request was not issued. Discovery may still have used network on a cold or forced cache. `arguments` is exactly what the operation would send, including the auto-injected meta.idempotency-key and meta.ucp-agent. Re-run without --dry-run to dispatch. Envelope root carries `business`/`endpoint`/`transport` — the canonical dispatch target.",
       capability: input.capability,
       tool: { name: tool.name },
       arguments: args,
@@ -419,6 +393,7 @@ function validateOperationInput(opts: {
     // reaches the wire once incur supports passthrough of `error.context`
     // (today's incur strips it from the thrown-error catch path).
     context: {
+      kind: 'operation-input',
       business: opts.business,
       capability: opts.capability,
       tool: opts.toolName,
@@ -452,6 +427,7 @@ function flagUnknownPlainFields(opts: {
       code: ErrorCodes.SCHEMA_VALIDATION_FAILED,
       message: `operation input contains unknown field${unknown.length === 1 ? '' : 's'} for "${opts.toolName}": ${formatUnknownFields(unknown)}. The business's advertised input schema does not list this field, and per client policy only listed fields plus reverse-DNS extension keys are sent (some canonical UCP fields are still spec-valid but require explicit business support). Run \`<op> --input-schema\` to see what this business actually accepts.`,
       context: {
+        kind: 'operation-input',
         business: opts.business,
         capability: opts.capability,
         tool: opts.toolName,

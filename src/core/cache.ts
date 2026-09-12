@@ -2,14 +2,14 @@
 //
 // Used by modules that fetch UCP artifacts, such as business profiles and
 // tools/list responses. This module owns cache-entry envelope shape,
-// URL-origin cache naming, Cache-Control TTL parsing, and the shared fetch
+// canonical URL cache naming, Cache-Control TTL parsing, and the shared fetch
 // timeout/error-mapping behavior.
 //
 // Callers own three things this primitive should not know: which cache
 // subdirectory to use, which schema (if any) validates the body, and which
 // UCP error codes should be surfaced for that artifact type. Callers also
 // validate protocol-specific URL rules before passing externally supplied URLs
-// here; the cache layer only canonicalizes already-accepted origins.
+// here; the cache layer only canonicalizes already-accepted URLs.
 
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
@@ -60,6 +60,27 @@ export function originToFilename(input: string | URL): string {
     return createHash('sha256').update(url.origin).digest('hex')
   }
   return safe
+}
+
+function canonicalUrl(input: string | URL): string {
+  return (typeof input === 'string' ? new URL(input) : input).toString()
+}
+
+/**
+ * Derive a filesystem-safe, collision-resistant key from a canonical full URL.
+ * Path and query are part of the identity; SHA-256 keeps arbitrary URL bytes
+ * (including credentials or query values) out of filenames.
+ */
+export function urlToFilename(input: string | URL): string {
+  return createHash('sha256').update(canonicalUrl(input)).digest('hex')
+}
+
+function isSameCanonicalUrl(storedUrl: string, requestedUrl: string): boolean {
+  try {
+    return canonicalUrl(storedUrl) === requestedUrl
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -145,8 +166,9 @@ export interface FetchCachedOptions<T = unknown> {
 
 /**
  * Fetch a URL with an on-disk cache. Reads cache first when fresh, fetches
- * + writes on miss/expiry. Filename is derived from `URL.origin`; cache
- * envelope is the {@link cacheEntrySchema} shape.
+ * + writes on miss/expiry. The primary filename is a hash of the canonical
+ * full URL; a matching pre-change origin-key entry is read as a legacy fallback.
+ * Cache envelope is the {@link cacheEntrySchema} shape.
  *
  * Throws `UcpError(layer, code, ...)` on every failure mode using the
  * caller-supplied codes, except a redirect refused by `ucpFetch`
@@ -157,15 +179,31 @@ export async function fetchCached<T = unknown>(
   options: FetchCachedOptions<T>,
 ): Promise<T> {
   const layer: ErrorLayer = options.errorLayer ?? 'transport'
-  const cachePath = join(options.cacheDir, `${originToFilename(url)}.json`)
+  const requestedUrl = canonicalUrl(url)
+  const cachePath = join(options.cacheDir, `${urlToFilename(requestedUrl)}.json`)
+  const legacyCachePath = join(options.cacheDir, `${originToFilename(requestedUrl)}.json`)
+  const matchesRequestedUrl = (storedUrl: string) => isSameCanonicalUrl(storedUrl, requestedUrl)
 
   if (options.force !== true) {
-    const cached = await readCachedBody<T>(cachePath, options.schema)
+    const cached = await readCachedBody<T>(cachePath, options.schema, matchesRequestedUrl)
     if (cached !== null && cached.expires_at > Date.now()) {
       vlog(
         `cache: HIT ${cachePath} (expires in ${Math.max(0, Math.round((cached.expires_at - Date.now()) / 1000))}s)`,
       )
       return cached.body
+    }
+
+    // Pre-full-URL releases wrote one file per origin. Keep a fresh entry hot
+    // only when no usable primary exists and its embedded URL proves it belongs
+    // to this exact request. An expired primary must fetch rather than roll back.
+    if (cached === null) {
+      const legacy = await readCachedBody<T>(legacyCachePath, options.schema, matchesRequestedUrl)
+      if (legacy !== null && legacy.expires_at > Date.now()) {
+        vlog(
+          `cache: HIT ${legacyCachePath} (legacy; expires in ${Math.max(0, Math.round((legacy.expires_at - Date.now()) / 1000))}s)`,
+        )
+        return legacy.body
+      }
     }
   }
   vlog(`cache: MISS ${cachePath}${options.force === true ? ' (force)' : ''} → fetch ${url}`)
@@ -256,7 +294,7 @@ export async function fetchCached<T = unknown>(
   if (maxAge !== null) {
     const now = Date.now()
     await writeCachedBody(cachePath, {
-      url,
+      url: requestedUrl,
       fetched_at: now,
       expires_at: now + maxAge * 1000,
       body,
@@ -301,7 +339,11 @@ export async function cacheCompute<T>(options: CacheComputeOptions<T>): Promise<
   const cachePath = join(options.cacheDir, `${options.cacheKey}.json`)
 
   if (options.force !== true) {
-    const cached = await readCachedBody<T>(cachePath, options.schema)
+    const cached = await readCachedBody<T>(
+      cachePath,
+      options.schema,
+      (storedKey) => storedKey === options.cacheKey,
+    )
     if (cached !== null && cached.expires_at > Date.now()) {
       vlog(
         `cache: HIT ${cachePath} (expires in ${Math.max(0, Math.round((cached.expires_at - Date.now()) / 1000))}s)`,
@@ -347,6 +389,7 @@ export async function cacheCompute<T>(options: CacheComputeOptions<T>): Promise<
 async function readCachedBody<T>(
   path: string,
   schema: z.ZodType<T> | undefined,
+  matchesIdentity: (storedIdentity: string) => boolean,
 ): Promise<CacheEntry<T> | null> {
   let raw: string
   try {
@@ -361,7 +404,7 @@ async function readCachedBody<T>(
     return null
   }
   const envelope = cacheEntrySchema.safeParse(parsed)
-  if (!envelope.success) return null
+  if (!envelope.success || !matchesIdentity(envelope.data.url)) return null
   if (schema !== undefined) {
     const body = schema.safeParse(envelope.data.body)
     if (!body.success) return null

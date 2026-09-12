@@ -9,9 +9,9 @@
 // Run with: UCP_LIVE_TESTS=1 pnpm test:integration catalog-live
 //
 // What this checks end-to-end:
-//   1. Fresh UCP_HOME, run `profile init`, NO --business: bare `ucp catalog
-//      search` should resolve through the local profile's runtime
-//      DEFAULT_CATALOG_URL fallback and reach the live endpoint.
+//   1. Fresh UCP_HOME, NO profile init and NO --business: bare `ucp catalog
+//      search` should use the managed Profile, resolve through the runtime
+//      DEFAULT_CATALOG_URL fallback, and reach the live endpoint.
 //   2. The response (a) is a valid UCP envelope (dispatch identity + result
 //      payload present) and (b) carries a CTA. Specific variant shapes
 //      (seller, checkout_url)
@@ -19,11 +19,9 @@
 //      results for a query, and forcing inventory expectations would make this
 //      a brittle gate on Shopify's merchandising state.
 //
-// catalog.shopify.com fetches the advertised `meta.ucp-agent.profile` during
-// dispatch, so the URL must be reachable. `profile init` writes the release
-// default there unless `--profile-url` names one you host yourself, and a
-// profile authored by an older CLI with no `profile_url` falls back to the
-// same release default.
+// catalog.shopify.com may dereference and cache the selected managed Profile
+// URL advertised in `meta.ucp-agent.profile`; ucp-cli itself does not fetch
+// that URL on the commerce path.
 
 import { execFile } from 'node:child_process'
 import { mkdtemp } from 'node:fs/promises'
@@ -32,16 +30,17 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
+import { freshUcpEnv } from '../fixtures/subprocess-env.js'
 
 const execFileAsync = promisify(execFile)
 const CLI_PATH = fileURLToPath(new URL('../../dist/bin.js', import.meta.url))
 
 const LIVE = process.env.UCP_LIVE_TESTS === '1' || process.env.UCP_LIVE_TESTS === 'true'
 
-async function run(env: Record<string, string>, args: string[]) {
+async function run(home: string, args: string[]) {
   try {
     const { stdout, stderr } = await execFileAsync('node', [CLI_PATH, ...args], {
-      env: { ...process.env, ...env },
+      env: freshUcpEnv(home),
     })
     return { stdout, stderr, code: 0 }
   } catch (err) {
@@ -51,17 +50,11 @@ async function run(env: Record<string, string>, args: string[]) {
 }
 
 describe.skipIf(!LIVE)('live: Shopify global catalog (UCP_LIVE_TESTS=1)', () => {
-  it('initialized local profile routes catalog search through DEFAULT_CATALOG_URL', async () => {
-    // Pristine UCP_HOME, then explicit profile init. No `ucp use`; catalog ops
-    // fall through to the runtime DEFAULT_CATALOG_URL synthesized for the local
-    // profile.
+  it('managed default routes catalog search through DEFAULT_CATALOG_URL', async () => {
+    // Pristine UCP_HOME: no profile directory, `ucp use`, or --business.
     const home = await mkdtemp(join(tmpdir(), 'ucp-cli-live-'))
-    const env = { UCP_HOME: home }
 
-    const init = await run(env, ['profile', 'init', '--name', 'agent'])
-    expect(init.code).toBe(0)
-
-    const search = await run(env, ['catalog', 'search', '--set', '/query=trail map'])
+    const search = await run(home, ['catalog', 'search', '--set', '/query=trail map'])
     // Working means: catalog-fallback rung dispatched to the live endpoint
     // and returned a structured UCP envelope with dispatch identity
     // (`business`) and the catalog payload (`result`). The previous

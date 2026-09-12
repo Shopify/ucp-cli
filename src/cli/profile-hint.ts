@@ -1,19 +1,20 @@
 // The `PROTOCOL_VERSION_INCOMPATIBLE` recovery hint.
 //
-// When the business does not offer the version the ACTIVE profile speaks, the
-// remedy is either "upgrade the CLI" (the business is outside our window) or
-// "switch profiles" (some other local profile speaks a version it offers).
-// Only the CLI layer can tell those apart: `core/profile.ts` knows the two
-// version sets but not what profiles exist on this machine, so it throws with
-// `context.offered` and this module supplies the switchable names.
+// This hint applies only when the active body source is a singleton DIY
+// Profile AND its URL is not explicitly overridden. The virtual managed
+// Profile is then an alternative whenever the
+// Business offers an installed release, and matching local Profiles can be
+// retried directly by name. A managed local alias is eligible for every
+// installed rendering; a DIY candidate is eligible only for its body version.
 //
-// A local profile's version comes from `profile.json`, the same document the
-// request path uses for negotiation. The profile URL is deliberately irrelevant
-// here: `ucp doctor` separately reports any disagreement between the file and
-// what that URL serves.
+// Managed runtime failures never scan local aliases: managed already offered
+// every installed rendering. Any explicit URL override never suggests a
+// profile-name switch either, even with a DIY body:
+// --profile-url/UCP_AGENT_PROFILE_URL outranks that switch.
 
+import type { ProfileKind } from '../core/legacy-profile.js'
 import type { listProfiles, readUserProfile } from '../core/profile-store.js'
-import { isSupportedVersion, type Version } from '../core/releases.js'
+import { isSupportedVersion, SUPPORTED_VERSIONS, type Version } from '../core/releases.js'
 import type { CtaBlock } from '../lib/types.js'
 
 export interface ProfileHintDeps {
@@ -23,13 +24,20 @@ export interface ProfileHintDeps {
 
 export interface ProfileVersionCandidate {
   name: string
+  kind: ProfileKind
+  /** DIY body version, or the newest installed Business-offered version for managed. */
   version: Version
 }
 
+function newestInstalledOffered(offered: readonly string[]): Version | undefined {
+  return SUPPORTED_VERSIONS.filter((version) => offered.includes(version)).at(-1)
+}
+
 /**
- * Local profiles (excluding `activeName`) whose `profile.json` declares a
- * version in `offered`. Best-effort: an unreadable profile is skipped, never
- * fatal — this decorates an error that has already happened.
+ * Local profiles (excluding `activeName`) that can negotiate an `offered`
+ * release. A managed alias carries every installed rendering; a DIY Profile
+ * carries only its body version. Best-effort: an unreadable Profile is skipped,
+ * never fatal — this decorates an error that has already happened.
  */
 export async function localProfilesSpeaking(
   offered: readonly string[],
@@ -45,39 +53,77 @@ export async function localProfilesSpeaking(
   const matches: ProfileVersionCandidate[] = []
   for (const name of names) {
     if (name === activeName) continue
-    let version: string
+    let kind: ProfileKind
+    let version: string | undefined
     try {
-      version = (await deps.readUserProfile(name)).body.ucp.version
+      const profile = await deps.readUserProfile(name, { migrate: false })
+      kind = profile.kind
+      version =
+        profile.kind === 'managed' ? newestInstalledOffered(offered) : profile.body.ucp.version
     } catch {
       continue
     }
-    if (!isSupportedVersion(version) || !offered.includes(version)) continue
-    matches.push({ name, version })
+    if (version === undefined || !isSupportedVersion(version) || !offered.includes(version))
+      continue
+    matches.push({ name, kind, version })
   }
   return matches.sort((a, b) => a.name.localeCompare(b.name))
 }
 
 /**
- * Build the switch-profiles CTA for a `PROTOCOL_VERSION_INCOMPATIBLE`.
- * `undefined` when no local profile qualifies — in that case the error's own
- * message ("… offers … / ucp-cli supports …") already carries the only
- * available remedy, and an empty CTA would be worse than none.
+ * Build the recovery CTA for a non-URL-overridden singleton DIY
+ * `PROTOCOL_VERSION_INCOMPATIBLE`. The caller gates URL precedence before
+ * invoking this helper. `undefined` when neither the virtual
+ * managed Profile nor a local Profile can negotiate a Business-offered
+ * installed release.
  *
- * ALL matches are named, not just the first: which one to use depends on what
- * else that profile declares (services and capabilities), and picking for the
- * user hides the choice.
+ * ALL local matches are named, not just the first: which one to use depends on
+ * what else that Profile declares (services and capabilities), and picking for
+ * the user hides the choice.
  */
 export function buildProfileSwitchCta(
   matches: readonly ProfileVersionCandidate[],
+  offered: readonly string[],
   context: { command: string; displayName: string },
 ): CtaBlock | undefined {
-  if (matches.length === 0) return undefined
-  const summary = matches.map((m) => `'${m.name}' speaks ${m.version}`).join(', ')
+  const managedVersion = newestInstalledOffered(offered)
+  if (managedVersion === undefined && matches.length === 0) return undefined
+
+  const summaries = matches.map((match) =>
+    match.kind === 'managed'
+      ? `'${match.name}' is managed and selects newest mutual UCP ${match.version}`
+      : `'${match.name}' speaks ${match.version}`,
+  )
+  const description = [
+    'The active DIY Profile is a singleton.',
+    ...(managedVersion === undefined
+      ? []
+      : [
+          `The Shopify managed Profile offers every installed rendering and will select newest mutual UCP ${managedVersion}. Run \`ucp profile use --managed\`, then retry without an explicit --profile and with UCP_PROFILE unset. Both override active.yaml; leaving either pointed at the DIY Profile would keep it active.`,
+        ]),
+    ...(summaries.length === 0
+      ? []
+      : [`Other matching local Profiles: ${summaries.join(', ')}. No reinstall.`]),
+  ].join(' ')
+
   return {
-    description: `The business offers a version one of your other local profiles speaks (${summary}) — the protocol version comes from the ACTIVE profile's profile.json, so switching profiles switches version. No reinstall.`,
-    commands: matches.map((m) => ({
-      command: `${context.displayName} ${context.command} --profile ${m.name}`.trim(),
-      description: `retry as UCP ${m.version}`,
-    })),
+    description,
+    commands: [
+      ...(managedVersion === undefined
+        ? []
+        : [
+            {
+              command: 'ucp profile use --managed',
+              description: `select the managed Profile; it will negotiate UCP ${managedVersion}`,
+            },
+          ]),
+      ...matches.map((match) => ({
+        command: `${context.displayName} ${context.command} --profile ${match.name}`.trim(),
+        description:
+          match.kind === 'managed'
+            ? `retry with managed Profile '${match.name}', selecting UCP ${match.version}`
+            : `retry as UCP ${match.version}`,
+      })),
+    ],
   }
 }

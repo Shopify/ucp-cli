@@ -18,9 +18,10 @@ import type { ResolvedSession, ResolveSessionOptions } from './cli/session.js'
 import { createUcpCli, isSkillsAddInvocation } from './cli.js'
 import { saveUserProfile, writeActive } from './core/profile-store.js'
 import { setVerboseWriter } from './core/verbose.js'
-import { serveCli, userProfile } from './test-utils.js'
+import { profileFixture, serveCli, userProfile } from './test-utils.js'
 
 const PROFILE_URL = 'https://agent.example.com/.well-known/ucp'
+const RUNTIME_PROFILE = profileFixture({ url: PROFILE_URL })
 
 // Resolver stub used in passing-path tests below: echoes whatever business
 // the caller passed via `opts.business` (i.e. the resolved chain landed at
@@ -28,7 +29,8 @@ const PROFILE_URL = 'https://agent.example.com/.well-known/ucp'
 // (separate describe block) use a different stub that simulates env /
 // active.yaml legs.
 const passthroughSession = async (opts: ResolveSessionOptions = {}): Promise<ResolvedSession> => ({
-  profile: { name: 'agent', profileUrl: PROFILE_URL },
+  profile: RUNTIME_PROFILE,
+  profileMeta: {},
   ...(opts.business !== undefined ? { business: opts.business } : {}),
 })
 
@@ -46,6 +48,7 @@ describe('createUcpCli', () => {
           protocol: {
             version: '2026-08-25',
             source: 'well-known',
+            agentProfileUrl: PROFILE_URL,
             businessProfileUrl: `${args[0]}/.well-known/ucp`,
           },
           expectedCapabilities: [],
@@ -66,8 +69,17 @@ describe('createUcpCli', () => {
       result: { business: 'https://shop.example.com', negotiated: {} },
     })
     expect(calls).toMatchObject([
-      ['https://shop.example.com', { force: false, profileUrl: PROFILE_URL }],
+      ['https://shop.example.com', { force: false, profile: RUNTIME_PROFILE }],
     ])
+  })
+
+  it('describes --dry-run as skipping tools/call, not discovery network I/O', async () => {
+    const { output, exitCode } = await serveCli(createUcpCli(), ['cart', 'create', '--help'])
+
+    expect(exitCode).toBe(0)
+    expect(output).toMatch(/Skips the operation's tools\/call request/i)
+    expect(output).toMatch(/cold or forced discovery may still use network/i)
+    expect(output).not.toMatch(/Skips network I\/O/i)
   })
 
   it('wires catalog search args and options to the search helper', async () => {
@@ -107,7 +119,7 @@ describe('createUcpCli', () => {
       [
         'https://shop.example.com',
         { catalog: { query: 'boots', pagination: { limit: 2 } } },
-        { force: true, profileUrl: PROFILE_URL },
+        { force: true, profile: RUNTIME_PROFILE },
       ],
     ])
   })
@@ -158,7 +170,7 @@ describe('createUcpCli', () => {
       [
         'https://shop.example.com',
         { catalog: { query: 'boots' } },
-        { force: false, profileUrl: PROFILE_URL },
+        { force: false, profile: RUNTIME_PROFILE },
       ],
     ])
   })
@@ -187,7 +199,7 @@ describe('createUcpCli', () => {
       [
         'https://shop.example.com',
         { checkout: { cart_id: 'cart_1', line_items: [] } },
-        { force: false, profileUrl: PROFILE_URL },
+        { force: false, profile: RUNTIME_PROFILE },
       ],
     ])
   })
@@ -222,7 +234,7 @@ describe('createUcpCli', () => {
             buyer: { email: 'b@example.com' },
           },
         },
-        { force: false, profileUrl: PROFILE_URL },
+        { force: false, profile: RUNTIME_PROFILE },
       ],
     ])
   })
@@ -236,9 +248,11 @@ describe('createUcpCli — business resolution', () => {
   const stubSession =
     (sessionBusiness?: string) =>
     async (opts: ResolveSessionOptions = {}): Promise<ResolvedSession> => {
-      const profile = { name: 'agent', profileUrl: PROFILE_URL }
+      const profile = RUNTIME_PROFILE
       const business = opts.business ?? sessionBusiness
-      return business !== undefined ? { profile, business } : { profile }
+      return business !== undefined
+        ? { profile, profileMeta: {}, business }
+        : { profile, profileMeta: {} }
     }
 
   it('uses --business flag when provided (op command)', async () => {
@@ -260,7 +274,7 @@ describe('createUcpCli — business resolution', () => {
     expect(calls[0]).toMatchObject([
       'https://flag.example.com',
       { catalog: {} },
-      { force: false, profileUrl: PROFILE_URL },
+      { force: false, profile: RUNTIME_PROFILE },
     ])
   })
 
@@ -278,7 +292,7 @@ describe('createUcpCli — business resolution', () => {
     expect(calls[0]).toMatchObject([
       'https://session.example.com',
       { catalog: {} },
-      { force: false, profileUrl: PROFILE_URL },
+      { force: false, profile: RUNTIME_PROFILE },
     ])
   })
 
@@ -338,7 +352,7 @@ describe('createUcpCli — business resolution', () => {
     expect(exitCode).toBe(0)
     expect(calls[0]).toMatchObject([
       'https://positional.example.com',
-      { force: false, profileUrl: PROFILE_URL },
+      { force: false, profile: RUNTIME_PROFILE },
     ])
   })
 
@@ -355,7 +369,7 @@ describe('createUcpCli — business resolution', () => {
     expect(exitCode).toBe(0)
     expect(calls[0]).toMatchObject([
       'https://session.example.com',
-      { force: false, profileUrl: PROFILE_URL },
+      { force: false, profile: RUNTIME_PROFILE },
     ])
   })
 
@@ -489,17 +503,25 @@ describe('createUcpCli — MCP mode ignores active.yaml', () => {
     )
   })
 
-  it('ignores the active profile too (nothing selects one in MCP mode)', async () => {
+  it('ignores the active profile and dispatches with managed when no explicit profile exists', async () => {
+    let selectedProfile: unknown
     const cli = createUcpCli({
       inMcpMode: true,
-      createCart: async () => {
-        throw new Error('cart helper must not fire without a profile')
+      createCart: async (_business, _input, options) => {
+        selectedProfile = options.profile
+        return { cart: { id: 'cart_1' } }
       },
     })
 
-    const { output, exitCode } = await serveCli(cli, ['cart', 'create'])
-    expect(exitCode).toBe(1)
-    expect(JSON.parse(output).code).toBe('PROFILE_NOT_FOUND')
+    const { exitCode } = await serveCli(cli, [
+      'cart',
+      'create',
+      '--business',
+      'https://flag.example.invalid',
+    ])
+    expect(exitCode).toBe(0)
+    expect(selectedProfile).toMatchObject({ source: 'managed' })
+    expect(selectedProfile).not.toHaveProperty('name')
   })
 
   it('still honors UCP_PROFILE / UCP_BUSINESS in MCP mode', async () => {
@@ -538,6 +560,7 @@ describe('createUcpCli — catalog fallback (meta.defaults.catalog)', () => {
   // Business origin URL — discovery hits <CATALOG_URL>/.well-known/ucp on
   // the normal `discover()` path; there is no bypass.
   const CATALOG_URL = 'https://catalog.example.invalid'
+  const CATALOG_PROFILE = profileFixture({ name: 'with-catalog', url: PROFILE_URL })
   // Resolver stub that produces a user profile carrying `defaults.catalog`.
   // Mirrors what `resolveSession` builds for a real user profile after
   // `ucp profile init --catalog <url>` lands. Business stays unresolved so
@@ -545,13 +568,10 @@ describe('createUcpCli — catalog fallback (meta.defaults.catalog)', () => {
   const stubSessionWithCatalogDefault = async (
     _opts: ResolveSessionOptions = {},
   ): Promise<ResolvedSession> => ({
-    profile: {
-      name: 'with-catalog',
-      profileUrl: PROFILE_URL,
-      meta: {
-        created_at: '2026-05-10T00:00:00Z',
-        defaults: { catalog: CATALOG_URL },
-      },
+    profile: CATALOG_PROFILE,
+    profileMeta: {
+      created_at: '2026-05-10T00:00:00Z',
+      defaults: { catalog: CATALOG_URL },
     },
   })
 
@@ -579,7 +599,7 @@ describe('createUcpCli — catalog fallback (meta.defaults.catalog)', () => {
     expect(helperCalls[0]).toMatchObject([
       CATALOG_URL,
       { catalog: {} },
-      { force: false, profileUrl: PROFILE_URL },
+      { force: false, profile: CATALOG_PROFILE },
     ])
   })
 
@@ -638,7 +658,7 @@ describe('createUcpCli — catalog fallback (meta.defaults.catalog)', () => {
     expect(exitCode).toBe(0)
     expect(discoverCalls[0]).toMatchObject([
       CATALOG_URL,
-      expect.objectContaining({ profileUrl: PROFILE_URL }),
+      expect.objectContaining({ profile: CATALOG_PROFILE }),
     ])
     const firstCall = discoverCalls[0] as unknown[]
     expect(firstCall[1] as Record<string, unknown>).not.toHaveProperty('directEndpoint')
@@ -662,7 +682,7 @@ describe('createUcpCli — catalog fallback (meta.defaults.catalog)', () => {
     expect(exitCode).toBe(0)
     expect(discoverCalls[0]).toMatchObject([
       CATALOG_URL,
-      expect.objectContaining({ profileUrl: PROFILE_URL }),
+      expect.objectContaining({ profile: CATALOG_PROFILE }),
     ])
     const firstCall = discoverCalls[0] as unknown[]
     const opts = firstCall[1] as Record<string, unknown>
@@ -675,7 +695,7 @@ describe('createUcpCli — catalog fallback (meta.defaults.catalog)', () => {
     // fires. This is the init-CTA path (BUSINESS_NOT_RESOLVED with
     // machine-actionable recovery hint).
     const cli = createUcpCli({
-      resolveSession: async () => ({ profile: { name: 'agent', profileUrl: PROFILE_URL } }),
+      resolveSession: async () => ({ profile: RUNTIME_PROFILE, profileMeta: {} }),
       searchCatalog: async () => {
         throw new Error('helper should not fire without a resolved business')
       },
@@ -694,13 +714,10 @@ describe('createUcpCli — catalog fallback (meta.defaults.catalog)', () => {
       // the resolver returns the flag value as `session.business`.
       resolveSession: async (opts: ResolveSessionOptions = {}) => {
         const base: ResolvedSession = {
-          profile: {
-            name: 'with-catalog',
-            profileUrl: PROFILE_URL,
-            meta: {
-              created_at: '2026-05-10T00:00:00Z',
-              defaults: { catalog: CATALOG_URL },
-            },
+          profile: CATALOG_PROFILE,
+          profileMeta: {
+            created_at: '2026-05-10T00:00:00Z',
+            defaults: { catalog: CATALOG_URL },
           },
         }
         return opts.business !== undefined ? { ...base, business: opts.business } : base
@@ -721,7 +738,7 @@ describe('createUcpCli — catalog fallback (meta.defaults.catalog)', () => {
     expect(helperCalls[0]).toMatchObject([
       'https://flag.example.com',
       { catalog: {} },
-      { force: false, profileUrl: PROFILE_URL },
+      { force: false, profile: CATALOG_PROFILE },
     ])
   })
 
@@ -734,7 +751,8 @@ describe('createUcpCli — catalog fallback (meta.defaults.catalog)', () => {
   const stubSessionNoMeta = async (
     _opts: ResolveSessionOptions = {},
   ): Promise<ResolvedSession> => ({
-    profile: { name: 'agent', profileUrl: PROFILE_URL },
+    profile: RUNTIME_PROFILE,
+    profileMeta: {},
   })
 
   // BUSINESS_NOT_RESOLVED CTA is uniform across op families: bind a business
@@ -807,6 +825,7 @@ describe('createUcpCli — catalog fallback (meta.defaults.catalog)', () => {
 // emitted CTA description does — and does not — claim is active.
 describe('createUcpCli — extension-hint pipeline (negotiated → allowlist → CTA)', () => {
   const PROFILE_URL_LOCAL = 'https://agent.example.com/.well-known/ucp'
+  const LOCAL_PROFILE = profileFixture({ url: PROFILE_URL_LOCAL })
 
   // Synthetic DiscoveredBusiness. Two capability sets, deliberately separate:
   //
@@ -841,7 +860,8 @@ describe('createUcpCli — extension-hint pipeline (negotiated → allowlist →
   it('catalog search: allowlisted extension flows from _onDiscover → CTA hint', async () => {
     const cli = createUcpCli({
       resolveSession: async () => ({
-        profile: { name: 'agent', profileUrl: PROFILE_URL_LOCAL },
+        profile: LOCAL_PROFILE,
+        profileMeta: {},
         business: 'https://shop.example.com',
         businessSource: 'flag',
       }),
@@ -864,7 +884,8 @@ describe('createUcpCli — extension-hint pipeline (negotiated → allowlist →
     // — `expectedCapabilities` is empty here even though `profile` lists them.
     const cli = createUcpCli({
       resolveSession: async () => ({
-        profile: { name: 'agent', profileUrl: PROFILE_URL_LOCAL },
+        profile: LOCAL_PROFILE,
+        profileMeta: {},
         business: 'https://shop.example.com',
         businessSource: 'flag',
       }),
@@ -888,7 +909,8 @@ describe('createUcpCli — extension-hint pipeline (negotiated → allowlist →
     // even when the business advertises it.
     const cli = createUcpCli({
       resolveSession: async () => ({
-        profile: { name: 'agent', profileUrl: PROFILE_URL_LOCAL },
+        profile: LOCAL_PROFILE,
+        profileMeta: {},
         business: 'https://shop.example.com',
         businessSource: 'flag',
       }),
@@ -906,7 +928,8 @@ describe('createUcpCli — extension-hint pipeline (negotiated → allowlist →
   it('mixed advertised: only negotiated entries reach the CTA', async () => {
     const cli = createUcpCli({
       resolveSession: async () => ({
-        profile: { name: 'agent', profileUrl: PROFILE_URL_LOCAL },
+        profile: LOCAL_PROFILE,
+        profileMeta: {},
         business: 'https://shop.example.com',
         businessSource: 'flag',
       }),
@@ -1092,7 +1115,7 @@ describe('createUcpCli — --input-schema', () => {
     expect(exitCode).toBe(0)
     expect(discoverArgs[0]).toMatchObject([
       'https://shop.example.com',
-      { capabilities: ['dev.ucp.shopping'], force: true, profileUrl: PROFILE_URL },
+      { capabilities: ['dev.ucp.shopping'], force: true, profile: RUNTIME_PROFILE },
     ])
   })
 
@@ -1128,7 +1151,7 @@ describe('createUcpCli — --input-schema', () => {
   it('emits BUSINESS_NOT_RESOLVED with CTA when no business resolves', async () => {
     const cli = createUcpCli({
       // Stub session resolves nothing — no flag, no env, no active.yaml.
-      resolveSession: async () => ({ profile: { name: 'agent', profileUrl: PROFILE_URL } }),
+      resolveSession: async () => ({ profile: RUNTIME_PROFILE, profileMeta: {} }),
       discover: async () => {
         throw new Error('discover should not be called when business is unresolved')
       },
@@ -1156,7 +1179,7 @@ describe('createUcpCli — --input-schema', () => {
           code: 'SCHEMA_VALIDATION_FAILED',
           message:
             'operation input failed schema validation for "search_catalog": <root>: must have required property catalog',
-          context: { schema: { type: 'object' } },
+          context: { kind: 'operation-input', schema: { type: 'object' } },
         })
       },
     })
@@ -1171,6 +1194,39 @@ describe('createUcpCli — --input-schema', () => {
     const parsed = JSON.parse(output)
     expect(parsed.code).toBe('SCHEMA_VALIDATION_FAILED')
     expect(parsed.cta?.commands?.[0]?.command).toBe('ucp catalog search --input-schema')
+  })
+
+  it('does not replace a profile-store SCHEMA_VALIDATION_FAILED repair CTA', async () => {
+    const cli = createUcpCli({
+      profile: {
+        readActive: async () => ({}),
+        readUserProfile: async () => {
+          throw new (await import('./lib/errors.js')).UcpError({
+            layer: 'client',
+            code: 'SCHEMA_VALIDATION_FAILED',
+            message: 'profile "actual-name" profile.json failed schema validation',
+            context: { kind: 'profile-store', profile: 'actual-name', file: 'profile.json' },
+            cta: {
+              description: 'Rewrite the local DIY Profile document and identity for "actual-name".',
+              commands: [
+                {
+                  command: 'ucp profile init --name actual-name --force',
+                  description: 'rewrite local DIY Profile "actual-name"',
+                },
+              ],
+            },
+          })
+        },
+      },
+    })
+
+    const { output, exitCode } = await serveCli(cli, ['profile', 'show', 'actual-name'])
+    expect(exitCode).toBe(1)
+    const parsed = JSON.parse(output)
+    expect(parsed.code).toBe('SCHEMA_VALIDATION_FAILED')
+    expect(parsed.cta?.commands?.[0]?.command).toBe('ucp profile init --name actual-name --force')
+    expect(JSON.stringify(parsed.cta)).not.toContain('--input-schema')
+    expect(JSON.stringify(parsed.cta)).not.toContain('<name>')
   })
 
   it('non-SCHEMA UcpError passes through middleware unchanged', async () => {
@@ -1843,7 +1899,7 @@ describe('createUcpCli — --view projection', () => {
       resolveSession: passthroughSession,
       searchCatalog: async (_business, input) => ({
         dry_run: true,
-        note: 'Skipped network I/O.',
+        note: 'Skipped operation tools/call.',
         arguments: input,
       }),
     })
@@ -1917,7 +1973,7 @@ describe('createUcpCli — --view projection', () => {
       // No active business; opRun errors before helper invocation. The
       // error envelope has no `result` field, so applyView's passthrough
       // rule fires — the user's BUSINESS_NOT_RESOLVED message survives.
-      resolveSession: async () => ({ profile: { name: 'agent', profileUrl: PROFILE_URL } }),
+      resolveSession: async () => ({ profile: RUNTIME_PROFILE, profileMeta: {} }),
       searchCatalog: async () => fixtureResult,
     })
 
@@ -1958,6 +2014,10 @@ describe('createUcpCli — doctor exit code', () => {
 
   it('exits 1 on ok:false and still prints the full checks envelope', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ucp-doctor-exit-'))
+    // A NAMED profile that is not on disk. An empty home is healthy — it runs
+    // on the Shopify-managed Profile — so the local-only failure doctor can
+    // still produce is an explicitly selected identity that cannot be loaded.
+    await writeActive({ profile: 'ghost' }, { homeDir: home })
     const { output, processExitCode } = await doctorExitCode(['doctor', '--skip-network'], {
       doctor: { homeDir: home, env: {} },
     })

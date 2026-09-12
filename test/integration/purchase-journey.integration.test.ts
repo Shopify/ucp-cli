@@ -37,18 +37,19 @@ import {
   MOCK_CURRENT_VERSION,
   MOCK_ESCALATION_URL,
   MOCK_VARIANT_ID,
+  type MockUcpShopping,
   type MockUcpShoppingOptions,
   startMockUcpShopping,
 } from '../fixtures/mock-ucp-shopping.js'
+import { freshUcpEnv } from '../fixtures/subprocess-env.js'
 
 const execFileAsync = promisify(execFile)
 const CLI = fileURLToPath(new URL('../../dist/bin.js', import.meta.url))
-/** The document the mock serves at `agentProfileUrl` — and the local copy of it. */
-const AGENT_PROFILE_JSON = RELEASES[MOCK_CURRENT_VERSION].agentProfileJson
 
 interface Journey {
   businessUrl: string
   ucpHome: string
+  mock: MockUcpShopping
   run(
     args: string[],
     extraEnv?: Record<string, string>,
@@ -60,36 +61,11 @@ async function setupJourney(options: MockUcpShoppingOptions = {}): Promise<Journ
   const mock = await startMockUcpShopping(options)
   const ucpHome = await mkdtemp(join(tmpdir(), 'ucp-eval-'))
 
-  // The self-hosted agent profile, exactly as `ucp profile init` writes it:
-  // the release's verbatim published document. This file IS the identity on
-  // the self-hosted path — the CLI reads it to learn what it declares and
-  // never fetches `profile_url` — so a stub with `services: {}` would
-  // negotiate nothing.
-  const profileDir = join(ucpHome, 'profiles', 'eval')
-  await (await import('node:fs/promises')).mkdir(profileDir, { recursive: true })
-  await writeFile(join(profileDir, 'profile.json'), AGENT_PROFILE_JSON, 'utf-8')
-  // `profile_url` is what goes on the wire, and the mock serves the same
-  // document there — which is what a correctly published profile looks like
-  // (and what `ucp doctor` checks). The CLI itself makes no request to it.
-  await writeFile(
-    join(profileDir, 'meta.json'),
-    JSON.stringify({
-      created_at: new Date().toISOString(),
-      profile_url: mock.agentProfileUrl,
-    }),
-    'utf-8',
-  )
-  // Activate the profile via active.yaml.
-  await writeFile(join(ucpHome, 'active.yaml'), `profile: eval\nbusiness: ${mock.url}\n`, 'utf-8')
+  // Bind only the Business. With no profile directory or profile selection,
+  // the compiled CLI must transact on its virtual managed Profile.
+  await writeFile(join(ucpHome, 'active.yaml'), `business: ${mock.url}\n`, 'utf-8')
 
-  const baseEnv: Record<string, string> = {}
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined) baseEnv[k] = v
-  }
-  baseEnv.UCP_HOME = ucpHome
-  // Allow the mock server's http://127.0.0.1 URL through the https-only guard.
-  // TEST infix is intentional: this is not a production/deployment knob.
-  baseEnv.UCP_TEST_ALLOW_INSECURE_LOCALHOST = 'true'
+  const baseEnv = freshUcpEnv(ucpHome)
   // Intentionally do not set UCP_ON_ESCALATION. Hook resolution + spawn is
   // unit-tested; here we only assert the CLI handles requires_escalation
   // correctly (envelope, CTA, exit code, stderr quiet by default).
@@ -120,6 +96,7 @@ async function setupJourney(options: MockUcpShoppingOptions = {}): Promise<Journ
   return {
     businessUrl: mock.url,
     ucpHome,
+    mock,
     run,
     async close() {
       await mock.close()
@@ -158,6 +135,16 @@ describe('eval: purchase journey', () => {
     const products = inner.products as Array<{ title: string; variants: Array<{ id: string }> }>
     expect(products[0]?.title).toContain('Trail Map')
     expect(products[0]?.variants[0]?.id).toBe(MOCK_VARIANT_ID)
+
+    // No profile was initialized. Both discovery and dispatch must advertise
+    // the newest managed rendering to the Business.
+    const upstream = j.mock.rpcRequests.filter(
+      (request) => request.method === 'tools/list' || request.method === 'tools/call',
+    )
+    expect(upstream.map((request) => request.agentProfileUrl)).toEqual([
+      RELEASES[MOCK_CURRENT_VERSION].defaultAgentProfileUrl,
+      RELEASES[MOCK_CURRENT_VERSION].defaultAgentProfileUrl,
+    ])
 
     // CTA at root level (merged by incur). Cart create is primary (up-funnel exploration).
     const cta = envelope.cta as { commands: Array<{ command: string }> } | undefined

@@ -17,43 +17,65 @@ Successful UCP operation responses have this shape:
 }
 ```
 
-- **`business` / `endpoint` / `transport`** — dispatch identity. Compare `business` against the active profile's `meta.defaults.catalog` to tell whether a catalog response came from the global catalog vs a specific merchant.
+- **`business` / `endpoint` / `transport`** — the Business and exact negotiated endpoint used for this dispatch. A catalog command without `--business` may resolve `business` from the catalog default.
 - **`result`** — the operation payload (products, cart, checkout, order).
-- **`ucp`** — protocol metadata: negotiated capabilities and dynamic payment handlers. Read `ucp.payment_handlers` when composing a `payment` object for checkout.
+- **`ucp`** — protocol metadata: negotiated capabilities and dynamic payment handlers. Read `ucp.payment_handlers` when composing the completion body against `ucp checkout complete --input-schema --business <url>`.
 - **`cta`** — what to do next. Always read `cta.description` first — it tells you what's possible and what to weigh, not what to mechanically execute. Pick the command that serves the buyer's goal. If none fit, stop or ask.
 
-Errors: `{ "code": "...", "message": "...", "cta": {...} }` (no dispatch identity — failure may pre-date contact). Successful commands exit `0` (including `requires_escalation`); errors exit `1`.
+Errors are flat objects: `code` and `message` are required, while `retryable` and `cta` are independently optional.
 
-`ucp discover` additionally returns `protocol` and `expectedCapabilities`:
+```json
+{ "code": "PROFILE_FETCH_FAILED", "message": "...", "retryable": true, "cta": { "description": "...", "commands": [...] } }
+```
 
-- **`protocol.version`** — the negotiated UCP version. Always the version the **active agent profile** declares; `ucp-cli` only bounds which releases are *possible* (`ucp --version` prints the ones it supports). Switch versions by switching profiles.
-- **`protocol.source`** — `well-known` when the merchant's top-level document was at that version, `supported_versions` when a version-specific leaf was followed. There is deliberately no second date to compare: do **not** infer compatibility from date order.
-- **`protocol.businessProfileUrl`** — the merchant document that was parsed. (`profileUrl` everywhere else means the *agent's* URL.)
-- **`expectedCapabilities`** — `your profile ∩ merchant` — a **prediction** for pre-call planning, not an authority. The CLI computes it from `~/.ucp/profiles/<name>/profile.json`, the document it declares; the merchant fetches your profile URL instead and reports what it actually negotiated in every response's `ucp.capabilities`; that field wins. `[]` means "nothing in common (or none published)", never "nothing works". A persistent gap between the two means the local document and the one at the profile URL disagree — operator fix (`ucp doctor` names it), not something to retry.
-- **`negotiated`** is only the services **both** sides declare. Services the merchant offers that your profile does not declare are not negotiated; they stay visible in the lossless `profile` field and `--verbose` says which were skipped.
+Errors carry no dispatch identity. Branch on the full `code`; treat `retryable` as a hint and `cta` as advice, reading `cta.description` before any command. Successful commands exit `0` (including `requires_escalation`); errors exit `1`.
 
-**The error envelope carries `code`, `message`, and `cta` only** — there is no `context` field on the wire. Everything you need to recover is in those three. Branch on `code`; read `message` for the specific values (version sets, declared/offered service ids, the failing URL).
+`ucp discover` returns these fields under `result`:
+
+- **`protocol.version`** — exact UCP release selected for this Business.
+- **`protocol.source`** — `well-known` for the Business Profile at its standard URL or `supported_versions` for a release-specific Business Profile.
+- **`protocol.agentProfileUrl`** — Profile URL advertised for this exchange.
+- **`protocol.businessProfileUrl`** — Business Profile used for this exchange.
+- **`expectedCapabilities`** — advisory intersection of both Profiles' capability declarations. The operation response's `ucp.capabilities` is authoritative.
+- **`negotiated`** — services declared by both Profiles. Business-only services remain in `profile` and are reported as skipped under `--verbose`.
+
+There is no `context` field on the wire; branch on `code`, `message`, and `cta`, and read `message` for diagnostic values.
+
+## Profile selection
+
+Commands use the managed Profile unless a named Profile or Profile URL override wins. With a named DIY Profile, a URL override changes the advertised URL but commands still use its local document. MCP ignores `active.yaml`. See [SETUP](SETUP.md) for intentional configuration.
+
+| Value | Highest to lowest precedence |
+|---|---|
+| Profile name | `--profile` → `UCP_PROFILE` → `active.yaml.profile` → managed |
+| Profile URL | `--profile-url` → `UCP_AGENT_PROFILE_URL` → selected DIY URL/release URL → selected managed Profile URL |
+
+## Discovery cache
+
+Business Profiles are cached according to HTTP `Cache-Control`, with a 60-second minimum; `tools/list` results are cached for 60 seconds. `--refresh` ignores both saved results. `--dry-run` still discovers and validates, but skips the operation's `tools/call`.
 
 ## Error codes
 
-Branch on `code` first; CTAs (when present) carry recovery suggestions.
-
-Naming rule: **`PROFILE_*` is the merchant's document; `AGENT_PROFILE_*` is yours.** No code means both.
+Branch on the full `code`; CTAs are advisory. `PROFILE_FETCH_FAILED` and `PROFILE_VERSION_MISMATCH` concern the Business Profile, each `AGENT_PROFILE_*` code concerns the selected Profile or its advertised URL, and `PROFILE_NOT_FOUND` concerns a selected local name. Profile authoring and hosting are covered in [SETUP](SETUP.md).
 
 | Code | Meaning | Recovery |
 |---|---|---|
 | `INVALID_INPUT` | CLI-side parse/validation error (bad JSON, missing positional, malformed URL) | Read `message`; fix the command |
-| `SCHEMA_VALIDATION_FAILED` | Payload doesn't match the merchant's advertised schema, or uses unknown plain keys | `ucp <op> --input-schema --business <url>`, correct field names, re-submit. Canonical UCP fields (e.g. `context.currency`) can still need explicit merchant support |
+| `SCHEMA_VALIDATION_FAILED` | Operation input or an explicitly selected local Profile file is schema-invalid | Read `message` and `cta`; only operation-input failures use `--input-schema` |
 | `BUSINESS_NOT_RESOLVED` | Operation needs a merchant; none resolved | Pass `--business <url>`, or `ucp use <url>` for the session. Catalog ops fall back to the global catalog automatically |
 | `OPERATION_NOT_OFFERED` | Merchant doesn't expose this operation | `ucp discover --business <url>` to see what's offered |
 | `CAPABILITY_NOT_OFFERED` | Merchant doesn't advertise the requested service id — **including when your profile also lacks it** (a typo is not a profile problem) | Check the id against `ucp discover --business <url>` |
 | `PROFILE_FETCH_FAILED` | Merchant doesn't speak UCP (or `.well-known/ucp` is unreachable) | Surface to buyer; offer non-UCP fallback (other tools, navigation, alternate merchants with consent) |
-| `PROTOCOL_VERSION_INCOMPATIBLE` | Merchant doesn't offer the exact version your agent profile speaks | `message` names both (what the merchant `offers` and what your profile `uses`). If a `cta` names another of your local profiles, re-run with `--profile <name>`. Otherwise upgrade the CLI (`npm i -g @shopify/ucp-cli@latest`) |
-| `PROFILE_VERSION_MISMATCH` | The **merchant's** document contradicts itself | Merchant-side bug; nothing to fix client-side. Surface to buyer, treat like `PROFILE_FETCH_FAILED` |
+| `PROTOCOL_VERSION_INCOMPATIBLE` | Business and effective Profile share no exact release | Read both sets in `message`; see [SETUP](SETUP.md#selection-and-profile-url-overrides) for intentional selection changes |
+| `PROFILE_VERSION_MISMATCH` | A Business Profile contradicts its claimed release | Business-side fault; surface it |
 | `NO_COMPATIBLE_TRANSPORT` | Right version, no transport both sides can speak | `message` names all three sets (merchant offers / profile declares / ucp-cli supports). Not fixable mid-task |
-| `SERVICE_VERSION_INCOMPATIBLE` | Merchant offers the protocol version, but this service's own version line doesn't intersect yours | Not fixable mid-task. Stop, or try another merchant. Operator fix: `references/SETUP.md` |
-| `AGENT_PROFILE_*` (any) | **Your side is misconfigured** — the local `profile.json` you declare is off-version, schema-invalid, or missing a service, or (as the merchant reports it) the profile URL you sent could not be fetched. Not the merchant's fault | **Retrying will not help.** Stop and report to the operator: `ucp doctor`, then `references/SETUP.md` |
-| `PROFILE_NOT_FOUND` | No agent profile on this machine | `ucp profile init --name agent` — idempotent, safe to run unconditionally |
+| `SERVICE_VERSION_INCOMPATIBLE` | Requested service versions do not intersect | Select or repair an intentional Profile, or use another Business |
+| `AGENT_PROFILE_UNREACHABLE` | Advertised Profile URL cannot be fetched or used | Run `ucp doctor`; repair hosting or Profile selection in [SETUP](SETUP.md) |
+| `AGENT_PROFILE_VERSION_UNSUPPORTED` | Profile declares a release unsupported by this CLI build | Select a supported DIY release or another CLI build |
+| `AGENT_PROFILE_SCHEMA_INVALID` | Profile fails its release schema | Repair the DIY document and hosted copy; managed issues require another build |
+| `AGENT_PROFILE_VERSION_MISMATCH` | Internally inconsistent `dev.ucp.*` entries disagree with the Profile's declared UCP release | Align the DIY document and hosted copy; managed issues require another build |
+| `AGENT_PROFILE_SERVICE_UNDECLARED` | Selected Profile omits an explicitly requested Business service | Use a DIY Profile that declares it, or accept that it is unavailable |
+| `PROFILE_NOT_FOUND` | An explicitly selected local name or required file is missing/unreadable | Inspect `ucp profile list` and the selection precedence; see [SETUP](SETUP.md) |
 | `AUTH_REQUIRED` | Merchant requires authentication (HTTP 401) | No merchant auth in this CLI. Hand off using the best prior URL: checkout/cart `continue_url`, then `variant.checkout_url`, then variant/product `url`, then `seller.url`, then the `--business` URL or `https://<seller.domain>` |
 | `INSUFFICIENT_PERMISSIONS` | Authenticated but lacks required scope (HTTP 403) | Same handoff URL priority as `AUTH_REQUIRED` |
 | `IDEMPOTENCY_CONFLICT` | Idempotency key reused with a different payload (HTTP 409) | Re-issue with a fresh key, or omit and retry |
@@ -62,9 +84,8 @@ Naming rule: **`PROFILE_*` is the merchant's document; `AGENT_PROFILE_*` is your
 | `SERVICE_UNAVAILABLE` | Merchant temporarily unable to handle requests (HTTP 503) | Wait and retry; transient |
 | `MCP_RPC_ERROR` | JSON-RPC error envelope from merchant (no spec-aligned HTTP status) | Read `message` — it carries the merchant's RPC detail and HTTP status |
 | `TRANSPORT_HTTP_ERROR` | Non-2xx HTTP without spec-aligned mapping | Read `message` for the status |
+| `TRANSPORT_REDIRECT_REFUSED` | A UCP document or endpoint returned a redirect | The declared URL must serve directly; correct its hosting or declaration |
 | `TRANSPORT_NETWORK_ERROR` | DNS, connection refused, TLS, timeout, abort | Network-level — report and retry |
-
-The `AGENT_PROFILE_*` family and `SERVICE_VERSION_INCOMPATIBLE` are operator fixes (editing a document, and uploading it to the URL that serves it), not runtime ones — per-code detail is in `references/SETUP.md`.
 
 ## `--set` and `--set-string` (overlay flags)
 
@@ -87,6 +108,8 @@ Ops that act on an **existing resource** take the id as the first positional arg
 
 Operations that create or query (`cart create`, `checkout create`, `catalog search`, `catalog lookup`, `discover`) take no positional argument; the full payload goes in `--input`/`--set`. Cart-to-checkout conversion accepts `cart_id` in the `checkout create` body and requires `line_items`, which can be empty for conversion: `--input '{"cart_id":"<cart_id>","line_items":[]}'`. The merchant uses cart contents when `cart_id` is present. Forgetting the positional on a resource-addressing operation fails dispatch with `INVALID_INPUT` ("requires a positional id"); `--input-schema` works without it (it skips dispatch).
 
+A positional id addresses the resource but does not replace a required body. For completion, derive the body with `ucp checkout complete --input-schema --business <url>`, then pass it with `ucp checkout complete <checkout_id> --business <url> --input @complete.json`. A missing required positional fails with `INVALID_INPUT`; `--input-schema` skips dispatch and needs no id.
+
 ## Common flags (every operation)
 
 | Flag | Effect |
@@ -95,9 +118,12 @@ Operations that create or query (`cart create`, `checkout create`, `catalog sear
 | `--set <ptr>=<val>` | Field overlay onto `--input` (repeatable). RFC 6901 JSON Pointer paths. |
 | `--set-string <ptr>=<val>` | Same, value treated as string. Use for ZIPs, IDs that look numeric, etc. |
 | `--business <url>` | Override session merchant for this call. Bare hostnames (`shop.example.com`) are canonicalized to `https://`. |
-| `--input-schema` | Print operation input schema; skip dispatch. Combine with `--business <url>` to introspect a specific merchant. |
-| `--dry-run` | Build + validate request; print exactly what would be sent (including `meta.idempotency-key` and `meta.ucp-agent`). No network. Useful for debugging payloads before issuing them. |
-| `--refresh` | Bypass discovery cache (force re-fetch of `.well-known/ucp` and `tools/list`) |
+| `--profile <name>` | Named local Profile override. |
+| `--profile-url <url>` | Advertised Profile URL override; a named DIY Profile still uses its local document. |
+| `--header 'Name: Value'` | Repeatable outbound header. |
+| `--input-schema` | Print the discovered input schema and skip `tools/call`; discovery still applies. |
+| `--dry-run` | Discover, validate, and print the request; skips only the operation's `tools/call`. |
+| `--refresh` | Bypass Business Profile and `tools/list` cache reads. |
 | `--format <fmt>` | Output format: `json` (default), `toon`, `yaml`, `md`, `jsonl` |
 | `--view <expr\|@file\|:alias>` | JMESPath projection. Expression runs over the whole response envelope; output **replaces** the envelope (drop dispatch identity, slim `ucp`, reshape `result`, etc). Inline expression, `@<path>` to load from a file (`~` expanded), or `:<alias>` for a package-local view in the current operation capability. Composes with `--format` (project first, render second). `cta` survives the projection. No-op on `--dry-run`, `--input-schema`, and `--mcp` mode. See JMESPath patterns below. |
 | `--on-escalation '<cmd>'` | Shell command for checkout `result.status === "requires_escalation"` only (compact JSON payload on stdin). Auth errors use CTA handoff guidance; they do not fire this hook. |

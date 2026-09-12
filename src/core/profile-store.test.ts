@@ -4,6 +4,7 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { PROFILE_FORMAT_VERSION } from './legacy-profile.js'
 import type { PlatformProfile } from './profile.js'
 import {
   activeYamlPath,
@@ -96,6 +97,8 @@ describe('profile CRUD', () => {
     expect(await profileExists('prod', { homeDir })).toBe(true)
 
     const read = await readUserProfile('prod', { homeDir })
+    expect(read.kind).toBe('diy')
+    if (read.kind !== 'diy') throw new Error('expected saved custom Profile to remain DIY')
     expect(read.body.ucp.version).toBe('2026-08-25')
     expect(read.meta.profile_url).toBe('https://mybot.example.com/.well-known/ucp')
   })
@@ -121,10 +124,15 @@ describe('profile CRUD', () => {
     expect(read.meta.profile_url).toBe('https://newhost.example.com/.well-known/ucp')
   })
 
-  it('readUserProfile on missing profile throws PROFILE_NOT_FOUND with layer=client', async () => {
+  it('readUserProfile on a missing profile carries an actual-name --force repair CTA', async () => {
     await expect(readUserProfile('ghost', { homeDir })).rejects.toMatchObject({
       code: 'PROFILE_NOT_FOUND',
       layer: 'client',
+      context: { kind: 'profile-store', profile: 'ghost', file: 'meta.json' },
+      cta: {
+        description: expect.stringMatching(/cannot preserve.*custom profile_url.*--profile-url/i),
+        commands: [{ command: 'ucp profile init --name ghost --force' }],
+      },
     })
   })
 
@@ -146,6 +154,84 @@ describe('profile CRUD', () => {
     await writeFile(join(profileDir('prod', { homeDir }), 'profile.json'), '<not json>', 'utf-8')
     await expect(readUserProfile('prod', { homeDir })).rejects.toMatchObject({
       code: 'SCHEMA_VALIDATION_FAILED',
+      context: { kind: 'profile-store', profile: 'prod', file: 'profile.json' },
+      cta: {
+        description: expect.stringMatching(
+          /rewrite.*local DIY.*document.*custom profile_url.*readable.*meta\.json.*preserved/i,
+        ),
+        commands: [
+          {
+            command: 'ucp profile init --name prod --force',
+            description: expect.stringMatching(/rewrite.*prod/i),
+          },
+        ],
+      },
+    })
+  })
+
+  it.each([
+    { damage: 'missing', expectedCode: 'PROFILE_NOT_FOUND' },
+    { damage: 'corrupt', expectedCode: 'SCHEMA_VALIDATION_FAILED' },
+  ])(
+    'a marked DIY Profile still rejects a $damage profile.json',
+    async ({ damage, expectedCode }) => {
+      await saveUserProfile(
+        {
+          name: 'marked-diy',
+          body: SAMPLE_BODY,
+          meta: {
+            ...SAMPLE_META,
+            format_version: PROFILE_FORMAT_VERSION,
+            kind: 'diy',
+          },
+        },
+        { homeDir },
+      )
+      const bodyPath = join(profileDir('marked-diy', { homeDir }), 'profile.json')
+      if (damage === 'missing') await rm(bodyPath)
+      else await writeFile(bodyPath, '<not json>', 'utf-8')
+
+      await expect(readUserProfile('marked-diy', { homeDir })).rejects.toMatchObject({
+        code: expectedCode,
+        context: { kind: 'profile-store', profile: 'marked-diy', file: 'profile.json' },
+      })
+    },
+  )
+
+  it('wraps profile.json schema failures with local-store provenance and repair CTA', async () => {
+    await saveUserProfile(
+      { name: 'actual-name', body: SAMPLE_BODY, meta: SAMPLE_META },
+      { homeDir },
+    )
+    await writeFile(
+      join(profileDir('actual-name', { homeDir }), 'profile.json'),
+      JSON.stringify({ ucp: { version: '2026-08-25' } }),
+      'utf-8',
+    )
+
+    await expect(readUserProfile('actual-name', { homeDir })).rejects.toMatchObject({
+      code: 'SCHEMA_VALIDATION_FAILED',
+      context: { kind: 'profile-store', profile: 'actual-name', file: 'profile.json' },
+      cta: {
+        commands: [{ command: 'ucp profile init --name actual-name --force' }],
+      },
+    })
+  })
+
+  it('preserves AGENT_PROFILE_VERSION_UNSUPPORTED while adding store provenance', async () => {
+    await saveUserProfile({ name: 'old-agent', body: SAMPLE_BODY, meta: SAMPLE_META }, { homeDir })
+    await writeFile(
+      join(profileDir('old-agent', { homeDir }), 'profile.json'),
+      JSON.stringify({ ...SAMPLE_BODY, ucp: { ...SAMPLE_BODY.ucp, version: '2025-01-01' } }),
+      'utf-8',
+    )
+
+    await expect(readUserProfile('old-agent', { homeDir })).rejects.toMatchObject({
+      code: 'AGENT_PROFILE_VERSION_UNSUPPORTED',
+      context: { kind: 'profile-store', profile: 'old-agent', file: 'profile.json' },
+      cta: {
+        commands: [{ command: 'ucp profile init --name old-agent --force' }],
+      },
     })
   })
 
@@ -159,6 +245,11 @@ describe('profile CRUD', () => {
     )
     await expect(readUserProfile('prod', { homeDir })).rejects.toMatchObject({
       code: 'SCHEMA_VALIDATION_FAILED',
+      context: { kind: 'profile-store', profile: 'prod', file: 'meta.json' },
+      cta: {
+        description: expect.stringMatching(/cannot preserve.*custom profile_url.*--profile-url/i),
+        commands: [{ command: 'ucp profile init --name prod --force' }],
+      },
     })
   })
 
