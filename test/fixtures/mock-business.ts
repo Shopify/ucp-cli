@@ -16,9 +16,17 @@ interface Route {
   handler: Handler
 }
 
+export interface MockBusinessRequest {
+  method: string
+  path: string
+  url: string
+}
+
 export interface MockBusiness {
   url: string
   port: number
+  /** Requests received in arrival order. The array remains live until close(). */
+  requests: MockBusinessRequest[]
   setRoute(method: string, path: string, handler: Handler): void
   reset(): void
   close(): Promise<void>
@@ -30,10 +38,12 @@ export interface MockBusinessOptions {
 
 export async function startMockBusiness(options: MockBusinessOptions = {}): Promise<MockBusiness> {
   const routes: Route[] = []
+  const requests: MockBusinessRequest[] = []
   const server: Server = createServer(async (req, res) => {
     const url = req.url ?? ''
     const path = url.split('?')[0] ?? ''
     const method = req.method ?? 'GET'
+    requests.push({ method, path, url })
     const route = routes.find((r) => r.method === method && r.path === path)
     if (route === undefined) {
       res.statusCode = 404
@@ -65,11 +75,13 @@ export async function startMockBusiness(options: MockBusinessOptions = {}): Prom
   return {
     url: `http://127.0.0.1:${addr.port}`,
     port: addr.port,
+    requests,
     setRoute(method, path, handler) {
       routes.push({ method, path, handler })
     },
     reset() {
       routes.length = 0
+      requests.length = 0
     },
     close() {
       return new Promise<void>((resolve, reject) => {

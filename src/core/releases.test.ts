@@ -7,7 +7,14 @@
 
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { isSupportedVersion, LATEST, RELEASES, release, SUPPORTED_VERSIONS } from './releases.js'
+import {
+  isSupportedVersion,
+  LATEST,
+  RELEASES,
+  release,
+  releaseByDefaultAgentProfileUrl,
+  SUPPORTED_VERSIONS,
+} from './releases.js'
 
 describe('release registry shape', () => {
   it('SUPPORTED_VERSIONS is sorted ascending, unique, and keys RELEASES exactly', () => {
@@ -40,6 +47,23 @@ describe('release registry shape', () => {
       expect(entry.defaultAgentProfileUrl).toContain(version)
       expect(() => new URL(entry.defaultAgentProfileUrl)).not.toThrow()
     }
+  })
+
+  it('looks up release-default agent profile URLs after HTTPS canonicalization', () => {
+    for (const entry of Object.values(RELEASES)) {
+      expect(releaseByDefaultAgentProfileUrl(entry.defaultAgentProfileUrl)).toBe(entry)
+      const url = new URL(entry.defaultAgentProfileUrl)
+      const equivalent = `https://${url.hostname.toUpperCase()}:443${url.pathname}${url.search}`
+      expect(releaseByDefaultAgentProfileUrl(equivalent)).toBe(entry)
+    }
+  })
+
+  it('returns undefined for invalid URLs and valid nonmatches', () => {
+    expect(releaseByDefaultAgentProfileUrl('not a URL')).toBeUndefined()
+    expect(releaseByDefaultAgentProfileUrl('http://shopify.dev/profile.json')).toBeUndefined()
+    expect(
+      releaseByDefaultAgentProfileUrl('https://shopify.dev/ucp/agent-profiles/not-a-release.json'),
+    ).toBeUndefined()
   })
 })
 

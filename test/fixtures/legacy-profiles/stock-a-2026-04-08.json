@@ -1,0 +1,99 @@
+{
+  "ucp": {
+    "version": "2026-04-08",
+    "status": "success",
+    "services": {
+      "dev.ucp.shopping": [
+        {
+          "version": "2026-01-23",
+          "spec": "https://ucp.dev/2026-04-08/specification/overview",
+          "transport": "mcp",
+          "schema": "https://ucp.dev/2026-04-08/services/shopping/mcp.openrpc.json"
+        }
+      ]
+    },
+    "capabilities": {
+      "dev.ucp.shopping.checkout": [
+        {
+          "version": "2026-04-08",
+          "spec": "https://ucp.dev/2026-04-08/specification/checkout",
+          "schema": "https://ucp.dev/2026-04-08/schemas/shopping/checkout.json"
+        }
+      ],
+      "dev.ucp.shopping.cart": [
+        {
+          "version": "2026-04-08",
+          "spec": "https://ucp.dev/2026-04-08/specification/cart",
+          "schema": "https://ucp.dev/2026-04-08/schemas/shopping/cart.json"
+        }
+      ],
+      "dev.ucp.shopping.fulfillment": [
+        {
+          "version": "2026-04-08",
+          "spec": "https://ucp.dev/2026-04-08/specification/fulfillment",
+          "schema": "https://ucp.dev/2026-04-08/schemas/shopping/fulfillment.json",
+          "extends": [
+            "dev.ucp.shopping.checkout",
+            "dev.ucp.shopping.cart"
+          ]
+        }
+      ],
+      "dev.ucp.shopping.discount": [
+        {
+          "version": "2026-04-08",
+          "spec": "https://ucp.dev/2026-04-08/specification/discount",
+          "schema": "https://ucp.dev/2026-04-08/schemas/shopping/discount.json",
+          "extends": [
+            "dev.ucp.shopping.checkout",
+            "dev.ucp.shopping.cart"
+          ]
+        }
+      ],
+      "dev.ucp.shopping.catalog.search": [
+        {
+          "version": "2026-04-08",
+          "spec": "https://ucp.dev/2026-04-08/specification/catalog",
+          "schema": "https://ucp.dev/2026-04-08/schemas/shopping/catalog_search.json"
+        }
+      ],
+      "dev.ucp.shopping.catalog.lookup": [
+        {
+          "version": "2026-04-08",
+          "spec": "https://ucp.dev/2026-04-08/specification/catalog",
+          "schema": "https://ucp.dev/2026-04-08/schemas/shopping/catalog_lookup.json"
+        }
+      ],
+      "dev.ucp.shopping.order": [
+        {
+          "version": "2026-04-08",
+          "spec": "https://ucp.dev/2026-04-08/specs/shopping/order",
+          "schema": "https://ucp.dev/2026-04-08/schemas/shopping/order.json"
+        }
+      ],
+      "dev.shopify.catalog": [
+        {
+          "version": "2026-04-08",
+          "spec": "https://shopify.dev/docs/agents/catalog/storefront-catalog-extension",
+          "schema": "https://shopify.dev/ucp/schemas/2026-04-08/shopify_catalog.json",
+          "extends": [
+            "dev.ucp.shopping.catalog.search",
+            "dev.ucp.shopping.catalog.lookup"
+          ]
+        }
+      ],
+      "dev.shopify.catalog.global": [
+        {
+          "version": "2026-04-08",
+          "spec": "https://shopify.dev/docs/agents/catalog/global-catalog-extension",
+          "schema": "https://shopify.dev/ucp/schemas/2026-04-08/shopify_catalog_global.json",
+          "extends": [
+            "dev.ucp.shopping.catalog.search",
+            "dev.ucp.shopping.catalog.lookup"
+          ]
+        }
+      ]
+    },
+    "payment_handlers": {}
+  },
+  "signing_keys": []
+}

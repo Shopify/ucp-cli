@@ -10,7 +10,8 @@
       "!**/.husky",
       "!**/coverage",
       "!**/local",
-      "!**/src/core/generated"
+      "!**/src/core/generated",
+      "!**/test/fixtures/legacy-profiles"
     ]
   },
   "formatter": {

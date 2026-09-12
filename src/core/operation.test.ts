@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { agentProfileFixture } from '../test-utils.js'
+import { profileFixture } from '../test-utils.js'
 import {
   callOperation,
   isDryRunPreview,
@@ -25,9 +25,9 @@ const PROFILE_URL = 'https://agent.example.com/.well-known/ucp'
 // The platform side of negotiation: Shopify's published 2026-08-25 agent
 // profile, fetched-and-validated. It declares `dev.ucp.shopping` over mcp at
 // that exact version, which is what the PROFILE fixture below offers.
-const AGENT = agentProfileFixture({ version: '2026-08-25' })
+const RUNTIME_PROFILE = profileFixture({ version: '2026-08-25', url: PROFILE_URL })
 
-const PROFILE = {
+const BUSINESS_PROFILE = {
   ucp: {
     version: '2026-08-25',
     services: {
@@ -107,7 +107,7 @@ describe('callOperation', () => {
           ? (JSON.parse(init.body) as Record<string, unknown>)
           : undefined
       if (body !== undefined) bodies.push(body)
-      if (u.endsWith('/.well-known/ucp')) return jsonResponse(PROFILE)
+      if (u.endsWith('/.well-known/ucp')) return jsonResponse(BUSINESS_PROFILE)
 
       const id = body?.id
       if (body?.method === 'tools/list') {
@@ -128,7 +128,7 @@ describe('callOperation', () => {
           toolName: 'search_catalog',
           input: { catalog: { query: 'boots', pagination: { limit: 2 } } },
         },
-        { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL },
+        { cacheDir, profile: RUNTIME_PROFILE, fetch },
       ),
     ).resolves.toEqual({ products: [] })
 
@@ -151,7 +151,7 @@ describe('callOperation', () => {
         typeof init.body === 'string'
           ? (JSON.parse(init.body) as Record<string, unknown>)
           : undefined
-      if (u.endsWith('/.well-known/ucp')) return jsonResponse(PROFILE)
+      if (u.endsWith('/.well-known/ucp')) return jsonResponse(BUSINESS_PROFILE)
       return jsonResponse({
         jsonrpc: '2.0',
         id: body?.id,
@@ -170,7 +170,7 @@ describe('callOperation', () => {
             catalog: { query: 'boots' },
           },
         },
-        { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL },
+        { cacheDir, profile: RUNTIME_PROFILE, fetch },
       ),
     ).rejects.toMatchObject({
       code: 'INVALID_INPUT',
@@ -187,7 +187,7 @@ describe('callOperation', () => {
           ? (JSON.parse(init.body) as Record<string, unknown>)
           : undefined
       if (body !== undefined) bodies.push(body)
-      if (u.endsWith('/.well-known/ucp')) return jsonResponse(PROFILE)
+      if (u.endsWith('/.well-known/ucp')) return jsonResponse(BUSINESS_PROFILE)
       const id = body?.id
       if (body?.method === 'tools/list') {
         return jsonResponse({
@@ -206,7 +206,7 @@ describe('callOperation', () => {
         toolName: 'search_catalog',
         input: { meta: { trace_id: 'abc-123' }, catalog: { query: 'boots' } },
       },
-      { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL },
+      { cacheDir, profile: RUNTIME_PROFILE, fetch },
     )
 
     const args = bodies.find((body) => body.method === 'tools/call')?.params as {
@@ -230,7 +230,7 @@ describe('callOperation', () => {
           ? (JSON.parse(init.body) as Record<string, unknown>)
           : undefined
       if (body !== undefined) bodies.push(body)
-      if (u.endsWith('/.well-known/ucp')) return jsonResponse(PROFILE)
+      if (u.endsWith('/.well-known/ucp')) return jsonResponse(BUSINESS_PROFILE)
       const id = body?.id
       if (body?.method === 'tools/list') {
         return jsonResponse({
@@ -252,7 +252,7 @@ describe('callOperation', () => {
           catalog: { query: 'boots' },
         },
       },
-      { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL },
+      { cacheDir, profile: RUNTIME_PROFILE, fetch },
     )
 
     const args = bodies.find((body) => body.method === 'tools/call')?.params as {
@@ -270,7 +270,7 @@ describe('callOperation', () => {
           ? (JSON.parse(init.body) as Record<string, unknown>)
           : undefined
       if (body !== undefined) bodies.push(body)
-      if (u.endsWith('/.well-known/ucp')) return jsonResponse(PROFILE)
+      if (u.endsWith('/.well-known/ucp')) return jsonResponse(BUSINESS_PROFILE)
       return jsonResponse({
         jsonrpc: '2.0',
         id: body?.id,
@@ -286,13 +286,18 @@ describe('callOperation', () => {
     await callOperation(
       BUSINESS_URL,
       { capability: 'dev.ucp.shopping', toolName: 'search_catalog', input: { query: 'boots' } },
-      { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL },
+      { cacheDir, profile: RUNTIME_PROFILE, fetch },
     ).catch((err) => {
       captured = err
     })
-    const err = captured as { code: string; layer: string; context: { schema: unknown } }
+    const err = captured as {
+      code: string
+      layer: string
+      context: { kind: string; schema: unknown }
+    }
     expect(err.code).toBe('SCHEMA_VALIDATION_FAILED')
     expect(err.layer).toBe('client')
+    expect(err.context.kind).toBe('operation-input')
     // The exact schema the upstream advertised — same object the dispatcher
     // ran ajv against — so the caller doesn't have to re-fetch tools/list.
     expect(err.context.schema).toEqual(SEARCH_SCHEMA)
@@ -308,7 +313,7 @@ describe('callOperation', () => {
           ? (JSON.parse(init.body) as Record<string, unknown>)
           : undefined
       if (body !== undefined) bodies.push(body)
-      if (u.endsWith('/.well-known/ucp')) return jsonResponse(PROFILE)
+      if (u.endsWith('/.well-known/ucp')) return jsonResponse(BUSINESS_PROFILE)
       const id = body?.id
       if (body?.method === 'tools/list') {
         return jsonResponse({
@@ -332,7 +337,7 @@ describe('callOperation', () => {
           },
         },
       },
-      { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL },
+      { cacheDir, profile: RUNTIME_PROFILE, fetch },
     )
 
     const params = bodies.find((body) => body.method === 'tools/call')?.params as {
@@ -341,7 +346,7 @@ describe('callOperation', () => {
     expect(params.arguments.catalog.context['com.example.fulfillment_hint']).toBe('dock')
   })
 
-  it('dry-run: returns preview after validation, skips tools/call', async () => {
+  it('dry-run: resolves managed and injects its selected URL without a caller URL', async () => {
     const bodies: Record<string, unknown>[] = []
     const fetch = vi.fn(async (url: string | URL | Request, init: RequestInit = {}) => {
       const u = String(url)
@@ -350,7 +355,7 @@ describe('callOperation', () => {
           ? (JSON.parse(init.body) as Record<string, unknown>)
           : undefined
       if (body !== undefined) bodies.push(body)
-      if (u.endsWith('/.well-known/ucp')) return jsonResponse(PROFILE)
+      if (u.endsWith('/.well-known/ucp')) return jsonResponse(BUSINESS_PROFILE)
       return jsonResponse({
         jsonrpc: '2.0',
         id: body?.id,
@@ -365,7 +370,7 @@ describe('callOperation', () => {
         toolName: 'search_catalog',
         input: { catalog: { query: 'boots' } },
       },
-      { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL, dryRun: true },
+      { cacheDir, fetch, dryRun: true },
     )
     expect(isDryRunPreview(result)).toBe(true)
     if (!isDryRunPreview(result)) throw new Error('unreachable')
@@ -385,14 +390,22 @@ describe('callOperation', () => {
     // pin its presence so the agent-facing explanation can't silently drop.
     expect(typeof result.note).toBe('string')
     expect(result.note).toMatch(/dry-run|--dry-run|wire/i)
+    expect(result.note).toMatch(/operation's tools\/call request was not issued/i)
+    expect(result.note).toMatch(/discovery may still have used network/i)
+    expect(result.note).not.toMatch(/no network call issued/i)
     expect(result.arguments).toMatchObject({
       catalog: { query: 'boots' },
-      meta: { 'ucp-agent': { profile: PROFILE_URL } },
+      meta: {
+        'ucp-agent': { profile: RELEASES['2026-08-25'].defaultAgentProfileUrl },
+      },
     })
     expect(typeof (result.arguments.meta as Record<string, unknown>)['idempotency-key']).toBe(
       'string',
     )
-    // The whole point: no tools/call hit the wire.
+    // Cold discovery did use the network; only the operation mutation is
+    // skipped. This distinction is part of the user-facing dry-run contract.
+    expect(fetch).toHaveBeenCalled()
+    expect(bodies.some((body) => body.method === 'tools/list')).toBe(true)
     expect(bodies.some((body) => body.method === 'tools/call')).toBe(false)
   })
 
@@ -403,7 +416,7 @@ describe('callOperation', () => {
         typeof init.body === 'string'
           ? (JSON.parse(init.body) as Record<string, unknown>)
           : undefined
-      if (u.endsWith('/.well-known/ucp')) return jsonResponse(PROFILE)
+      if (u.endsWith('/.well-known/ucp')) return jsonResponse(BUSINESS_PROFILE)
       return jsonResponse({
         jsonrpc: '2.0',
         id: body?.id,
@@ -420,7 +433,7 @@ describe('callOperation', () => {
           toolName: 'search_catalog',
           input: { query: 'boots' },
         },
-        { cacheDir, agent: AGENT, fetch, profileUrl: PROFILE_URL, dryRun: true },
+        { cacheDir, profile: RUNTIME_PROFILE, fetch, dryRun: true },
       ),
     ).rejects.toMatchObject({ code: 'SCHEMA_VALIDATION_FAILED' })
   })
@@ -438,7 +451,7 @@ describe('callOperation', () => {
         typeof init.body === 'string'
           ? (JSON.parse(init.body) as Record<string, unknown>)
           : undefined
-      if (u.endsWith('/.well-known/ucp')) return jsonResponse(PROFILE)
+      if (u.endsWith('/.well-known/ucp')) return jsonResponse(BUSINESS_PROFILE)
       if (body?.method === 'tools/list') {
         return jsonResponse({
           jsonrpc: '2.0',
@@ -459,9 +472,8 @@ describe('callOperation', () => {
       },
       {
         cacheDir,
-        agent: AGENT,
+        profile: RUNTIME_PROFILE,
         fetch,
-        profileUrl: PROFILE_URL,
         _onDiscover: (d) => {
           captured.push({ business: d.business, negotiatedKeys: Object.keys(d.negotiated) })
         },
@@ -477,7 +489,7 @@ describe('callOperation', () => {
         typeof init.body === 'string'
           ? (JSON.parse(init.body) as Record<string, unknown>)
           : undefined
-      if (u.endsWith('/.well-known/ucp')) return jsonResponse(PROFILE)
+      if (u.endsWith('/.well-known/ucp')) return jsonResponse(BUSINESS_PROFILE)
       // tools/list omits the requested tool — discover succeeds, but the
       // operation lookup will throw OPERATION_NOT_OFFERED. Callback must
       // still have fired by then.
@@ -498,9 +510,8 @@ describe('callOperation', () => {
       },
       {
         cacheDir,
-        agent: AGENT,
+        profile: RUNTIME_PROFILE,
         fetch,
-        profileUrl: PROFILE_URL,
         _onDiscover: () => {
           fired = true
         },
@@ -556,7 +567,7 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
           ? (JSON.parse(init.body) as Record<string, unknown>)
           : undefined
       if (body?.method) calls.push(body.method as string)
-      if (u.endsWith('/.well-known/ucp')) return jsonResponse(PROFILE)
+      if (u.endsWith('/.well-known/ucp')) return jsonResponse(BUSINESS_PROFILE)
       if (body?.method === 'tools/list') {
         return jsonResponse({
           jsonrpc: '2.0',
@@ -589,7 +600,7 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
         toolName: 'search_catalog',
         input: { catalog: { query: 'boots' } },
       },
-      { cacheDir, agent: AGENT, fetch: buildFetch(SEARCH_SCHEMA), profileUrl: PROFILE_URL },
+      { cacheDir, profile: RUNTIME_PROFILE, fetch: buildFetch(SEARCH_SCHEMA) },
     )
     expect(result).toBeDefined()
     // Happy path emits no validator-related verbose traces (the discover
@@ -610,9 +621,8 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
       },
       {
         cacheDir,
-        agent: AGENT,
+        profile: RUNTIME_PROFILE,
         fetch: buildFetch(UNCOMPILABLE_SCHEMA, calls),
-        profileUrl: PROFILE_URL,
       },
     )
     // Request reached the server; no local throw.
@@ -630,9 +640,8 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
       },
       {
         cacheDir,
-        agent: AGENT,
+        profile: RUNTIME_PROFILE,
         fetch: buildFetch(UNCOMPILABLE_SCHEMA),
-        profileUrl: PROFILE_URL,
       },
     )
     const skipTrace = verboseLines.find((l) => l.includes('validate: skipped'))
@@ -657,9 +666,8 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
       },
       {
         cacheDir,
-        agent: AGENT,
+        profile: RUNTIME_PROFILE,
         fetch: buildFetch(UNCOMPILABLE_SCHEMA),
-        profileUrl: PROFILE_URL,
       },
     ).catch((err) => {
       captured = err
@@ -695,9 +703,8 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
       },
       {
         cacheDir,
-        agent: AGENT,
+        profile: RUNTIME_PROFILE,
         fetch: buildFetch(SEARCH_SCHEMA, calls),
-        profileUrl: PROFILE_URL,
       },
     )
     expect(calls).toContain('tools/call')
@@ -717,7 +724,7 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
           },
         },
       },
-      { cacheDir, agent: AGENT, fetch: buildFetch(SEARCH_SCHEMA), profileUrl: PROFILE_URL },
+      { cacheDir, profile: RUNTIME_PROFILE, fetch: buildFetch(SEARCH_SCHEMA) },
     )
     const flagTrace = verboseLines.find((l) => l.includes('not listed in published schema'))
     expect(flagTrace).toBeDefined()
@@ -741,7 +748,7 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
           },
         },
       },
-      { cacheDir, agent: AGENT, fetch: buildFetch(SEARCH_SCHEMA), profileUrl: PROFILE_URL },
+      { cacheDir, profile: RUNTIME_PROFILE, fetch: buildFetch(SEARCH_SCHEMA) },
     ).catch((err) => {
       captured = err
     })
@@ -764,7 +771,7 @@ describe('validateOperationInput — dialect resilience and soft signals', () =>
       BUSINESS_URL,
       // Missing the required `catalog` field.
       { capability: 'dev.ucp.shopping', toolName: 'search_catalog', input: {} },
-      { cacheDir, agent: AGENT, fetch: buildFetch(SEARCH_SCHEMA), profileUrl: PROFILE_URL },
+      { cacheDir, profile: RUNTIME_PROFILE, fetch: buildFetch(SEARCH_SCHEMA) },
     ).catch((err) => {
       captured = err
     })
@@ -960,9 +967,8 @@ describe('callOperation — extension keys are judged at the NEGOTIATED release'
       },
       {
         cacheDir,
-        agent: agentProfileFixture({ version }),
+        profile: profileFixture({ version, url: PROFILE_URL }),
         fetch: fetchAt(version),
-        profileUrl: PROFILE_URL,
       },
     )
   }

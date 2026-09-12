@@ -7,13 +7,20 @@
 // test:integration does so for you).
 
 import { execFile, spawn } from 'node:child_process'
-import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { platform, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
+import { RELEASES } from '../../src/core/releases.js'
 import { startMockBusiness } from '../fixtures/mock-business.js'
+import {
+  MOCK_CART_ID,
+  MOCK_LEGACY_PROFILE_PATH,
+  startMockUcpShopping,
+} from '../fixtures/mock-ucp-shopping.js'
+import { freshUcpEnv } from '../fixtures/subprocess-env.js'
 
 const execFileAsync = promisify(execFile)
 const CLI_PATH = fileURLToPath(new URL('../../dist/bin.js', import.meta.url))
@@ -91,15 +98,11 @@ describe('smoke: compiled binary', () => {
   // module evaluation, and any module-scope CTA constant not yet initialized
   // silently drops out of the wire envelope. Unit tests import the module
   // first and cannot see it — only the compiled binary can, so this runs it.
-  //
-  // Profile init is required before any dispatch, so this exercises the
-  // compiled binary's structured CTA path for that first-run failure.
-  it('emits PROFILE_NOT_FOUND with structured cta when no profile is initialized', async () => {
-    const env: Record<string, string> = {}
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && k !== 'UCP_BUSINESS') env[k] = v
-    }
-    env.UCP_HOME = await mkdtemp(join(tmpdir(), 'ucp-no-session-'))
+  // A fresh install has a managed Profile, so the first missing session leg is
+  // now the Business target.
+  it('emits BUSINESS_NOT_RESOLVED with structured cta when no Business is selected', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'ucp-no-session-'))
+    const env = freshUcpEnv(home)
     const { stdout, code } = await new Promise<{ stdout: string; code: number }>((resolve) => {
       execFile('node', [CLI_PATH, 'cart', 'create'], { env }, (err, out) => {
         const e = err as { code?: number } | null
@@ -108,25 +111,17 @@ describe('smoke: compiled binary', () => {
     })
     expect(code).toBe(1)
     const parsed = JSON.parse(stdout) as { code: string; cta?: { commands?: unknown[] } }
-    expect(parsed.code).toBe('PROFILE_NOT_FOUND')
+    expect(parsed.code).toBe('BUSINESS_NOT_RESOLVED')
     expect(parsed.cta?.commands?.length ?? 0).toBeGreaterThan(0)
   })
 
   // --input-schema is the agent's introspection lever; it short-circuits before
   // dispatch but still flows through the same session resolver. Exercising
-  // it via the compiled binary confirms the flag survives the build and
-  // lands on the same BUSINESS_NOT_RESOLVED path as a normal op when no
-  // business is bound — i.e. agents trying to introspect first won't get
-  // a different error shape than agents trying to dispatch.
-  //
-  // `--input-schema` still goes through session resolution, so it requires a local
-  // profile before it can discover a business schema.
-  it('--input-schema still requires an initialized profile', async () => {
-    const env: Record<string, string> = {}
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && k !== 'UCP_BUSINESS') env[k] = v
-    }
-    env.UCP_HOME = await mkdtemp(join(tmpdir(), 'ucp-describe-no-session-'))
+  // it via the compiled binary confirms the flag survives the build and lands
+  // on the same missing-Business path as a normal operation.
+  it('--input-schema also reports BUSINESS_NOT_RESOLVED on a fresh install', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'ucp-describe-no-session-'))
+    const env = freshUcpEnv(home)
     const { stdout, code } = await new Promise<{ stdout: string; code: number }>((resolve) => {
       execFile('node', [CLI_PATH, 'cart', 'create', '--input-schema'], { env }, (err, out) => {
         const e = err as { code?: number } | null
@@ -135,41 +130,13 @@ describe('smoke: compiled binary', () => {
     })
     expect(code).toBe(1)
     const parsed = JSON.parse(stdout) as { code: string; cta?: { commands?: unknown[] } }
-    expect(parsed.code).toBe('PROFILE_NOT_FOUND')
+    expect(parsed.code).toBe('BUSINESS_NOT_RESOLVED')
     expect(parsed.cta?.commands?.length ?? 0).toBeGreaterThan(0)
   })
 
-  // `doctor` signals a `fail` check by exiting nonzero while printing the
-  // unchanged checks envelope on stdout. The mechanism is `process.exitCode`
-  // (incur's error sentinel would replace `data` with `{code, message}` and
-  // delete the checks array), so it only works if nothing downstream resets
-  // it — which only the real binary, exiting for real, can prove.
-  it('doctor exits 1 when a check fails, keeping the checks envelope on stdout', async () => {
-    const env: Record<string, string> = {}
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && k !== 'UCP_BUSINESS') env[k] = v
-    }
-    env.UCP_HOME = await mkdtemp(join(tmpdir(), 'ucp-doctor-fail-'))
-    const { stdout, code } = await new Promise<{ stdout: string; code: number }>((resolve) => {
-      execFile('node', [CLI_PATH, 'doctor', '--skip-network'], { env }, (err, out) => {
-        const e = err as { code?: number } | null
-        resolve({ stdout: out, code: e?.code ?? 0 })
-      })
-    })
-    expect(code).toBe(1)
-    const parsed = JSON.parse(stdout) as { ok: boolean; checks: { id: string; status: string }[] }
-    expect(parsed.ok).toBe(false)
-    // No profile is initialized in this fresh home.
-    expect(parsed.checks.find((c) => c.id === 'active-profile')?.status).toBe('fail')
-  })
-
-  it('doctor exits 0 when every check passes', async () => {
-    const env: Record<string, string> = {}
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && k !== 'UCP_BUSINESS') env[k] = v
-    }
-    env.UCP_HOME = await mkdtemp(join(tmpdir(), 'ucp-doctor-ok-'))
-    await execFileAsync('node', [CLI_PATH, 'profile', 'init', '--name', 'agent'], { env })
+  it('doctor --skip-network exits 0 on a fresh managed install', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'ucp-doctor-ok-'))
+    const env = freshUcpEnv(home)
     const { stdout, code } = await new Promise<{ stdout: string; code: number }>((resolve) => {
       execFile('node', [CLI_PATH, 'doctor', '--skip-network'], { env }, (err, out) => {
         const e = err as { code?: number } | null
@@ -177,7 +144,32 @@ describe('smoke: compiled binary', () => {
       })
     })
     expect(code).toBe(0)
-    expect((JSON.parse(stdout) as { ok: boolean }).ok).toBe(true)
+    const parsed = JSON.parse(stdout) as { ok: boolean; checks: { id: string; status: string }[] }
+    expect(parsed.ok).toBe(true)
+    expect(parsed.checks.find((c) => c.id === 'active-profile')?.status).toBe('ok')
+  })
+
+  // A named selection is explicit and must never silently fall back to
+  // managed. This also pins the compiled doctor's nonzero exit mechanism.
+  it('doctor exits 1 for a ghost explicit active Profile, preserving checks', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'ucp-doctor-ghost-'))
+    const env = freshUcpEnv(home)
+    await writeFile(join(home, 'active.yaml'), 'profile: ghost\n', 'utf-8')
+    const { stdout, code } = await new Promise<{ stdout: string; code: number }>((resolve) => {
+      execFile('node', [CLI_PATH, 'doctor', '--skip-network'], { env }, (err, out) => {
+        const e = err as { code?: number } | null
+        resolve({ stdout: out, code: e?.code ?? 0 })
+      })
+    })
+    expect(code).toBe(1)
+    const parsed = JSON.parse(stdout) as {
+      ok: boolean
+      checks: { id: string; status: string; detail: string }[]
+    }
+    expect(parsed.ok).toBe(false)
+    const activeProfile = parsed.checks.find((check) => check.id === 'active-profile')
+    expect(activeProfile?.status).toBe('fail')
+    expect(activeProfile?.detail).toContain('ghost')
   })
 
   it('--help advertises --input-schema on op commands', async () => {
@@ -298,12 +290,7 @@ describe('smoke: --mcp stdio', () => {
   }
 
   function envFor(home: string): Record<string, string> {
-    const env: Record<string, string> = {}
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && k !== 'UCP_BUSINESS') env[k] = v
-    }
-    env.UCP_HOME = home
-    return env
+    return freshUcpEnv(home)
   }
 
   // incur defaults MCP tool discovery to 'progressive', which publishes four
@@ -313,9 +300,7 @@ describe('smoke: --mcp stdio', () => {
   // stopped taking effect and the contract silently changed.
   it('exposes one tool per command under tools/list (direct discovery)', async () => {
     const home = await mkdtemp(join(tmpdir(), 'ucp-mcp-tools-'))
-    await mkdir(home, { recursive: true })
     const env = envFor(home)
-    await execFileAsync('node', [CLI_PATH, 'profile', 'init', '--name', 'agent'], { env })
 
     const mcp = launch(env)
     try {
@@ -347,19 +332,15 @@ describe('smoke: --mcp stdio', () => {
   })
 
   // active.yaml is process-global while an MCP server may serve many unrelated
-  // conversations. An omitted business must fail closed instead of inheriting
-  // whichever target a local CLI invocation most recently selected.
+  // conversations. Omitted routing must fail closed instead of inheriting
+  // either active leg. The missing profile name also makes a leak distinguishable
+  // from the managed default.
   it('ignores all active.yaml session state during tools/call', async () => {
     const home = await mkdtemp(join(tmpdir(), 'ucp-mcp-session-'))
-    await mkdir(home, { recursive: true })
     const env = envFor(home)
-    await execFileAsync('node', [CLI_PATH, 'profile', 'init', '--name', 'agent'], { env })
-    // Seed values that would be unmistakable if ambient state leaked into
-    // dispatch. Calls below omit both fields, then supply only the profile, so
-    // the assertions independently cover profile and business resolution.
     await writeFile(
       `${home}/active.yaml`,
-      'profile: agent\nbusiness: https://shop.example.invalid\n',
+      'profile: ghost\nbusiness: https://shop.example.invalid\n',
       'utf-8',
     )
 
@@ -375,37 +356,98 @@ describe('smoke: --mcp stdio', () => {
           arguments: { input: '{"line_items":[]}' },
         },
       })
-      const withoutProfile = (await mcp.waitForResponseId(1)) as {
+      const response = (await mcp.waitForResponseId(1)) as {
         result: { content: { text: string }[]; isError: boolean }
       }
-      expect(withoutProfile.result.isError).toBe(true)
-      expect(withoutProfile.result.content[0]?.text).toMatch(/no local profile selected/)
-
-      mcp.send({
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/call',
-        params: {
-          name: 'cart_create',
-          arguments: { profile: 'agent', input: '{"line_items":[]}' },
-        },
-      })
-      const withoutBusiness = (await mcp.waitForResponseId(2)) as {
-        result: { content: { text: string }[]; isError: boolean }
-      }
-      expect(withoutBusiness.result.isError).toBe(true)
-      const text = withoutBusiness.result.content[0]?.text ?? ''
+      expect(response.result.isError).toBe(true)
+      const text = response.result.content[0]?.text ?? ''
       expect(text).toMatch(/no target business resolved/)
       expect(text).toMatch(/Pass business in this tool call/)
       expect(text).toMatch(/UCP_BUSINESS/)
-      expect(text).not.toMatch(/ucp use|active\.yaml/)
+      expect(text).not.toMatch(/no local profile|ghost|ucp use|active\.yaml/)
       expect(text).not.toMatch(/shop\.example\.invalid|fetch failed/)
     } finally {
       await mcp.close()
     }
   })
 
-  it('surfaces PROFILE_NOT_FOUND message when no profile is initialized', async () => {
+  it('ignores active DIY routing and uses managed 08 for an explicit Business', async () => {
+    const mock = await startMockUcpShopping()
+    const home = await mkdtemp(join(tmpdir(), 'ucp-managed-mcp-'))
+    const profileName = 'ambient-diy'
+    const profileDir = join(home, 'profiles', profileName)
+    try {
+      await mkdir(profileDir, { recursive: true })
+      await writeFile(
+        join(profileDir, 'profile.json'),
+        RELEASES['2026-04-08'].agentProfileJson,
+        'utf-8',
+      )
+      await writeFile(
+        join(profileDir, 'meta.json'),
+        `${JSON.stringify(
+          {
+            format_version: 2,
+            kind: 'diy',
+            profile_url: 'https://agent.example.test/ambient-04-profile.json',
+          },
+          null,
+          2,
+        )}\n`,
+        'utf-8',
+      )
+      await writeFile(
+        join(home, 'active.yaml'),
+        `profile: ${profileName}\nbusiness: https://wrong-business.example.invalid\n`,
+        'utf-8',
+      )
+
+      const mcp = launch(envFor(home))
+      try {
+        await initialize(mcp)
+        mcp.send({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'cart_create',
+            // No Profile argument: MCP must ignore active.yaml and default managed.
+            arguments: { business: mock.url, input: '{"line_items":[]}' },
+          },
+        })
+        const response = (await mcp.waitForResponseId(1)) as {
+          result: { content: Array<{ text: string }>; isError?: boolean }
+        }
+        expect(response.result.isError).not.toBe(true)
+        expect(response.result.content.map((item) => item.text).join('\n')).toContain(MOCK_CART_ID)
+
+        const managedUrl = RELEASES['2026-08-25'].defaultAgentProfileUrl
+        expect(mock.rpcRequests.map((request) => request.method)).toEqual([
+          'tools/list',
+          'tools/call',
+        ])
+        expect(mock.rpcRequests.map((request) => request.agentProfileUrl)).toEqual([
+          managedUrl,
+          managedUrl,
+        ])
+        expect(
+          mock.requests.filter(
+            (request) => request.method === 'GET' && request.path.startsWith('/.well-known/ucp'),
+          ),
+        ).toHaveLength(1)
+        expect(mock.requests.some((request) => request.path === MOCK_LEGACY_PROFILE_PATH)).toBe(
+          false,
+        )
+      } finally {
+        await mcp.close()
+      }
+    } finally {
+      await mock.close()
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+
+  it('defaults to managed and reports the missing Business on a fresh home', async () => {
     const home = await mkdtemp(join(tmpdir(), 'ucp-mcp-nosession-'))
     const mcp = launch(envFor(home))
     try {
@@ -424,8 +466,7 @@ describe('smoke: --mcp stdio', () => {
       }
       expect(response.result.isError).toBe(true)
       // MCP path strips the structured envelope; message text is all we get.
-      // Tracked separately — see README caveats.
-      expect(response.result.content[0]?.text).toMatch(/no local profile selected/)
+      expect(response.result.content[0]?.text).toMatch(/no target business resolved/)
     } finally {
       await mcp.close()
     }

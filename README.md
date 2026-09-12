@@ -14,7 +14,6 @@ Designed agent-first. Structured JSON I/O on every command. Schema introspection
 ```sh
 $> npm install -g @shopify/ucp-cli
 $> ucp skills add
-$> ucp profile init --name shopper
 ```
 ### 1. Find products
 
@@ -52,7 +51,7 @@ The merchant returns a cart with confirmed pricing and `continue_url` that the b
 Need a shipping-cost preview before checkout? Inspect `ucp cart update --input-schema`; if the merchant accepts fulfillment destinations on cart update, send the buyer destination there to get merchant-provided estimates. Use checkout for the complete shipping/pickup option map and final selectable options.
 
 ### 3. Convert to checkout, configure handoff, complete
-Some checkouts require additional buyer input or review that the agent can't negotiate on the buyer's behalf. When the merchant returns an escalation status with a continue URL, configure a custom hook and the CLI will call it to handle the handoff. 
+Some checkouts require additional buyer input or review that the agent can't negotiate on the buyer's behalf. When the merchant returns an escalation status with a continue URL, configure a custom hook and the CLI will call it to handle the handoff.
 
 ```sh
 export UCP_ON_ESCALATION='jq -r .url | xargs open'   # macOS; xdg-open on Linux
@@ -92,41 +91,20 @@ The skill packages the agent-facing operating model — when to search vs discov
 
 A **business** is a URL — `https://shop.example.com`. The CLI fetches the business's UCP profile (cached on disk per spec TTL), negotiates the protocol version + transport, and dispatches operations against its endpoint. UCP CLI abstracts transport, service + capability negotiation, ..., and error handling.
 
-### Choosing a protocol version
+### Protocol releases
 
 ```sh
-ucp --version        # ucp 0.7.0 (UCP 2026-04-08, 2026-08-25)
+ucp --version        # ucp 0.9.0 (UCP 2026-04-08, 2026-08-25)
 ```
 
-The parenthetical lists the UCP releases this CLI supports. Which one you speak is set by your **active profile** — a profile declares exactly one `ucp.version`, and merchants validate that exact version on every request. So switching version means switching profile:
-
-```sh
-ucp profile init --name legacy --version 2026-04-08   # create a profile pinned to an older release
-ucp discover shop.example.com --profile legacy        # ...and use it
-```
-
-Each profile has two halves, and one contract between them:
-
-- `~/.ucp/profiles/<name>/profile.json` — the document the CLI declares. Its `ucp.version` is the release you speak; its services and capabilities are what you offer to negotiate.
-- `meta.profile_url` — where that document lives on the web. The CLI sends this URL on every request, merchants fetch it, and they negotiate against whatever it serves.
-
-**The two must say the same thing.** Keeping them equal is your job — `ucp doctor` is what checks: `protocol` fails when the URL is unreachable or serves a different `ucp.version` than you send, `profile-drift` warns when the rest of the document differs. `profile init` starts them in agreement by writing the release's published document to disk.
-
-To advertise a capability set of your own, put the document at a URL you control. Nothing is signed, so **whoever controls that URL controls this agent's identity.**
-
-```sh
-ucp profile init --name mine --profile-url https://you.example/agent.json
-# edit ~/.ucp/profiles/mine/profile.json
-# upload it to that URL yourself — scp, S3, whatever you host with
-ucp doctor           # confirms the two agree
-```
+The parenthetical lists the UCP releases this CLI supports. For each Business, the CLI uses the newest release both sides support. Intentional release pinning and custom Profiles are covered in [`skills/ucp/references/SETUP.md`](skills/ucp/references/SETUP.md). Profile documents are unsigned, so **whoever controls the advertised URL controls the agent's identity.**
 
 Two scopes for picking which business an operation targets:
 
 - **Global catalog (no `--business`)** — for product discovery across thousands of merchants. Each result names its merchant via `seller.domain`.
-- **Per-merchant (`--business <url>`)** — for cart, checkout, order, or catalog operations scoped to a single merchant. 
+- **Per-merchant (`--business <url>`)** — for cart, checkout, order, or catalog operations scoped to a single merchant.
 
-**Live introspection so the agent never guesses.** Both `discover` and `--input-schema` make a real network call to the merchant; they're not static doc lookups. The schema you get back is whatever the merchant currently advertises — including extensions they've added since you last shopped there. Merchants stay in authoritative control of their own schemas; they can evolve, deprecate, or extend without coordinated releases against the CLI or the agent. Capability negotiation is real: the agent and merchant agree on what to use based on what's actually offered right now.
+**Live introspection so the agent never guesses.** Both `discover` and `--input-schema` read the merchant's own advertised schemas rather than static docs; results are cached briefly, and `--refresh` forces a fresh fetch. The schema you get back is whatever the merchant currently advertises — including extensions they've added since you last shopped there. Merchants stay in authoritative control of their own schemas; they can evolve, deprecate, or extend without coordinated releases against the CLI or the agent. Capability negotiation is real: the agent and merchant agree on what to use based on what's actually offered right now.
 
 ```sh
 ucp discover --business https://<seller-domain>                         # what operations are offered
@@ -135,7 +113,7 @@ ucp cart update --input-schema --business https://<seller-domain>       # cart-s
 ucp checkout update --input-schema --business https://<seller-domain>   # full fulfillment option map/final fields
 ```
 
-**Every response carries a `cta`.** The CLI is context-aware — it tracks where you are in the flow and surfaces the next-best step(s) as structured recommendations the agent should consider. Successful responses point forward (cart created → here are the checkout / refine / search-more commands); error responses point at recovery (schema validation failed → here's the `--input-schema` command to introspect first). The agent doesn't have to memorize the operating model; the CLI threads it through.
+**Most responses carry a `cta`.** The CLI is context-aware — it tracks where you are in the flow and surfaces the next-best step(s) as structured recommendations the agent should consider. Successful responses point forward (cart created → here are the checkout / refine / search-more commands); recoverable errors point at recovery (schema validation failed → here's the `--input-schema` command to introspect first). The agent doesn't have to memorize the operating model; the CLI threads it through. Errors themselves stay flat — `code` and `message` always, `retryable` and `cta` optional — so branch on the full `code` and read a CTA as advice.
 
 ```sh
 $ ucp cart create --business https://shop.example.com \
@@ -238,7 +216,7 @@ ucp cart update <id> --business https://<seller-domain> \
   --dry-run
 ```
 
-Builds and validates the request, prints the exact payload that would hit the wire (including auto-injected `meta.idempotency-key` and `meta.ucp-agent`), skips the network call. Cart and checkout updates are full-replace: carry forward request-shaped line items, using `line_items[].id` only for existing lines and `line_items[].item.id` for the underlying item/variant. Useful for debugging payloads or confirming a mutation before issuing it.
+Builds and validates the request, prints the exact payload that would hit the wire (including auto-injected `meta.idempotency-key` and `meta.ucp-agent`), and skips the operation call — discovery still runs first, so a cold or `--refresh`ed cache can still hit the network. Cart and checkout updates are full-replace: carry forward request-shaped line items, using `line_items[].id` only for existing lines and `line_items[].item.id` for the underlying item/variant. Useful for debugging payloads or confirming a mutation before issuing it.
 
 ### Custom request headers (auth, tenancy, tracing)
 
@@ -251,7 +229,7 @@ UCP requests attach a built-in `User-Agent: @shopify/ucp-cli/<version>`. Overrid
 
 Higher source wins per header name (case-insensitive); non-conflicting headers from every source ship. Empty values unset for that scope. Framing headers the dispatcher owns (`Content-Type`, `Accept`, `Host`, `Connection`, hop-by-hop, `MCP-Protocol-Version`) are silently dropped from all user sources. Sensitive header values (`Authorization`, `Cookie`, and any name ending in `-Token`, `-Key`, `-Secret`, `-Password`) are redacted in verbose traces (`UCP_VERBOSE=1`).
 
-Persistent setup, modeled on git's `[http]` / `[http "<URL>"]`:
+Persistent setup needs a named Profile (see [`skills/ucp/references/SETUP.md`](skills/ucp/references/SETUP.md)), and is modeled on git's `[http]` / `[http "<URL>"]`:
 
 ```json
 {

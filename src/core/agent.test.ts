@@ -5,20 +5,19 @@
 // `PROFILE_*` codes (profile.ts) and no code may mean both; the code→layer
 // invariant is asserted separately in `lib/error-layers.test.ts`.
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { ErrorCodes, UcpError } from '../lib/errors.js'
+import { rendering } from '../test-utils.js'
 import {
   agentProfileRedirect,
+  createAdHocProfile,
+  createDiyProfile,
+  createManagedProfile,
   fetchAgentProfileLive,
   loadAgentProfile,
-  resolveAgentProfile,
 } from './agent.js'
-import { LATEST, RELEASES } from './releases.js'
+import { LATEST, RELEASES, SUPPORTED_VERSIONS } from './releases.js'
 import { setWarnWriter } from './verbose.js'
 
 const SELF_HOSTED = 'https://agent.example.invalid/agent.json'
@@ -45,7 +44,14 @@ afterEach(() => {
 
 describe('loadAgentProfile — failure codes are all AGENT_PROFILE_*', () => {
   it('AGENT_PROFILE_SCHEMA_INVALID when the body carries no ucp.version', () => {
-    expect(() => loadAgentProfile({ body: { nope: true }, url: SELF_HOSTED })).toThrowError(
+    expect(() =>
+      loadAgentProfile({
+        body: { nope: true },
+        url: SELF_HOSTED,
+        source: 'diy',
+        urlOverride: false,
+      }),
+    ).toThrowError(
       expect.objectContaining({
         code: 'AGENT_PROFILE_SCHEMA_INVALID',
         layer: 'client',
@@ -56,7 +62,15 @@ describe('loadAgentProfile — failure codes are all AGENT_PROFILE_*', () => {
   it('AGENT_PROFILE_SCHEMA_INVALID when the release schema rejects the body', () => {
     const body = publishedBody()
     body.ucp.services = 'reshaped'
-    expect(() => loadAgentProfile({ body, url: SELF_HOSTED, name: 'agent' })).toThrowError(
+    expect(() =>
+      loadAgentProfile({
+        body,
+        url: SELF_HOSTED,
+        source: 'diy',
+        urlOverride: false,
+        name: 'agent',
+      }),
+    ).toThrowError(
       expect.objectContaining({
         code: 'AGENT_PROFILE_SCHEMA_INVALID',
         layer: 'client',
@@ -68,7 +82,9 @@ describe('loadAgentProfile — failure codes are all AGENT_PROFILE_*', () => {
   it('AGENT_PROFILE_VERSION_UNSUPPORTED names both the profile version and our window', () => {
     const body = publishedBody()
     body.ucp.version = '2026-12-01'
-    expect(() => loadAgentProfile({ body, url: SELF_HOSTED })).toThrowError(
+    expect(() =>
+      loadAgentProfile({ body, url: SELF_HOSTED, source: 'diy', urlOverride: false }),
+    ).toThrowError(
       expect.objectContaining({
         code: 'AGENT_PROFILE_VERSION_UNSUPPORTED',
         layer: 'client',
@@ -82,11 +98,9 @@ describe('loadAgentProfile — failure codes are all AGENT_PROFILE_*', () => {
 
 // ─── Severity split: whose document is it? ─────────────────────────────────
 //
-// A `dev.ucp.*` entry off the profile's own `ucp.version` is the same defect
-// wherever the URL points, and the remedy is the same too: the bytes ucp-cli
-// declares come from `profile.json`, which the reader can edit. Proceeding
-// would send a declaration whose off-version entries silently fail to
-// negotiate.
+// These direct-loader fixtures model DIY documents. A `dev.ucp.*` entry off
+// the profile's own `ucp.version` would silently fail to negotiate, so loading
+// it is fatal regardless of where its DIY author publishes it.
 
 describe('loadAgentProfile — AGENT_PROFILE_VERSION_MISMATCH', () => {
   function mixedVersionBody(): ReturnType<typeof publishedBody> {
@@ -103,7 +117,13 @@ describe('loadAgentProfile — AGENT_PROFILE_VERSION_MISMATCH', () => {
   it('is fatal, naming the entry that is off and both versions', () => {
     captureWarnings()
     expect(() =>
-      loadAgentProfile({ body: mixedVersionBody(), url: SELF_HOSTED, name: 'mine' }),
+      loadAgentProfile({
+        body: mixedVersionBody(),
+        url: SELF_HOSTED,
+        source: 'diy',
+        urlOverride: false,
+        name: 'mine',
+      }),
     ).toThrowError(
       expect.objectContaining({
         code: 'AGENT_PROFILE_VERSION_MISMATCH',
@@ -121,7 +141,12 @@ describe('loadAgentProfile — AGENT_PROFILE_VERSION_MISMATCH', () => {
   it('the fatal case carries no `kind` — that discriminator belongs to the merchant code', () => {
     let caught: { context: Record<string, unknown> } | undefined
     try {
-      loadAgentProfile({ body: mixedVersionBody(), url: SELF_HOSTED })
+      loadAgentProfile({
+        body: mixedVersionBody(),
+        url: SELF_HOSTED,
+        source: 'diy',
+        urlOverride: false,
+      })
     } catch (err) {
       caught = err as { context: Record<string, unknown> }
     }
@@ -133,7 +158,13 @@ describe('loadAgentProfile — AGENT_PROFILE_VERSION_MISMATCH', () => {
   it('is fatal on a release-default URL too', () => {
     captureWarnings()
     expect(() =>
-      loadAgentProfile({ body: mixedVersionBody(), url: DEFAULT_0825, name: 'agent' }),
+      loadAgentProfile({
+        body: mixedVersionBody(),
+        url: DEFAULT_0825,
+        source: 'diy',
+        urlOverride: false,
+        name: 'agent',
+      }),
     ).toThrowError(
       expect.objectContaining({ code: 'AGENT_PROFILE_VERSION_MISMATCH' }) as unknown as Error,
     )
@@ -150,6 +181,8 @@ describe('loadAgentProfile — AGENT_PROFILE_VERSION_MISMATCH', () => {
         loadAgentProfile({
           body: JSON.parse(rel.agentProfileJson),
           url: rel.defaultAgentProfileUrl,
+          source: 'managed',
+          urlOverride: false,
         }),
       ).not.toThrow()
     }
@@ -164,134 +197,130 @@ describe('loadAgentProfile — AGENT_PROFILE_VERSION_MISMATCH', () => {
 // tests have to prove is that the SOURCE is right — and that no fetch
 // implementation is even accepted, let alone called.
 
-describe('resolveAgentProfile — no profile name falls back to a published template', () => {
-  it('picks the template for the release the URL belongs to', async () => {
-    for (const rel of Object.values(RELEASES)) {
-      const agent = await resolveAgentProfile({ url: rel.defaultAgentProfileUrl })
+describe('createManagedProfile', () => {
+  it('matches every installed release with exact key/body/url/release invariants', () => {
+    const managed = createManagedProfile()
+    const another = createManagedProfile()
 
-      expect(agent.version).toBe(rel.version)
-      expect(agent.url).toBe(rel.defaultAgentProfileUrl)
-      // Identical to what a GET of that URL would have produced: the template
-      // is the verbatim published body (byte-identity is enforced by
-      // `pnpm gen:schemas` + the CI drift gate).
-      expect(agent).toStrictEqual(
-        loadAgentProfile({
-          body: JSON.parse(rel.agentProfileJson),
-          url: rel.defaultAgentProfileUrl,
-        }),
-      )
+    expect(managed.source).toBe('managed')
+    expect(managed).not.toHaveProperty('kind')
+    expect(managed.urlOverride).toBe(false)
+    expect(managed.name).toBeUndefined()
+    expect(Object.keys(managed.renderings)).toEqual(SUPPORTED_VERSIONS)
+    for (const version of SUPPORTED_VERSIONS) {
+      const installed = rendering(managed, version)
+      expect(installed.version).toBe(version)
+      expect(installed.source).toBe('managed')
+      expect(installed.urlOverride).toBe(false)
+      expect(installed.name).toBeUndefined()
+      expect(installed.body.ucp.version).toBe(version)
+      expect(installed.url).toBe(RELEASES[version].defaultAgentProfileUrl)
+      expect(installed.release).toBe(RELEASES[version])
+      expect(installed.body).not.toBe(RELEASES[version].agentProfileTemplate)
+      expect(installed.body).not.toBe(rendering(another, version).body)
     }
   })
 
-  it('defaults to the latest release when no URL is configured', async () => {
-    const agent = await resolveAgentProfile()
-    expect(agent.url).toBe(RELEASES[LATEST].defaultAgentProfileUrl)
-    expect(agent.version).toBe(LATEST)
-  })
+  // The name is the local profile directory an upgraded legacy profile came
+  // from: it selects headers.json and addresses this identity in messages.
+  // It must reach every rendering (that is what error text reads) without
+  // changing any URL — managed renderings are always the published documents.
+  it('carries an optional local profile name onto the Profile and every rendering', () => {
+    const named = createManagedProfile('legacy')
 
-  it('does not hand out the shared release template', async () => {
-    const agent = await resolveAgentProfile({ url: DEFAULT_0825 })
-    expect(agent.body).not.toBe(RELEASES['2026-08-25'].agentProfileTemplate)
+    expect(named.source).toBe('managed')
+    expect(named.urlOverride).toBe(false)
+    expect(named.name).toBe('legacy')
+    expect(Object.keys(named.renderings)).toEqual(SUPPORTED_VERSIONS)
+    for (const version of SUPPORTED_VERSIONS) {
+      expect(rendering(named, version).source).toBe('managed')
+      expect(rendering(named, version).urlOverride).toBe(false)
+      expect(rendering(named, version).name).toBe('legacy')
+      expect(rendering(named, version).url).toBe(RELEASES[version].defaultAgentProfileUrl)
+    }
   })
 })
 
-describe('resolveAgentProfile — a named profile is answered by its own profile.json', () => {
-  let home: string
-
-  beforeEach(async () => {
-    home = await mkdtemp(join(tmpdir(), 'ucp-agent-home-'))
-  })
-
-  afterEach(async () => {
-    await rm(home, { recursive: true, force: true })
-  })
-
-  async function writeProfile(name: string, body: unknown): Promise<string> {
-    const dir = join(home, 'profiles', name)
-    await mkdir(dir, { recursive: true })
-    const path = join(dir, 'profile.json')
-    await writeFile(path, `${typeof body === 'string' ? body : JSON.stringify(body, null, 2)}\n`)
-    return path
-  }
-
-  // THE contract, in one test: the URL is a Shopify-published release default
-  // and the local file still wins. Anything else makes an edit to the one file
-  // the reader owns a no-op that nothing reports.
-  it('reads profile.json even when the URL is a release default', async () => {
+describe('runtime Profile provenance', () => {
+  it('tracks body source and explicit URL override independently', () => {
     const body = publishedBody()
-    body.ucp.services = {
-      'dev.ucp.shopping': [{ version: '2026-08-25', transport: 'mcp' }],
-      'com.acme.svc': [{ version: '2025-01-01', transport: 'mcp' }],
-    }
-    await writeProfile('mine', body)
-
-    const agent = await resolveAgentProfile({ url: DEFAULT_0825, name: 'mine', homeDir: home })
-
-    expect(agent.url).toBe(DEFAULT_0825)
-    expect(Object.keys(agent.services).sort()).toEqual(['com.acme.svc', 'dev.ucp.shopping'])
-  })
-
-  // The premise the whole design rests on: `profile init` writes the same
-  // document the URL serves, so the disk document and a fetched body are the
-  // same shape and one validator consumes either. If this ever stops holding,
-  // the request path is reading something a merchant will never see.
-  it('produces exactly what the same bytes would produce over the wire', async () => {
-    const served = JSON.parse(RELEASES['2026-08-25'].agentProfileJson) as unknown
-    await writeProfile('mine', served)
-
-    const agent = await resolveAgentProfile({ url: SELF_HOSTED, name: 'mine', homeDir: home })
-
-    expect(agent).toStrictEqual(loadAgentProfile({ body: served, url: SELF_HOSTED, name: 'mine' }))
-    expect(agent.version).toBe('2026-08-25')
-    expect(Object.keys(agent.services)).toEqual(['dev.ucp.shopping'])
-  })
-
-  it('reads the user edits, not a published template', async () => {
-    const body = publishedBody()
-    body.ucp.services = {
-      'dev.ucp.shopping': [{ version: '2026-08-25', transport: 'mcp' }],
-      'com.acme.svc': [{ version: '2025-01-01', transport: 'mcp' }],
-    }
-    await writeProfile('mine', body)
-
-    const agent = await resolveAgentProfile({ url: SELF_HOSTED, name: 'mine', homeDir: home })
-
-    expect(Object.keys(agent.services).sort()).toEqual(['com.acme.svc', 'dev.ucp.shopping'])
-  })
-
-  it('is AGENT_PROFILE_SCHEMA_INVALID when the local document is not a UCP profile', async () => {
-    await writeProfile('mine', { nope: true })
-    await expect(
-      resolveAgentProfile({ url: SELF_HOSTED, name: 'mine', homeDir: home }),
-    ).rejects.toMatchObject({ code: 'AGENT_PROFILE_SCHEMA_INVALID', layer: 'client' })
-  })
-
-  it('is AGENT_PROFILE_SCHEMA_INVALID when profile.json is not valid JSON', async () => {
-    await writeProfile('mine', '{ not json')
-    await expect(
-      resolveAgentProfile({ url: SELF_HOSTED, name: 'mine', homeDir: home }),
-    ).rejects.toMatchObject({ code: 'AGENT_PROFILE_SCHEMA_INVALID', layer: 'client' })
-  })
-
-  it('names the file when there is no local document to read', async () => {
-    await expect(
-      resolveAgentProfile({ url: SELF_HOSTED, name: 'ghost', homeDir: home }),
-    ).rejects.toMatchObject({
-      code: 'PROFILE_NOT_FOUND',
-      message: expect.stringContaining('profile.json') as unknown as string,
+    const diy = createDiyProfile({ name: 'mine', body, url: SELF_HOSTED })
+    const overriddenDiy = createDiyProfile({
+      name: 'mine',
+      body,
+      url: SELF_HOSTED,
+      urlOverride: true,
     })
+    const adhoc = createAdHocProfile(DEFAULT_0825, 'mine')
+
+    expect(diy).toMatchObject({
+      source: 'diy',
+      urlOverride: false,
+      name: 'mine',
+    })
+    expect(rendering(diy, LATEST)).toMatchObject({ source: 'diy', urlOverride: false })
+    expect(overriddenDiy).toMatchObject({
+      source: 'diy',
+      urlOverride: true,
+      name: 'mine',
+    })
+    expect(rendering(overriddenDiy, LATEST)).toMatchObject({
+      source: 'diy',
+      urlOverride: true,
+      body: rendering(diy, LATEST).body,
+    })
+    expect(adhoc).toMatchObject({
+      source: 'url',
+      urlOverride: true,
+      name: 'mine',
+    })
+    expect(rendering(adhoc, LATEST)).toMatchObject({ source: 'url', urlOverride: true })
   })
 
-  // The rung no CLI path reaches: `discover({profileUrl})` with no profile
-  // name and no injected agent. The URL on the wire is still right, so this
-  // warns and negotiates generically rather than failing.
-  it('warns and falls back to the latest published template when no profile is named', async () => {
+  it('warns on every unknown URL-only or managed-alias override and uses the bundled LATEST body', () => {
     const warnings = captureWarnings()
-    const agent = await resolveAgentProfile({ url: SELF_HOSTED })
 
-    expect(agent.url).toBe(SELF_HOSTED)
-    expect(agent.version).toBe(LATEST)
-    expect(warnings.join('')).toContain('no local profile was named')
+    const nameless = createAdHocProfile(SELF_HOSTED)
+    const named = createAdHocProfile(SELF_HOSTED, 'legacy')
+
+    expect(warnings).toHaveLength(2)
+    for (const warning of warnings) {
+      expect(warning).toContain(SELF_HOSTED)
+      expect(warning).toContain(`bundled UCP ${LATEST} body`)
+      expect(warning).toMatch(/planning and negotiation/i)
+      expect(warning).toContain('ucp doctor')
+    }
+    expect(rendering(nameless, LATEST).body).toMatchObject(
+      JSON.parse(RELEASES[LATEST].agentProfileJson),
+    )
+    expect(rendering(named, LATEST)).toMatchObject({ name: 'legacy', url: SELF_HOSTED })
+  })
+
+  it('does not warn when a scalar override is a known release-default URL', () => {
+    const warnings = captureWarnings()
+
+    for (const rel of Object.values(RELEASES)) {
+      const profile = createAdHocProfile(rel.defaultAgentProfileUrl)
+      expect(Object.keys(profile.renderings)).toEqual([rel.version])
+      expect(rendering(profile, rel.version).url).toBe(rel.defaultAgentProfileUrl)
+    }
+    expect(warnings).toEqual([])
+  })
+
+  it('does not emit the bundled-body substitution warning for a named DIY URL override', () => {
+    const warnings = captureWarnings()
+    const body = publishedBody()
+
+    const profile = createDiyProfile({
+      name: 'mine',
+      body,
+      url: SELF_HOSTED,
+      urlOverride: true,
+    })
+
+    expect(warnings).toEqual([])
+    expect(rendering(profile, LATEST).body).toMatchObject(body)
+    expect(rendering(profile, LATEST).url).toBe(SELF_HOSTED)
   })
 })
 
@@ -322,6 +351,7 @@ describe('fetchAgentProfileLive — AGENT_PROFILE_UNREACHABLE carries a reason',
     const live = await fetchAgentProfileLive({ url: DEFAULT_0825, fetch })
 
     expect(live.agent.version).toBe('2026-04-08')
+    expect(live.agent.source).toBe('url')
     expect(live.cacheControl).toBe('public, max-age=300')
   })
 

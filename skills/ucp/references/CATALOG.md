@@ -291,7 +291,7 @@ There is no general Admin Product ID → Catalog UPID lookup. Source UPIDs from 
 
 ## Auth tiers and headers
 
-Global Catalog works tokenless for prototypes and low-RPS use once the CLI has a local agent profile (`ucp profile init --name agent`). That local profile is CLI identity setup, not merchant onboarding and not a Catalog API key.
+Global Catalog works tokenless for prototypes and low-RPS use.
 
 When you need production attribution, higher rate limits, authenticated pagination, or future buyer-linked personalization, pass a Catalog token as a normal UCP header:
 
@@ -301,7 +301,7 @@ ucp catalog search \
   --input '{"query":"running shoes","pagination":{"limit":10}}'
 ```
 
-For repeated use, store it in `~/.ucp/profiles/<name>/headers.json` scoped to the global Catalog origin:
+For repeated use, store it in `~/.ucp/profiles/<name>/headers.json` scoped to the global Catalog origin — persistent headers need a named Profile (see `SETUP.md`); otherwise keep passing `--header` per call:
 
 ```json
 {

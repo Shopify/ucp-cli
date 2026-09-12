@@ -1,60 +1,62 @@
-// Resolve the active profile and target business for dispatch.
+// Resolve the runtime Profile and target Business for dispatch.
 //
 // Precedence is first-defined-wins:
-//   profile:     option → UCP_PROFILE → active.yaml.profile → required local profile
-//   profile URL: option → UCP_AGENT_PROFILE_URL → profile metadata → default
-//   business:    option → UCP_BUSINESS → active.yaml.business
+//   profile name: option → UCP_PROFILE → active.yaml.profile → managed
+//   profile URL:  option → UCP_AGENT_PROFILE_URL → named profile metadata →
+//                 named body release default
+//   business:     option → UCP_BUSINESS → active.yaml.business
 //
-// The resolver returns what it can prove from local state. When a profile
-// carries no `meta.profile_url`, the fallback is the latest release's PUBLISHED
-// agent profile (`release(LATEST).defaultAgentProfileUrl`) — a real, reachable
-// document for the business to read. The CLI still negotiates from the named
-// profile's local `profile.json`; `ucp doctor` reports any disagreement.
+// A named local profile starts from the store's persisted classification;
+// this resolver turns that classification into the runtime rendering set. An
+// authored (DIY) profile is a singleton pinned to its body release. A profile whose
+// body is one ucp-cli generated — including every unmarked profile written by
+// 0.4.2 … 0.8.0 — is managed, and gets the same multi-rendering Profile a
+// fresh install gets, still carrying its local name for headers.json and
+// messages. core/legacy-profile.ts owns that decision; nothing here inspects
+// a body.
 //
-// `ActiveProfile` stays a POINTER: `{name, profileUrl, meta}`. The identity
-// document is not resolved here — `discover` does that from the URL plus the
-// profile NAME, and core/agent.ts answers it from that profile's own
-// `profile.json`, with no request.
+// With no name, the default is a managed Profile containing one independently
+// hosted rendering per installed release. An explicit URL override always
+// pins one rendering. For a named DIY Profile it replaces only the rendering
+// URL: the exact locally authored body remains the declaration. For managed
+// or nameless resolution there is no authored body to retain, so the override
+// produces one ad-hoc bundled rendering (known published URLs select their
+// release; unknown URLs use latest). A scalar URL is never spread across
+// managed renderings.
 //
-// v0.1/v0.2 local profile work: signing material is intentionally not threaded
-// through. The profile body may advertise public keys later, but request
-// signing remains a separate phase.
+// MCP mode does not read active.yaml. Explicit flags/env still apply; with no
+// explicit Profile it gets the same managed default as a fresh CLI session.
 
+import {
+  createAdHocProfile,
+  createDiyProfile,
+  createManagedProfile,
+  type Profile,
+} from '../core/agent.js'
 import { DEFAULT_CATALOG_URL } from '../core/profile.js'
 import {
   type ActiveSession,
   type ProfileMeta,
   readActive,
   readUserProfile,
+  type UserProfile,
 } from '../core/profile-store.js'
-import { LATEST, RELEASES } from '../core/releases.js'
-import { ErrorCodes, UcpError } from '../lib/errors.js'
-
-export interface ActiveProfile {
-  /** User-supplied local profile name. */
-  name: string
-  /**
-   * Where this profile is hosted. `resolveSession` precedence:
-   * option → `UCP_AGENT_PROFILE_URL` → `meta.profile_url` →
-   * `release(LATEST).defaultAgentProfileUrl` (the published default identity).
-   */
-  profileUrl?: string
-  /**
-   * Per-machine meta from the profile's `meta.json`. Catalog resolution reads
-   * `meta.defaults.catalog` here, not `package.json`.
-   */
-  meta?: ProfileMeta
-}
 
 /**
  * Where the resolved business URL came from. Used by --verbose to print a
- * one-liner at boot so agents can confirm precedence ate the right value
- * (e.g., a stale UCP_BUSINESS shadowing a newer `ucp use`).
+ * one-liner at boot so agents can confirm precedence ate the right value.
  */
 export type BusinessSource = 'flag' | 'env' | 'active.yaml'
 
 export interface ResolvedSession {
-  profile: ActiveProfile
+  profile: Profile
+  /**
+   * Local-only metadata/defaults for this session. Required: every
+   * resolution path produces one — a named profile's `meta.json`, or the
+   * synthesized defaults a nameless session runs on — and catalog fallback
+   * reads `defaults.catalog` off it unconditionally.
+   */
+  profileMeta: ProfileMeta
   /** Resolved business URL. Empty string is treated as unset. */
   business?: string
   /** Where `business` came from. Undefined when `business` is undefined. */
@@ -64,7 +66,7 @@ export interface ResolvedSession {
 export interface ResolveSessionOptions {
   /** `--profile <name>` flag override. */
   profile?: string
-  /** `--profile-url <url>` flag override. Tops the precedence chain. */
+  /** `--profile-url <url>` flag override. Tops the URL precedence chain. */
   profileUrl?: string
   /** `--business <url>` flag override. */
   business?: string
@@ -73,89 +75,95 @@ export interface ResolveSessionOptions {
   /** Override env-var lookup for tests. Defaults to `process.env`. */
   env?: Record<string, string | undefined>
   /**
-   * Set by `ucp --mcp`. Drops the `active.yaml` legs of both precedence
-   * chains; flags and `UCP_PROFILE` / `UCP_BUSINESS` are unaffected.
+   * Set by `ucp --mcp`. Drops both `active.yaml` precedence legs; explicit
+   * flags and environment variables are unaffected.
    */
   inMcpMode?: boolean
 }
 
 /**
- * Resolve active profile and active business target.
+ * Turn one classified stored Profile into the runtime rendering set used for
+ * planning and negotiation. Pure storage-to-runtime boundary: callers that
+ * already hold a UserProfile reuse the exact validation session resolution
+ * applies, including loadAgentProfile's cross-version snapshot invariant.
  */
+export function materializeUserProfile(user: UserProfile, profileUrlOverride?: string): Profile {
+  if (user.kind === 'managed') {
+    return profileUrlOverride === undefined
+      ? createManagedProfile(user.name)
+      : createAdHocProfile(profileUrlOverride, user.name)
+  }
+
+  const selectedUrl = profileUrlOverride ?? user.meta.profile_url
+  return createDiyProfile({
+    name: user.name,
+    body: user.body,
+    urlOverride: profileUrlOverride !== undefined,
+    // createDiyProfile derives the body release's published URL when no
+    // explicit or stored URL exists.
+    ...(selectedUrl !== undefined ? { url: selectedUrl } : {}),
+  })
+}
+
+/** Resolve the Profile and active Business target. */
 export async function resolveSession(opts: ResolveSessionOptions = {}): Promise<ResolvedSession> {
   const env = opts.env ?? process.env
   const storeOpts = opts.homeDir !== undefined ? { homeDir: opts.homeDir } : {}
-  // MCP mode does not read active.yaml at all — not read-then-discard. One
-  // stdio server serves many unrelated agent conversations, so process-global
-  // routing state a human wrote with `ucp use` would leak into all of them;
-  // an omitted business must fail closed instead of inheriting a target. The
-  // file is the only thing dropped: explicit options and UCP_PROFILE /
-  // UCP_BUSINESS resolve exactly as they do on the CLI path.
   const active: ActiveSession = opts.inMcpMode === true ? {} : await readActive(storeOpts)
 
-  const profileName = opts.profile ?? env.UCP_PROFILE ?? active.profile
-  // Walk precedence explicitly so we can pin the source label to the layer
-  // that actually contributed the value. Empty string is "unset" (matches
-  // historical behavior — env vars often default to '' under shells).
+  const profileName = firstSet(opts.profile, env.UCP_PROFILE, active.profile)
+  const profileUrlOverride = firstSet(opts.profileUrl, env.UCP_AGENT_PROFILE_URL)
+
+  let profile: Profile
+  let profileMeta: ProfileMeta
+  if (profileName !== undefined) {
+    // An explicit or active name must exist, and a missing or corrupt one
+    // throws out of here. Never fall back to managed when a caller asked for
+    // a specific local identity: silently selling under a different identity
+    // than the operator named is worse than not selling.
+    const user = await readUserProfile(profileName, storeOpts)
+    profileMeta = withDefaultCatalog(user.meta, env.UCP_DEFAULT_CATALOG)
+    profile = materializeUserProfile(user, profileUrlOverride)
+  } else {
+    profileMeta = withDefaultCatalog({}, env.UCP_DEFAULT_CATALOG)
+    profile =
+      profileUrlOverride === undefined
+        ? createManagedProfile()
+        : createAdHocProfile(profileUrlOverride)
+  }
+
   let businessSource: BusinessSource | undefined
-  let rawBusiness: string | undefined
-  if (opts.business !== undefined && opts.business !== '') {
-    rawBusiness = opts.business
+  let business: string | undefined
+  if (isSet(opts.business)) {
+    business = opts.business
     businessSource = 'flag'
-  } else if (env.UCP_BUSINESS !== undefined && env.UCP_BUSINESS !== '') {
-    rawBusiness = env.UCP_BUSINESS
+  } else if (isSet(env.UCP_BUSINESS)) {
+    business = env.UCP_BUSINESS
     businessSource = 'env'
-  } else if (active.business !== undefined && active.business !== '') {
-    rawBusiness = active.business
+  } else if (isSet(active.business)) {
+    business = active.business
     businessSource = 'active.yaml'
   }
-  const business = rawBusiness
-
-  if (profileName === undefined || profileName === '') {
-    throw new UcpError({
-      layer: 'client',
-      code: ErrorCodes.PROFILE_NOT_FOUND,
-      message: 'no local profile selected',
-      cta: {
-        description: 'Create a local profile before running UCP operations.',
-        commands: [
-          {
-            command: 'ucp profile init --name agent',
-            description: 'create and activate a local profile',
-          },
-        ],
-      },
-    })
-  }
-
-  const user = await readUserProfile(profileName, storeOpts)
-  const meta = withDefaultCatalog(user.meta, env.UCP_DEFAULT_CATALOG)
-  // A profile with no `meta.profile_url` advertises the latest release's
-  // published default. The CLI still reads the named profile's profile.json;
-  // doctor reports a mismatch if that file does not match the fallback URL.
-  // A capability set of your own needs a URL you control because businesses
-  // read the URL, and keeping it equal to profile.json is the user's obligation.
-  const profileUrl =
-    opts.profileUrl ??
-    env.UCP_AGENT_PROFILE_URL ??
-    meta.profile_url ??
-    RELEASES[LATEST].defaultAgentProfileUrl
-  const profile: ActiveProfile = { name: profileName, profileUrl, meta }
 
   if (business !== undefined && businessSource !== undefined) {
-    return { profile, business, businessSource }
+    return { profile, profileMeta, business, businessSource }
   }
-  return { profile }
+  return { profile, profileMeta }
 }
 
-// Resolution order for `meta.defaults.catalog`:
-//   profile meta > UCP_DEFAULT_CATALOG env > baked-in DEFAULT_CATALOG_URL
-// Profile wins because the user said so explicitly; env lets ops point a
-// machine at a staging catalog without rewriting the local profile; baked-in
-// is the floor so the catalog fallback rung is never accidentally empty.
+function isSet(value: string | undefined): value is string {
+  return value !== undefined && value !== ''
+}
+
+function firstSet(...values: Array<string | undefined>): string | undefined {
+  return values.find(isSet)
+}
+
+// Resolution order for catalog defaults:
+//   local profile meta > UCP_DEFAULT_CATALOG > baked-in DEFAULT_CATALOG_URL.
 function withDefaultCatalog(meta: ProfileMeta, envOverride: string | undefined): ProfileMeta {
   if (meta.defaults?.catalog !== undefined) return meta
-  const fromEnv = envOverride !== undefined && envOverride !== '' ? envOverride : undefined
+  const fromEnv = isSet(envOverride) ? envOverride : undefined
   const catalog = fromEnv ?? DEFAULT_CATALOG_URL
   return { ...meta, defaults: { ...(meta.defaults ?? {}), catalog } }
 }

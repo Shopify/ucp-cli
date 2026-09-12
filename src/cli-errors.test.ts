@@ -1,18 +1,19 @@
 // CONTRACT: what the CLI actually EMITS on the error path.
 //
 // Every other error suite asserts on in-memory `UcpError` objects, which
-// cannot see this: `cli.ts`'s error middleware emits `{code, message,
-// retryable}`, or `{code, message, cta}` when the error carries one —
-// `context` is NEVER serialized. So a remedy encoded in `context` (a
-// `context.kind` discriminator, `context.supported`) does not exist for the
-// primary audience: an agent reading CLI JSON.
+// cannot see this: the emitted error is one FLAT object — `code` and
+// `message` always, plus `retryable` and `cta` as independently optional
+// fields that can both appear — and `context`/`http_status` are NEVER
+// serialized. So a remedy encoded in `context` (a `context.kind`
+// discriminator, `context.supported`) does not exist for the primary
+// audience: an agent reading CLI JSON.
 //
 // The property under test is therefore not "the error has the right fields"
 // but: IF A CODE'S REMEDY DEPENDS ON A FIELD, THAT FIELD SURVIVES
 // SERIALIZATION. These run the real dispatcher, the real middleware, and the
 // real core (mocked transport only) — nothing about the envelope is stubbed.
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -20,7 +21,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ResolvedSession, ResolveSessionOptions } from './cli/session.js'
 import { createUcpCli } from './cli.js'
+import {
+  createAdHocProfile,
+  createDiyProfile,
+  createManagedProfile,
+  type ProfileSource,
+} from './core/agent.js'
 import { discover } from './core/discover.js'
+import type { ProfileKind } from './core/legacy-profile.js'
 import { RELEASES, type Version } from './core/releases.js'
 import { setWarnWriter } from './core/verbose.js'
 import { serveCli, userProfile } from './test-utils.js'
@@ -54,9 +62,8 @@ interface WireError {
 
 interface StubOpts {
   /**
-   * The active profile's local `profile.json`, which the CLI reads from disk
-   * for negotiation. Default: the published 08-25 document, representing a
-   * profile whose local file matches what its URL serves.
+   * The active Profile's singleton body. Default: the published 08-25
+   * document, representing a local body that matches what its URL serves.
    */
   agentProfile?: unknown
   /** Body for `/.well-known/ucp`. */
@@ -65,11 +72,15 @@ interface StubOpts {
   leaves?: Record<string, unknown>
   /** JSON-RPC error envelope returned for `tools/list` instead of a result. */
   rpcError?: { code: number; message: string; data?: unknown }
+  /** Body provenance of the active Profile. Defaults to a DIY singleton. */
+  profileSource?: ProfileSource
+  /** Explicit URL-override provenance for a DIY body. Defaults false. */
+  urlOverride?: boolean
   /**
-   * Other profiles on this machine. Feeds the PROTOCOL_VERSION_INCOMPATIBLE
-   * switch-profiles hint, which reads each local profile's body version.
+   * Other Profiles on this machine. DIY candidates use their body version;
+   * managed aliases offer every installed rendering.
    */
-  localProfiles?: Record<string, { version: Version; profileUrl?: string }>
+  localProfiles?: Record<string, { version: Version; profileUrl?: string; kind?: ProfileKind }>
 }
 
 function jsonResponse(body: unknown): Response {
@@ -129,30 +140,43 @@ describe('emitted CLI error JSON', () => {
   /** Run `ucp discover` against the real core with a stubbed transport. */
   async function runDiscover(
     opts: StubOpts & { capability?: string },
-  ): Promise<{ wire: WireError; exitCode: number }> {
-    // The identity comes off disk, so the fixture is a real profile tree.
-    const dir = join(home, 'profiles', 'agent')
-    await mkdir(dir, { recursive: true })
-    await writeFile(
-      join(dir, 'profile.json'),
-      JSON.stringify(opts.agentProfile ?? publishedAgentProfile()),
-    )
+  ): Promise<{ wire: WireError; exitCode: number; profileListCalls: number }> {
     const fetch = stubFetch(opts)
-    const session = async (o: ResolveSessionOptions = {}): Promise<ResolvedSession> => ({
-      profile: { name: o.profile ?? 'agent', profileUrl: AGENT_PROFILE_URL },
-      ...(o.business !== undefined ? { business: o.business } : {}),
-    })
+    const session = async (o: ResolveSessionOptions = {}): Promise<ResolvedSession> => {
+      const name = o.profile ?? 'agent'
+      const profile =
+        opts.profileSource === 'managed'
+          ? createManagedProfile(name)
+          : opts.profileSource === 'url'
+            ? createAdHocProfile(AGENT_PROFILE_URL, name)
+            : createDiyProfile({
+                name,
+                url: AGENT_PROFILE_URL,
+                urlOverride: opts.urlOverride ?? false,
+                body: opts.agentProfile ?? publishedAgentProfile(),
+              })
+      return {
+        profile,
+        profileMeta: {},
+        ...(o.business !== undefined ? { business: o.business } : {}),
+      }
+    }
     const localProfiles = opts.localProfiles ?? {}
+    let profileListCalls = 0
     const cli = createUcpCli({
       resolveSession: session,
       profile: {
-        listProfiles: async () => Object.keys(localProfiles).sort(),
+        listProfiles: async () => {
+          profileListCalls += 1
+          return Object.keys(localProfiles).sort()
+        },
         readUserProfile: async (name: string) => {
           const candidate = localProfiles[name]
           if (candidate === undefined) throw new Error(`no such profile: ${name}`)
           return userProfile(name, {
             body: JSON.parse(RELEASES[candidate.version].agentProfileJson),
             meta: candidate.profileUrl === undefined ? {} : { profile_url: candidate.profileUrl },
+            kind: candidate.kind ?? 'diy',
           })
         },
       },
@@ -165,7 +189,7 @@ describe('emitted CLI error JSON', () => {
         }),
     })
     const { output, exitCode } = await serveCli(cli, ['discover', BUSINESS_URL])
-    return { wire: JSON.parse(output) as WireError, exitCode }
+    return { wire: JSON.parse(output) as WireError, exitCode, profileListCalls }
   }
 
   // ── The constraint these tests exist to pin ────────────────────────────
@@ -186,6 +210,82 @@ describe('emitted CLI error JSON', () => {
     })
     expect(wire.code).toBe('PROTOCOL_VERSION_INCOMPATIBLE')
     expect(wire.context).toBeUndefined()
+  })
+
+  it('preserves the actual-name Profile repair CTA for local store schema failures', async () => {
+    const name = 'actual-name'
+    const dir = join(home, 'profiles', name)
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'profile.json'), JSON.stringify({ ucp: { version: '2026-08-25' } }))
+    await writeFile(
+      join(dir, 'meta.json'),
+      JSON.stringify({ profile_url: 'https://owned.example/profile.json' }),
+    )
+
+    const { output, exitCode } = await serveCli(createUcpCli(), ['profile', 'show', name])
+    const wire = JSON.parse(output) as WireError
+
+    expect(exitCode).toBe(1)
+    expect(wire.code).toBe('SCHEMA_VALIDATION_FAILED')
+    expect(wire.cta?.description).toMatch(/rewrite.*local DIY.*document.*identity/i)
+    expect(wire.cta?.commands?.map((command) => command.command)).toEqual([
+      'ucp profile init --name actual-name --force',
+    ])
+    expect(JSON.stringify(wire.cta)).not.toContain('--input-schema')
+    expect(JSON.stringify(wire.cta)).not.toContain('<name>')
+
+    // The exact emitted command is executable and repairs the bad document
+    // without silently abandoning the custom identity URL in valid meta.json.
+    const repaired = await serveCli(createUcpCli(), ['profile', 'init', '--name', name, '--force'])
+    expect(repaired.exitCode).toBe(0)
+    expect(JSON.parse(repaired.output)).toMatchObject({ name, created: true })
+    expect(JSON.parse(await readFile(join(dir, 'meta.json'), 'utf-8'))).toMatchObject({
+      profile_url: 'https://owned.example/profile.json',
+      kind: 'diy',
+    })
+  })
+
+  it('does not promise URL preservation when meta.json itself is invalid', async () => {
+    const name = 'broken-meta'
+    const dir = join(home, 'profiles', name)
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'profile.json'), RELEASES['2026-08-25'].agentProfileJson)
+    await writeFile(join(dir, 'meta.json'), '{ not json')
+
+    const { output, exitCode } = await serveCli(createUcpCli(), ['profile', 'show', name])
+    const wire = JSON.parse(output) as WireError
+
+    expect(exitCode).toBe(1)
+    expect(wire.code).toBe('SCHEMA_VALIDATION_FAILED')
+    expect(wire.cta?.description).toMatch(/cannot preserve.*custom profile_url/i)
+    expect(wire.cta?.description).toContain('--profile-url')
+    expect(wire.cta?.description).not.toMatch(/custom profile_url is preserved/i)
+    expect(wire.cta?.commands?.map((command) => command.command)).toEqual([
+      `ucp profile init --name ${name} --force`,
+    ])
+  })
+
+  it('emits a working actual-name PROFILE_NOT_FOUND CTA on the commerce read path', async () => {
+    const name = 'missing-commerce-profile'
+
+    const { output, exitCode } = await serveCli(createUcpCli(), [
+      'discover',
+      BUSINESS_URL,
+      '--profile',
+      name,
+    ])
+    const wire = JSON.parse(output) as WireError
+
+    expect(exitCode).toBe(1)
+    expect(wire.code).toBe('PROFILE_NOT_FOUND')
+    expect(wire.cta?.commands?.map((command) => command.command)).toEqual([
+      `ucp profile init --name ${name} --force`,
+    ])
+    expect(JSON.stringify(wire.cta)).not.toContain('<name>')
+
+    const repaired = await serveCli(createUcpCli(), ['profile', 'init', '--name', name, '--force'])
+    expect(repaired.exitCode).toBe(0)
+    expect(JSON.parse(repaired.output)).toMatchObject({ name, created: true })
   })
 
   // ── PROTOCOL_VERSION_INCOMPATIBLE ──────────────────────────────────────
@@ -214,11 +314,10 @@ describe('emitted CLI error JSON', () => {
     expect(wire.message).toContain('offers UCP 2026-12-01')
     // ours
     expect(wire.message).toContain('ucp-cli supports 2026-04-08, 2026-08-25')
-    // ...and WHICH identity was presented, by its switchable local name.
-    // `DiscoverOptions.profileName` carries it from the session, so the label
-    // is `profile 'agent'` rather than the raw URL — a URL names nothing the
-    // reader can pass to `--profile`.
-    expect(wire.message).toContain("profile 'agent' uses 2026-08-25")
+    // ...and WHICH identity was presented, by its switchable local name. The
+    // runtime Profile carries that name, so the label is `profile 'agent'`
+    // rather than a raw URL the reader cannot pass to `--profile`.
+    expect(wire.message).toContain("profile 'agent' offers 2026-08-25")
   })
 
   // ── the switch-profiles hint (design §S6) ──────────────────────────────
@@ -262,7 +361,13 @@ describe('emitted CLI error JSON', () => {
     expect(wire.cta?.description).toContain("'agent-0408' speaks 2026-04-08")
     expect(wire.cta?.description).not.toContain('agent-0825')
     expect(wire.cta?.description).toContain("'mine' speaks 2026-04-08")
+    expect(wire.cta?.description).toContain(
+      'Shopify managed Profile offers every installed rendering',
+    )
+    expect(wire.cta?.description).toContain('without an explicit --profile')
+    expect(wire.cta?.description).toContain('UCP_PROFILE unset')
     expect(wire.cta?.commands?.map((c) => c.command)).toStrictEqual([
+      'ucp profile use --managed',
       'ucp discover --profile agent-0408',
       'ucp discover --profile mine',
     ])
@@ -288,9 +393,136 @@ describe('emitted CLI error JSON', () => {
     })
 
     expect(wire.cta?.commands?.map((c) => c.command)).toStrictEqual([
+      'ucp profile use --managed',
       'ucp discover --profile agent-0408',
       'ucp discover --profile legacy',
     ])
+  })
+
+  it('offers the virtual managed Profile when a DIY singleton misses another installed release', async () => {
+    const { wire } = await runDiscover({
+      business: {
+        ucp: {
+          version: '2026-04-08',
+          services: {
+            'dev.ucp.shopping': [
+              { version: '2026-04-08', transport: 'mcp', endpoint: MCP_ENDPOINT },
+            ],
+          },
+          payment_handlers: {},
+        },
+      },
+    })
+
+    expect(wire.cta?.commands?.map((c) => c.command)).toEqual(['ucp profile use --managed'])
+    expect(wire.cta?.description).toContain('newest mutual UCP 2026-04-08')
+  })
+
+  it('treats a managed local alias as every installed rendering, not its retained body', async () => {
+    const { wire } = await runDiscover({
+      business: {
+        ucp: {
+          version: '2026-04-08',
+          services: {
+            'dev.ucp.shopping': [
+              { version: '2026-04-08', transport: 'mcp', endpoint: MCP_ENDPOINT },
+            ],
+          },
+          payment_handlers: {},
+        },
+      },
+      localProfiles: {
+        legacy: { version: '2026-08-25', kind: 'managed' },
+      },
+    })
+
+    expect(wire.cta?.description).toContain("'legacy' is managed")
+    expect(wire.cta?.description).toContain('selects newest mutual UCP 2026-04-08')
+    expect(wire.cta?.description).not.toContain("'legacy' speaks 2026-08-25")
+    expect(wire.cta?.commands?.map((c) => c.command)).toContain('ucp discover --profile legacy')
+  })
+
+  it('a managed runtime failure does not scan or suggest local aliases', async () => {
+    const { wire, profileListCalls } = await runDiscover({
+      profileSource: 'managed',
+      business: {
+        ucp: {
+          version: '2026-12-01',
+          services: {},
+          payment_handlers: {},
+        },
+      },
+      localProfiles: {
+        legacy: { version: '2026-08-25', kind: 'managed' },
+      },
+    })
+
+    expect(wire.code).toBe('PROTOCOL_VERSION_INCOMPATIBLE')
+    expect(wire.message).toContain('managed Profile already offers every rendering installed')
+    expect(wire.message).toContain('no local Profile')
+    expect(wire.cta).toBeUndefined()
+    expect(profileListCalls).toBe(0)
+  })
+
+  it('a scalar URL override suppresses impossible --profile retries', async () => {
+    const { wire, profileListCalls } = await runDiscover({
+      profileSource: 'url',
+      business: {
+        ucp: {
+          version: '2026-04-08',
+          services: {
+            'dev.ucp.shopping': [
+              { version: '2026-04-08', transport: 'mcp', endpoint: MCP_ENDPOINT },
+            ],
+          },
+          payment_handlers: {},
+        },
+      },
+      localProfiles: {
+        'agent-0408': { version: '2026-04-08' },
+        legacy: { version: '2026-08-25', kind: 'managed' },
+      },
+    })
+
+    expect(wire.code).toBe('PROTOCOL_VERSION_INCOMPATIBLE')
+    expect(wire.message).toContain('--profile-url/UCP_AGENT_PROFILE_URL')
+    expect(wire.message).toContain('outranks stored meta/profile-name switching')
+    expect(wire.message).toContain('intended exact authored/bundled rendering')
+    expect(wire.cta).toBeUndefined()
+    expect(JSON.stringify(wire)).not.toContain('ucp discover --profile')
+    expect(profileListCalls).toBe(0)
+  })
+
+  it('a DIY body under a URL override suppresses every Profile-switch hint', async () => {
+    const { wire, profileListCalls } = await runDiscover({
+      profileSource: 'diy',
+      urlOverride: true,
+      business: {
+        ucp: {
+          version: '2026-04-08',
+          services: {
+            'dev.ucp.shopping': [
+              { version: '2026-04-08', transport: 'mcp', endpoint: MCP_ENDPOINT },
+            ],
+          },
+          payment_handlers: {},
+        },
+      },
+      localProfiles: {
+        'agent-0408': { version: '2026-04-08' },
+        legacy: { version: '2026-08-25', kind: 'managed' },
+      },
+    })
+
+    expect(wire.code).toBe('PROTOCOL_VERSION_INCOMPATIBLE')
+    expect(wire.message).toContain("profile 'agent' offers 2026-08-25")
+    expect(wire.message).toContain('--profile-url/UCP_AGENT_PROFILE_URL')
+    expect(wire.message).toContain('outranks stored meta/profile-name switching')
+    expect(wire.message).toContain('intended exact authored/bundled rendering')
+    expect(wire.cta).toBeUndefined()
+    expect(JSON.stringify(wire)).not.toContain('ucp discover --profile')
+    expect(JSON.stringify(wire)).not.toContain('ucp profile use --managed')
+    expect(profileListCalls).toBe(0)
   })
 
   it('emits no hint when no local profile speaks an offered version', async () => {
@@ -336,7 +568,8 @@ describe('emitted CLI error JSON', () => {
 
   // ── AGENT_PROFILE_UNREACHABLE ──────────────────────────────────────────
   //
-  // `context.reason` is the discriminator; it must be readable on the wire.
+  // `context.reason` is the in-process discriminator and never serializes,
+  // so the sub-case has to be readable in `message`/`cta` instead.
   // 'not_json' is the important one — a 200 serving an HTML error page is a
   // common hosting failure and is not "unreachable" in any useful sense.
 
@@ -409,6 +642,77 @@ describe('emitted CLI error JSON', () => {
     expect(wire.code).toBe('AGENT_PROFILE_SERVICE_UNDECLARED')
     expect(wire.message).toContain('declared: [dev.ucp.shopping]')
     expect(wire.message).toContain('business offers: [com.other.x]')
+    expect(wire.message).toContain('local profile')
     expect(wire.cta?.commands?.map((c) => c.command)).toContain('ucp profile show')
+  })
+
+  it('AGENT_PROFILE_SERVICE_UNDECLARED keeps DIY edit/publish guidance under a URL override', async () => {
+    const { wire } = await runDiscover({
+      profileSource: 'diy',
+      urlOverride: true,
+      capability: 'com.other.x',
+      business: {
+        ucp: {
+          version: '2026-08-25',
+          services: {
+            'com.other.x': [{ version: '2026-08-25', transport: 'mcp', endpoint: MCP_ENDPOINT }],
+          },
+          payment_handlers: {},
+        },
+      },
+    })
+
+    expect(wire.code).toBe('AGENT_PROFILE_SERVICE_UNDECLARED')
+    expect(wire.message).toContain('local profile.json')
+    expect(wire.message).toContain('active --profile-url/UCP_AGENT_PROFILE_URL override')
+    expect(wire.message).toContain(AGENT_PROFILE_URL)
+    expect(wire.message).toContain('unset the override')
+    expect(wire.cta?.commands?.map((c) => c.command)).toContain('ucp profile show')
+    expect(JSON.stringify(wire)).not.toContain('meta.json')
+  })
+
+  it('AGENT_PROFILE_SERVICE_UNDECLARED gives managed-specific DIY guidance', async () => {
+    const { wire } = await runDiscover({
+      profileSource: 'managed',
+      capability: 'com.other.x',
+      business: {
+        ucp: {
+          version: '2026-08-25',
+          services: {
+            'com.other.x': [{ version: '2026-08-25', transport: 'mcp', endpoint: MCP_ENDPOINT }],
+          },
+          payment_handlers: {},
+        },
+      },
+    })
+
+    expect(wire.code).toBe('AGENT_PROFILE_SERVICE_UNDECLARED')
+    expect(wire.message).toContain('selected managed rendering is bundled')
+    expect(wire.message).toContain('explicit DIY Profile')
+    expect(wire.cta?.commands?.map((c) => c.command)).toEqual(['ucp profile init --help'])
+    expect(JSON.stringify(wire)).not.toContain('ucp profile show')
+    expect(JSON.stringify(wire)).not.toContain('profile.json')
+  })
+
+  it('AGENT_PROFILE_SERVICE_UNDECLARED tells a URL override to change or leave the override', async () => {
+    const { wire } = await runDiscover({
+      profileSource: 'url',
+      capability: 'com.other.x',
+      business: {
+        ucp: {
+          version: '2026-08-25',
+          services: {
+            'com.other.x': [{ version: '2026-08-25', transport: 'mcp', endpoint: MCP_ENDPOINT }],
+          },
+          payment_handlers: {},
+        },
+      },
+    })
+
+    expect(wire.code).toBe('AGENT_PROFILE_SERVICE_UNDECLARED')
+    expect(wire.message).toContain('--profile-url/UCP_AGENT_PROFILE_URL')
+    expect(wire.message).toContain('create a DIY Profile')
+    expect(JSON.stringify(wire)).not.toContain('meta.profile_url')
+    expect(JSON.stringify(wire)).not.toContain('profile.json')
   })
 })

@@ -16,6 +16,7 @@ import { resolveSession } from './cli/session.js'
 import { syncSkillsWithCleanup } from './cli/skills-sync.js'
 import { runUse, type UseDeps } from './cli/use.js'
 import { applyView, resolveView, type ViewState } from './cli/view.js'
+import type { Profile, ProfileSource } from './core/agent.js'
 import { type DiscoveredBusiness, discover } from './core/discover.js'
 import {
   buildEscalationPayload,
@@ -109,9 +110,7 @@ export type ShoppingHelperDep = (
   input: Record<string, unknown>,
   options: {
     force: boolean
-    profileUrl: string
-    /** Local profile name, for messages (see DiscoverOptions.profileName). */
-    profileName?: string
+    profile: Profile
     dryRun?: boolean
     /** Resolved outbound HTTP headers; see {@link resolveHeaders}. */
     headers?: Record<string, string>
@@ -213,23 +212,32 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
     },
   })
 
-  // Re-emit SCHEMA_VALIDATION_FAILED via c.error so the recovery cta lands
-  // on the wire. Incur's outer catch path strips cta from thrown errors;
-  // c.error (sentinel-based) preserves it. The cta points the agent at
-  // `--input-schema` so they can fetch the operation input schema and correct
-  // their payload without spelunking diagnostic context. `c.command` gives
-  // us the exact subcommand path the user ran (e.g. `cart update`), so the
-  // suggested command is copy-pasteable verbatim.
+  // Re-emit operation-input SCHEMA_VALIDATION_FAILED via c.error so the
+  // recovery cta lands on the wire. Incur's outer catch path strips cta from
+  // thrown errors; c.error (sentinel-based) preserves it. The explicit
+  // `context.kind` discriminator prevents local Profile document/schema
+  // failures (which intentionally keep this stable public code) from being
+  // misdiagnosed as operation input. For actual operation input, the cta
+  // points at `--input-schema`; `c.command` supplies the exact subcommand path.
   //
-  // Other UcpError codes pass through unchanged — incur emits the standard
-  // {code, message, retryable} envelope, which is what callers expect today.
-  // We only intercept here when there's a known structured recovery path.
+  // Other UcpError codes pass through unchanged — incur emits the flat
+  // {code, message} envelope, adding `retryable` and/or `cta` when present.
+  // The two are independent: incur also appends its own maintenance notices
+  // (skills staleness, update available) to whatever cta reaches the writer,
+  // so a `retryable` error can carry a cta whose commands are unrelated to
+  // the failing code. We only intercept here when there's a known structured
+  // recovery path.
   cli.use(
     middleware(async (c, next) => {
       try {
         await next()
       } catch (err) {
-        if (err instanceof UcpError && err.code === ErrorCodes.SCHEMA_VALIDATION_FAILED) {
+        if (
+          err instanceof UcpError &&
+          err.code === ErrorCodes.SCHEMA_VALIDATION_FAILED &&
+          isPlainRecord(err.context) &&
+          err.context.kind === 'operation-input'
+        ) {
           c.error({
             code: err.code,
             message: err.message,
@@ -246,23 +254,27 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
           })
           return
         }
-        // PROTOCOL_VERSION_INCOMPATIBLE is thrown in core, which cannot see
-        // the profile store. Decorate it here with the one remedy that needs
-        // local state: "another profile of yours speaks a version they do
-        // offer". Deliberately a CTA — `context` is never serialized, so a
-        // hint that lived there would not exist for agents reading CLI JSON.
+        // Core knows runtime provenance but not the local store. Check URL
+        // precedence first: any explicit --profile-url/UCP_AGENT_PROFILE_URL
+        // outranks Profile-name switching, including when the body remains a
+        // locally authored DIY body. Only a non-overridden DIY singleton can
+        // recover by selecting managed or another local Profile. The remedy
+        // is a CTA because `context` is never serialized in CLI JSON.
         if (err instanceof UcpError && err.code === ErrorCodes.PROTOCOL_VERSION_INCOMPATIBLE) {
-          const cta = buildProfileSwitchCta(
-            await localProfilesSpeaking(
-              offeredVersions(err.context),
-              activeProfileName(err.context),
-              profileHintDeps,
-            ),
-            { command: c.command, displayName: c.displayName },
-          )
-          if (cta !== undefined) {
-            c.error({ code: err.code, message: err.message, cta })
-            return
+          const offered = offeredVersions(err.context)
+          if (
+            activeProfileUrlOverride(err.context) === false &&
+            activeProfileSource(err.context) === 'diy'
+          ) {
+            const cta = buildProfileSwitchCta(
+              await localProfilesSpeaking(offered, activeProfileName(err.context), profileHintDeps),
+              offered,
+              { command: c.command, displayName: c.displayName },
+            )
+            if (cta !== undefined) {
+              c.error({ code: err.code, message: err.message, cta })
+              return
+            }
           }
         }
         if (err instanceof UcpError && err.cta !== undefined) {
@@ -312,7 +324,9 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       refresh: z
         .boolean()
         .default(false)
-        .describe('Bypass the local profile cache and re-fetch from the business.'),
+        .describe(
+          'Bypass both cached discovery layers — the Business Profile and tools/list — and re-fetch them from the business.',
+        ),
       header: z
         .array(z.string())
         .default([])
@@ -355,21 +369,17 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
         // catalog tools instead of a recovery dead-end. State-mutating ops
         // (cart/checkout) gate on bodyKey at prepareOperation; this site has
         // no bodyKey because there's no op family — read-only is the gate.
-        const catalogDefault = session.profile.meta?.defaults?.catalog
+        const catalogDefault = session.profileMeta?.defaults?.catalog
         if (catalogDefault !== undefined) businessUrl = catalogDefault
       }
       // Bare `discover` is catalog-eligible: the fallback rung above would have
       // fired had `meta.defaults.catalog` been set, so when it didn't, the
       // missing-business CTA is the recovery path.
       if (businessUrl === undefined) return c.error(businessNotResolvedError(inMcpMode))
-      const headers = await resolveCallHeaders(c.options, session, businessUrl)
+      const headers = await resolveCallHeaders(c.options, session.profile, businessUrl)
       const discoverResult = await discoverImpl(businessUrl, {
         force: c.options.refresh,
-        profileUrl: requireProfileUrl(session.profile.profileUrl),
-        // The session knows the local profile NAME; without passing it,
-        // PROTOCOL_VERSION_INCOMPATIBLE can only name the URL and cannot
-        // suggest `--profile <name>`.
-        profileName: session.profile.name,
+        profile: session.profile,
         headers,
       })
       return c.ok(applyView({ result: discoverResult }, viewState))
@@ -417,7 +427,9 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
     refresh: z
       .boolean()
       .default(false)
-      .describe('Bypass the local profile cache and re-fetch from the business.'),
+      .describe(
+        'Bypass both cached discovery layers — the Business Profile and tools/list — and re-fetch them from the business.',
+      ),
     inputSchema: z
       .boolean()
       .default(false)
@@ -428,7 +440,7 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       .boolean()
       .default(false)
       .describe(
-        'Run discovery + schema validation, then print the exact request that would be sent (including meta.idempotency-key and meta.ucp-agent). Skips network I/O. Useful for debugging SCHEMA_VALIDATION_FAILED, capturing payloads for bug reports, and confirming a mutation before issuing it for real.',
+        "Run discovery + schema validation, then print the exact request that would be sent (including meta.idempotency-key and meta.ucp-agent). Skips the operation's tools/call request; cold or forced discovery may still use network. Useful for debugging SCHEMA_VALIDATION_FAILED, capturing payloads for bug reports, and confirming a mutation before issuing it for real.",
       ),
     onEscalation: z
       .string()
@@ -499,11 +511,7 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       if (!prep.ok) return c.error(prep.error)
       const wrapped = wrapOperationInput(prep.input, bodyKey)
       const merged = mergeId(wrapped, c.args.id, idPlacement)
-      const headers = await resolveCallHeaders(
-        c.options,
-        { profile: { name: prep.profileName } },
-        prep.business,
-      )
+      const headers = await resolveCallHeaders(c.options, prep.profile, prep.business)
       // Capture the trusted negotiated view via the internal side-channel.
       // Filled by `callOperation` after `discover()` resolves (BEFORE any
       // OPERATION_NOT_OFFERED throw), so CTAs on transport-layer failures
@@ -513,8 +521,7 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       let discovered: DiscoveredBusiness | undefined
       const result = await helper(prep.business, merged, {
         force: prep.force,
-        profileUrl: prep.profileUrl,
-        profileName: prep.profileName,
+        profile: prep.profile,
         headers,
         ...(c.options.dryRun ? { dryRun: true } : {}),
         _onDiscover: (d) => {
@@ -828,9 +835,7 @@ type ShoppingHelper = {
     input: Record<string, unknown>,
     options: {
       force: boolean
-      profileUrl: string
-      /** Local profile name, for messages (see DiscoverOptions.profileName). */
-      profileName?: string
+      profile: Profile
       dryRun?: boolean
       /** Resolved outbound HTTP headers; see {@link resolveHeaders}. */
       headers?: Record<string, string>
@@ -898,8 +903,7 @@ type PreparedOperation =
       ok: true
       input: Record<string, unknown>
       business: string
-      profileName: string
-      profileUrl: string
+      profile: Profile
       force: boolean
     }
   | { ok: false; error: ErrorEnvelopeOpts }
@@ -907,7 +911,7 @@ type PreparedOperation =
 // Prepares the cross-cutting bits every operation command needs: resolve the
 // active session (with `--business` taking precedence over UCP_BUSINESS and
 // active.yaml), require a resolved business URL, parse --input/--set/--set-string
-// into a single JSON payload, hand back the profileUrl + force flag. Returns
+// into a single JSON payload, and hand back the runtime Profile + force flag. Returns
 // a discriminated result instead of throwing on missing-business so callers
 // can `return c.error(prep.error)` and get incur's sentinel-path handling
 // (which carries `cta` to the wire envelope).
@@ -932,7 +936,7 @@ async function prepareOperation(
     // still error because routing a state-mutating op against the catalog
     // endpoint would silently misroute state-changing operations.
     if (bodyKey === 'catalog') {
-      const catalogDefault = session.profile.meta?.defaults?.catalog
+      const catalogDefault = session.profileMeta?.defaults?.catalog
       if (catalogDefault !== undefined) {
         business = catalogDefault
         usedCatalogDefault = true
@@ -943,7 +947,7 @@ async function prepareOperation(
     }
   }
   vlog(
-    `session: business=${business} (source: ${usedCatalogDefault ? 'meta.defaults.catalog' : (session.businessSource ?? '?')}) profile=${session.profile.name}`,
+    `session: business=${business} (source: ${usedCatalogDefault ? 'meta.defaults.catalog' : (session.businessSource ?? '?')}) profile=${session.profile.name ?? session.profile.source}`,
   )
   const input = await buildOperationInput({
     set: c.options.set,
@@ -954,8 +958,7 @@ async function prepareOperation(
     ok: true,
     input,
     business,
-    profileName: session.profile.name,
-    profileUrl: requireProfileUrl(session.profile.profileUrl),
+    profile: session.profile,
     force: c.options.refresh,
   }
 }
@@ -966,13 +969,13 @@ async function prepareOperation(
 // raw string is a safe last-resort origin key against headers.json.
 async function resolveCallHeaders(
   options: { header: string[] },
-  session: { profile: { name: string } },
+  profile: Pick<Profile, 'name'>,
   businessUrl: string,
 ): Promise<HeaderMap> {
   return resolveHeaders({
     argFlags: options.header,
     origin: canonicalizeOrigin(businessUrl) ?? businessUrl,
-    profile: session.profile.name,
+    ...(profile.name !== undefined ? { profile: profile.name } : {}),
   })
 }
 
@@ -1018,18 +1021,16 @@ async function inputSchemaOperation(
     // ops route through `meta.defaults.catalog`; everything else still
     // errors to avoid silently selecting a business for mutations.
     if (bodyKey === 'catalog') {
-      const catalogDefault = session.profile.meta?.defaults?.catalog
+      const catalogDefault = session.profileMeta?.defaults?.catalog
       if (catalogDefault !== undefined) businessUrl = catalogDefault
     }
     if (businessUrl === undefined) return c.error(businessNotResolvedError(inMcpMode))
   }
 
-  const profileUrl = requireProfileUrl(session.profile.profileUrl)
-  const headers = await resolveCallHeaders(c.options, session, businessUrl)
+  const headers = await resolveCallHeaders(c.options, session.profile, businessUrl)
   const resolved = await discoverImpl(businessUrl, {
     capabilities: [helper.capability],
-    profileUrl,
-    profileName: session.profile.name,
+    profile: session.profile,
     force: c.options.refresh,
     headers,
   })
@@ -1112,14 +1113,15 @@ function activeProfileName(context: unknown): string | undefined {
   return typeof context.profileName === 'string' ? context.profileName : undefined
 }
 
-function requireProfileUrl(profileUrl: string | undefined): string {
-  if (profileUrl !== undefined) return profileUrl
-  throw new UcpError({
-    layer: 'client',
-    code: ErrorCodes.INVALID_INPUT,
-    message:
-      'active profile does not have a profile URL; pass --profile-url or set one on the profile',
-  })
+function activeProfileUrlOverride(context: unknown): boolean | undefined {
+  if (!isPlainRecord(context)) return undefined
+  return typeof context.profileUrlOverride === 'boolean' ? context.profileUrlOverride : undefined
+}
+
+function activeProfileSource(context: unknown): ProfileSource | undefined {
+  if (!isPlainRecord(context)) return undefined
+  const source = context.profileSource
+  return source === 'managed' || source === 'diy' || source === 'url' ? source : undefined
 }
 
 // CLI wire envelope for errors. Root fields are CLI-owned; business data never
@@ -1223,11 +1225,14 @@ function canonicalizeBusinessForEcho(
 // notes worth preserving:
 //
 //  1. `c.error()` returns incur's error sentinel (NOT a thrown exception),
-//     so the only way this reaches the wire envelope cleanly is by being
-//     returned. Going through `c.error()` (instead of `throw new UcpError`)
-//     is what makes `cta` survive — incur's default thrown-error catch
-//     path emits only `code` + `message`. Agents read `error.cta.commands`
-//     to recover.
+//     so it only reaches the wire envelope by being `return`ed. The sentinel
+//     (instead of `throw new UcpError`) is the right shape here because
+//     BUSINESS_NOT_RESOLVED is envelope-only — it carries no `layer` (see
+//     ERROR_LAYERS in src/lib/errors.ts). A thrown UcpError keeps its cta
+//     too, but only because the `cli.use` middleware above re-emits
+//     `err.cta` through `c.error()`; incur's own default thrown-error catch
+//     path emits just `code` + `message`. Either way the emitted error is
+//     flat, so agents read `cta.commands` to recover.
 //
 //  2. The CTA block is constructed inside the function (not hoisted to
 //     module scope) on purpose. Top-level await in the bin entrypoint

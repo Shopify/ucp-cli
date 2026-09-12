@@ -9,8 +9,8 @@
 // consumer-experience section.
 
 import { afterEach, describe, expect, it } from 'vitest'
-
 import { agentProfileFixture } from '../test-utils.js'
+import type { ProfileSource } from './agent.js'
 import { negotiateService } from './discover.js'
 import { businessProfileSchema as businessSchema20260408 } from './generated/2026-04-08/business_profile.zod.js'
 import { businessProfileSchema as businessSchema20260825 } from './generated/2026-08-25/business_profile.zod.js'
@@ -131,9 +131,16 @@ describe('negotiateService — third-party services (S7)', () => {
   const ACME = 'com.acme.svc'
   const PROFILE_URL = 'https://agent.example.invalid/agent.json'
 
-  function agentWithAcme(versions: string[], transport = 'mcp') {
+  function agentWithAcme(
+    versions: string[],
+    transport = 'mcp',
+    source: ProfileSource = 'diy',
+    urlOverride = false,
+  ) {
     return agentProfileFixture({
       version: '2026-08-25',
+      source,
+      urlOverride,
       url: PROFILE_URL,
       services: {
         'dev.ucp.shopping': [{ version: '2026-08-25', transport: 'mcp' }],
@@ -165,6 +172,69 @@ describe('negotiateService — third-party services (S7)', () => {
         message: `${ACME}: profile 'agent' declares [2025-11-01], business offers [2025-06-01]. Update the service declaration in profile.json to a version the business offers, then make ${PROFILE_URL} serve the corrected document; if you cannot change that URL, use one you own. Otherwise, accept unavailability.`,
       }) as unknown as Error,
     )
+  })
+
+  it('a managed mismatch directs the caller to an explicit DIY Profile', () => {
+    const agent = agentWithAcme(['2025-11-01'], 'mcp', 'managed')
+    const profile = business('2026-08-25', {
+      [ACME]: [{ version: '2025-06-01', transport: 'mcp' }],
+    })
+
+    expect(() => negotiateService({ profile, capability: ACME, agent })).toThrowError(
+      expect.objectContaining({
+        code: 'SERVICE_VERSION_INCOMPATIBLE',
+        message: expect.stringMatching(/managed rendering.*bundled.*explicit DIY Profile/i),
+        cta: expect.objectContaining({
+          commands: [expect.objectContaining({ command: 'ucp profile init --help' })],
+        }),
+      }) as unknown as Error,
+    )
+    let emitted: { message?: string; cta?: unknown } | undefined
+    try {
+      negotiateService({ profile, capability: ACME, agent })
+    } catch (error) {
+      emitted = error as { message?: string; cta?: unknown }
+    }
+    expect(emitted?.message).not.toContain('profile.json')
+    expect(JSON.stringify(emitted?.cta)).not.toContain('ucp profile show')
+  })
+
+  it('a scalar URL mismatch says to change or remove the override', () => {
+    const agent = agentWithAcme(['2025-11-01'], 'mcp', 'url', true)
+    const profile = business('2026-08-25', {
+      [ACME]: [{ version: '2025-06-01', transport: 'mcp' }],
+    })
+
+    expect(() => negotiateService({ profile, capability: ACME, agent })).toThrowError(
+      expect.objectContaining({
+        code: 'SERVICE_VERSION_INCOMPATIBLE',
+        message: expect.stringContaining('--profile-url/UCP_AGENT_PROFILE_URL'),
+        cta: expect.objectContaining({
+          commands: [expect.objectContaining({ command: 'ucp profile init --help' })],
+        }),
+      }) as unknown as Error,
+    )
+  })
+
+  it('a DIY mismatch under a URL override retains editable-body guidance', () => {
+    const agent = agentWithAcme(['2025-11-01'], 'mcp', 'diy', true)
+    const profile = business('2026-08-25', {
+      [ACME]: [{ version: '2025-06-01', transport: 'mcp' }],
+    })
+
+    let emitted: { message?: string; context?: unknown; cta?: unknown } | undefined
+    try {
+      negotiateService({ profile, capability: ACME, agent })
+    } catch (error) {
+      emitted = error as typeof emitted
+    }
+
+    expect(emitted?.message).toContain('local profile.json')
+    expect(emitted?.message).toContain('active --profile-url/UCP_AGENT_PROFILE_URL override')
+    expect(emitted?.message).toContain(PROFILE_URL)
+    expect(emitted?.message).toContain('unset the override')
+    expect(emitted?.context).toMatchObject({ profileSource: 'diy', profileUrlOverride: true })
+    expect(JSON.stringify(emitted)).not.toContain('meta.json')
   })
 
   it('a third-party mismatch is NOT reported as a merchant defect', () => {
@@ -212,7 +282,7 @@ describe('negotiateService — third-party services (S7)', () => {
     expect(result.entry.endpoint).toBe('https://b.example.invalid/mcp')
   })
 
-  it('AGENT_PROFILE_SERVICE_UNDECLARED when the profile does not declare a service the business offers', () => {
+  it('AGENT_PROFILE_SERVICE_UNDECLARED keeps edit/publish guidance for DIY', () => {
     const agent = agentProfileFixture({ version: '2026-08-25' })
     const profile = business('2026-08-25', {
       [ACME]: [{ version: '2025-11-01', transport: 'mcp' }],
@@ -223,6 +293,27 @@ describe('negotiateService — third-party services (S7)', () => {
         code: 'AGENT_PROFILE_SERVICE_UNDECLARED',
         // Agent acts: it is our own document that is missing the declaration.
         layer: 'client',
+        message: expect.stringMatching(/local profile.*Profile URL serve/i),
+        cta: expect.objectContaining({
+          commands: [expect.objectContaining({ command: 'ucp profile show' })],
+        }),
+      }) as unknown as Error,
+    )
+  })
+
+  it('AGENT_PROFILE_SERVICE_UNDECLARED never presents managed as editable', () => {
+    const agent = agentProfileFixture({ version: '2026-08-25', source: 'managed' })
+    const profile = business('2026-08-25', {
+      [ACME]: [{ version: '2025-11-01', transport: 'mcp' }],
+    })
+
+    expect(() => negotiateService({ profile, capability: ACME, agent })).toThrowError(
+      expect.objectContaining({
+        code: 'AGENT_PROFILE_SERVICE_UNDECLARED',
+        message: expect.stringMatching(/managed rendering.*bundled.*explicit DIY Profile/i),
+        cta: expect.objectContaining({
+          commands: [expect.objectContaining({ command: 'ucp profile init --help' })],
+        }),
       }) as unknown as Error,
     )
   })

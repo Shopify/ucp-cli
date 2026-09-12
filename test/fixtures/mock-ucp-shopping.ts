@@ -422,11 +422,29 @@ async function readBody(req: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString('utf-8')
 }
 
+export interface MockRpcRequest {
+  id: unknown
+  method: string
+  params?: { name?: string; arguments?: Record<string, unknown> }
+  /** `meta.ucp-agent.profile`, when the request carries the UCP identity envelope. */
+  agentProfileUrl?: string
+}
+
+function profileUrlFromParams(params: MockRpcRequest['params']): string | undefined {
+  const meta = params?.arguments?.meta
+  if (typeof meta !== 'object' || meta === null) return undefined
+  const agent = (meta as Record<string, unknown>)['ucp-agent']
+  if (typeof agent !== 'object' || agent === null) return undefined
+  const profile = (agent as Record<string, unknown>).profile
+  return typeof profile === 'string' ? profile : undefined
+}
+
 // MCP JSON-RPC handler: dispatches tools/list and tools/call.
 async function handleMcp(
   req: IncomingMessage,
   res: ServerResponse,
   businessUrl: string,
+  rpcRequests: MockRpcRequest[],
 ): Promise<void> {
   const body = JSON.parse(await readBody(req)) as {
     jsonrpc: string
@@ -435,6 +453,13 @@ async function handleMcp(
     params?: { name?: string; arguments?: Record<string, unknown> }
   }
   const { id, method, params } = body
+  const agentProfileUrl = profileUrlFromParams(params)
+  rpcRequests.push({
+    id,
+    method,
+    ...(params !== undefined ? { params } : {}),
+    ...(agentProfileUrl !== undefined ? { agentProfileUrl } : {}),
+  })
 
   res.setHeader('content-type', 'application/json')
 
@@ -498,6 +523,8 @@ export type MockShoppingServiceEntries = 'conformant' | 'stale-entry' | 'mixed-v
 export interface MockUcpShoppingOptions {
   /** Defaults to `'conformant'`. */
   serviceEntries?: MockShoppingServiceEntries
+  /** Override the URL advertised for {@link MOCK_LEGACY_VERSION} in `supported_versions`. */
+  legacyProfileUrl?: string
 }
 
 const SPEC_URLS = {
@@ -531,17 +558,13 @@ export interface MockUcpShopping extends MockBusiness {
   mcpEndpoint: string
   /** URL of the `supported_versions` leaf for {@link MOCK_LEGACY_VERSION}. */
   legacyProfileUrl: string
+  /** Parsed upstream MCP requests in arrival order. The array remains live until close(). */
+  rpcRequests: MockRpcRequest[]
   /**
-   * Where this server also hosts the AGENT's profile, so an end-to-end test
-   * has a reachable `meta.profile_url`.
-   *
-   * Under profile-driven negotiation the CLI GETs its own hosted profile
-   * before every invocation (the business fetches the same URL), so a fixture
-   * whose `profile_url` points at a non-existent host fails every command with
-   * `AGENT_PROFILE_UNREACHABLE` before touching the business at all. Serving
-   * it here keeps the whole journey inside the fixture. The body is the
-   * VERBATIM published 2026-08-25 Shopify agent profile from the release
-   * registry — the same document the CLI negotiates against by default.
+   * Where this fixture can host an agent profile for explicit DIY/doctor tests.
+   * Commerce requests do not fetch their own Profile: ucp-cli advertises this
+   * URL in `meta.ucp-agent.profile`, and a Business may dereference and cache
+   * it. This lightweight mock records that URL but does not dereference it.
    */
   agentProfileUrl: string
 }
@@ -562,7 +585,8 @@ export async function startMockUcpShopping(
   const mock = await startMockBusiness()
   const { url } = mock
   const endpoint = `${url}/mcp`
-  const legacyProfileUrl = `${url}${MOCK_LEGACY_PROFILE_PATH}`
+  const legacyProfileUrl = options.legacyProfileUrl ?? `${url}${MOCK_LEGACY_PROFILE_PATH}`
+  const rpcRequests: MockRpcRequest[] = []
 
   // Current rendering, validated against the 2026-08-25 business schema.
   const profile = {
@@ -610,13 +634,14 @@ export async function startMockUcpShopping(
   })
 
   mock.setRoute('POST', '/mcp', (req, res) => {
-    return handleMcp(req, res, url)
+    return handleMcp(req, res, url, rpcRequests)
   })
 
   return {
     ...mock,
     mcpEndpoint: endpoint,
     legacyProfileUrl,
+    rpcRequests,
     agentProfileUrl: `${url}${MOCK_AGENT_PROFILE_PATH}`,
   }
 }

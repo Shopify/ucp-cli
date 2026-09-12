@@ -9,8 +9,6 @@ command: ucp
 
 When a buyer expresses commercial intent — wanting to find, buy, or track products — this is your toolkit. You can search across thousands of merchants via a bundled global catalog, build carts and complete checkouts against any UCP-supporting merchant, and follow up on orders. For merchants that don't support direct transactions, hand off gracefully to the merchant's own flow.
 
-> **Setup**: Run `ucp profile init --name agent` at the start of any session. It's idempotent — re-running with an existing profile no-ops (`created: false`, exit 0) — so call it unconditionally rather than checking state first. This creates the local CLI identity required for all UCP operations; it's not a merchant onboarding step or a Catalog API key. See `references/SETUP.md` for installation paths and `ucp doctor`.
-
 ## How to decide what to do
 
 | Buyer says... | Do this |
@@ -18,7 +16,7 @@ When a buyer expresses commercial intent — wanting to find, buy, or track prod
 | "Find me X", "I need X for Y", "what's a good X under $Z" — no merchant named | `ucp catalog search` against the global catalog. Each result names its merchant via `seller.domain`. |
 | "Show me this" — buyer pastes a product/variant link or wants a specific product's full PDP/options matrix | `ucp catalog get_product <product_id>` — single call, returns `result.product` (singular). Omit `--business` for global Catalog IDs. |
 | "Are these still available?" — refreshing prices/stock/validity for known IDs (saved lists, wish lists, stale carts) | `ucp catalog lookup` with the IDs (up to 50). To distinguish OOS from delisted, pass `filters.available: false` — the default filters to in-stock only, so OOS and delisted both look like absence. |
-| "Buy this from \<merchant>" — buyer names a specific merchant | `ucp discover --business <url>` first; if it succeeds, transact via `--business <url>`. If it fails, the merchant doesn't speak UCP — tell the buyer and offer alternatives. |
+| "Buy this from \<merchant>" — buyer names a specific merchant | `ucp discover --business <url>` first; if it succeeds, transact via `--business <url>`. If it fails with `PROFILE_FETCH_FAILED`, the merchant doesn't speak UCP — tell the buyer and offer alternatives; any other code is a different failure, so branch on the full `code`. |
 | "Track my order" | `ucp order get <order_id> --business <url>` |
 
 **Rule of thumb:** broad product discovery → global catalog (no `--business` needed). Business-scoped operations — cart, checkout, order, or catalog scoped to a specific merchant — → pass `--business <url>`. Reach for one or the other based on the buyer's intent.
@@ -40,9 +38,11 @@ The merchant decides what it accepts and what it exposes. These introspection co
 
 2. **Operation input schema** — `ucp <op> --input-schema --business <url>` returns the inputSchema for a specific tool from that merchant — including buyer-supplied destination fields, payment methods, discount handling, business-specific extension keys, etc. Use before composing any non-trivial payload (delivery info, payment, discount, fulfillment).
 
-3. **What hits the wire** — `ucp <op> [args] --dry-run` builds and validates the request, then prints the exact MCP envelope (`tool`, `arguments`, auto-injected `meta.idempotency-key` and `meta.ucp-agent`) without dispatching. Use when debugging a payload, confirming a mutation before issuing it, or learning the protocol shape (e.g. while building your own UCP-aware app). The printed `arguments` are the canonical MCP call; the CLI additionally wraps signing and web-bot-auth at the transport layer — if you build a client that calls MCP directly, you own that wrapping.
+3. **What hits the wire** — `ucp <op> [args] --dry-run` builds and validates the request, then prints the exact MCP envelope (`tool`, `arguments`, auto-injected `meta.idempotency-key` and `meta.ucp-agent`) without dispatching it. Discovery still runs first, so a cold or `--refresh`ed cache may hit the network. Use when debugging a payload, confirming a mutation before issuing it, or learning the protocol shape (e.g. while building your own UCP-aware app). The printed `arguments` are the canonical MCP call; the CLI additionally wraps signing and web-bot-auth at the transport layer — if you build a client that calls MCP directly, you own that wrapping.
 
-The CLI rejects unknown plain keys client-side before sending; if you hit `SCHEMA_VALIDATION_FAILED`, the error's CTA tells you the exact `--input-schema` command to run. Spec-canonical fields (per the UCP `Context` and `Buyer` types) may still be rejected if a specific merchant doesn't advertise them — the merchant's advertised schema is authoritative.
+Discovery is cached, so `discover` and `--input-schema` may be answered from local state; pass `--refresh` when you need a synchronous recheck.
+
+The CLI rejects unknown plain keys client-side before sending; if you hit `SCHEMA_VALIDATION_FAILED`, run the exact command in the error's CTA — recovery depends on what failed validation. Spec-canonical fields (per the UCP `Context` and `Buyer` types) may still be rejected if a specific merchant doesn't advertise them — the merchant's advertised schema is authoritative.
 
 Bundled global catalog operations — `search` for discovery, `lookup` for refreshing saved or bookmarked product/variant IDs (carts, wish lists, deep links), and `get_product` for full PDP detail — take well-known inputs covered below and in `references/CATALOG.md`; you don't need to introspect before basic use. Reach for `--input-schema` when adding Shopify-specific extension fields (`like`, `saved_catalog_slug`, server-side `view`, taxonomy attributes, rating, price tier, etc.), when live schema differs, or when composing checkout payloads.
 
@@ -204,15 +204,16 @@ ucp checkout create --business https://<seller-domain> --input '{
 }'
 ```
 
-**Checkout fulfillment is the complete, selectable flow.** Run `ucp checkout update --input-schema --business <url>` before composing buyer, payment, discount, or fulfillment payloads. Do not assume shipping: present all merchant-returned `fulfillment.methods[]` unless the buyer already chose a method. For shipping, provide address destinations; for pickup, select returned retail-location destinations. Use real `result.line_items[].id` values in `line_item_ids`, then ask or confirm before selecting returned `fulfillment.methods[].groups[].options[]` with `groups[].selected_option_id` unless the buyer's preference is already clear. Full examples live in `references/FULFILLMENT.md`.
+**Checkout fulfillment is the complete, selectable flow.** Run `ucp checkout update --input-schema --business <url>` before composing buyer, discount, or fulfillment payloads. Do not assume shipping: present all merchant-returned `fulfillment.methods[]` unless the buyer already chose a method. For shipping, provide address destinations; for pickup, select returned retail-location destinations. Use real `result.line_items[].id` values in `line_item_ids`, then ask or confirm before selecting returned `fulfillment.methods[].groups[].options[]` with `groups[].selected_option_id` unless the buyer's preference is already clear. Full examples live in `references/FULFILLMENT.md`.
 
 ### Complete
 
 ```sh
-ucp checkout complete <checkout_id> --business https://<seller-domain>
+ucp checkout complete --input-schema --business https://<seller-domain>
+ucp checkout complete <checkout_id> --business https://<seller-domain> --input @complete.json
 ```
 
-Read `result.status`:
+Completion takes its own body: compose `complete.json` from that live schema and the `ucp.payment_handlers` the current checkout response advertises. Then read `result.status`:
 
 | Status | Meaning |
 |---|---|

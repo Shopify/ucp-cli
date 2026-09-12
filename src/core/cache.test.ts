@@ -1,10 +1,11 @@
 // Generic fetch + on-disk cache primitive tests.
 //
-// Covers URL-origin cache naming, Cache-Control TTL parsing, home-directory
-// resolution, and the fetch/cache failure modes. Higher-level tests cover
-// artifact-specific schemas and error codes.
+// Covers canonical full-URL cache naming, legacy origin-key reads,
+// Cache-Control TTL parsing, home-directory resolution, and fetch/cache
+// failure modes. Higher-level tests cover artifact-specific schemas and error
+// codes.
 
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { z } from 'incur'
@@ -20,6 +21,7 @@ import {
   originToFilename,
   parseMaxAge,
   ucpHomeDir,
+  urlToFilename,
 } from './cache.js'
 import { installProxyDispatcher, resetProxyStateForTests } from './proxy.js'
 
@@ -59,6 +61,22 @@ describe('originToFilename', () => {
     for (const url of inputs) {
       expect(originToFilename(url)).toMatch(/^[a-z0-9._-]+$/)
     }
+  })
+})
+
+describe('urlToFilename', () => {
+  it('uses the canonical full URL and produces a SHA-256 filename', () => {
+    const canonical = 'https://example.com/profiles/a.json?release=2026-04-08'
+    const equivalent = 'https://EXAMPLE.com:443/ignored/../profiles/a.json?release=2026-04-08'
+
+    expect(urlToFilename(equivalent)).toBe(urlToFilename(canonical))
+    expect(urlToFilename(canonical)).toMatch(/^[a-f0-9]{64}$/)
+    expect(urlToFilename(canonical)).not.toBe(
+      urlToFilename('https://example.com/profiles/b.json?release=2026-04-08'),
+    )
+    expect(urlToFilename(canonical)).not.toBe(
+      urlToFilename('https://example.com/profiles/a.json?release=2026-08-25'),
+    )
   })
 })
 
@@ -155,6 +173,17 @@ const codes = {
   schemaInvalid: 'TEST_SCHEMA_INVALID',
 }
 
+async function writeFreshCache<T>(path: string, url: string, body: T): Promise<void> {
+  const now = Date.now()
+  const entry: CacheEntry<T> = {
+    url,
+    fetched_at: now,
+    expires_at: now + 300_000,
+    body,
+  }
+  await writeFile(path, JSON.stringify(entry), 'utf-8')
+}
+
 describe('fetchCached', () => {
   let cacheDir: string
 
@@ -167,10 +196,11 @@ describe('fetchCached', () => {
   })
 
   it('fetches, returns parsed body, and writes the cache envelope', async () => {
+    const url = 'https://example.com/x'
     const mock = makeMockFetch([
       { body: { hello: 'world' }, headers: { 'cache-control': 'max-age=300' } },
     ])
-    const body = await fetchCached('https://example.com/x', {
+    const body = await fetchCached(url, {
       cacheDir,
       errorCodes: codes,
       fetch: mock.fn,
@@ -178,8 +208,9 @@ describe('fetchCached', () => {
 
     expect(body).toStrictEqual({ hello: 'world' })
     const cached = JSON.parse(
-      await readFile(join(cacheDir, 'example.com.json'), 'utf-8'),
+      await readFile(join(cacheDir, `${urlToFilename(url)}.json`), 'utf-8'),
     ) as CacheEntry<unknown>
+    expect(cached.url).toBe(url)
     expect(cached.body).toStrictEqual({ hello: 'world' })
     expect(cached.expires_at - cached.fetched_at).toBe(300_000)
   })
@@ -191,6 +222,148 @@ describe('fetchCached', () => {
     await fetchCached('https://example.com/x', { cacheDir, errorCodes: codes, fetch: mock.fn })
     await fetchCached('https://example.com/x', { cacheDir, errorCodes: codes, fetch: mock.fn })
     expect(mock.calls).toHaveLength(1)
+  })
+
+  it('keeps same-origin URLs with distinct paths in separate cache entries', async () => {
+    const firstUrl = 'https://cdn.example.com/profiles/business-a.json?release=2026-04-08'
+    const secondUrl = 'https://cdn.example.com/profiles/business-b.json?release=2026-04-08'
+    const mock = makeMockFetch([
+      { body: { business: 'A' }, headers: { 'cache-control': 'max-age=300' } },
+      { body: { business: 'B' }, headers: { 'cache-control': 'max-age=300' } },
+    ])
+
+    const first = await fetchCached(firstUrl, { cacheDir, errorCodes: codes, fetch: mock.fn })
+    const second = await fetchCached(secondUrl, { cacheDir, errorCodes: codes, fetch: mock.fn })
+
+    expect(first).toEqual({ business: 'A' })
+    expect(second).toEqual({ business: 'B' })
+    expect(mock.calls.map((call) => call.url)).toEqual([firstUrl, secondUrl])
+    expect((await readdir(cacheDir)).sort()).toEqual(
+      [`${urlToFilename(firstUrl)}.json`, `${urlToFilename(secondUrl)}.json`].sort(),
+    )
+  })
+
+  it('treats a primary entry whose envelope names another URL as a miss', async () => {
+    const requestedUrl = 'https://cdn.example.com/profiles/business-b.json'
+    await writeFreshCache(
+      join(cacheDir, `${urlToFilename(requestedUrl)}.json`),
+      'https://cdn.example.com/profiles/business-a.json',
+      { business: 'A' },
+    )
+    const mock = makeMockFetch([
+      { body: { business: 'B' }, headers: { 'cache-control': 'max-age=300' } },
+    ])
+
+    const result = await fetchCached(requestedUrl, {
+      cacheDir,
+      errorCodes: codes,
+      fetch: mock.fn,
+    })
+
+    expect(result).toEqual({ business: 'B' })
+    expect(mock.calls).toHaveLength(1)
+  })
+
+  it('accepts a canonically equivalent URL in the stored envelope', async () => {
+    const requestedUrl = 'https://example.com/profiles/business-a.json?release=2026-04-08'
+    const storedUrl =
+      'https://EXAMPLE.com:443/ignored/../profiles/business-a.json?release=2026-04-08'
+    await writeFreshCache(join(cacheDir, `${urlToFilename(requestedUrl)}.json`), storedUrl, {
+      source: 'cache',
+    })
+    const mock = makeMockFetch([])
+
+    const result = await fetchCached(requestedUrl, {
+      cacheDir,
+      errorCodes: codes,
+      fetch: mock.fn,
+    })
+
+    expect(result).toEqual({ source: 'cache' })
+    expect(mock.calls).toHaveLength(0)
+  })
+
+  it('reads a matching fresh legacy origin-key entry without rewriting it', async () => {
+    const requestedUrl = 'https://example.com/profiles/business-a.json'
+    const legacyPath = join(cacheDir, `${originToFilename(requestedUrl)}.json`)
+    await writeFreshCache(
+      legacyPath,
+      'https://EXAMPLE.com:443/ignored/../profiles/business-a.json',
+      { source: 'legacy' },
+    )
+    const mock = makeMockFetch([])
+
+    const result = await fetchCached(requestedUrl, {
+      cacheDir,
+      errorCodes: codes,
+      fetch: mock.fn,
+    })
+
+    expect(result).toEqual({ source: 'legacy' })
+    expect(mock.calls).toHaveLength(0)
+    expect(await readdir(cacheDir)).toEqual([`${originToFilename(requestedUrl)}.json`])
+  })
+
+  it('does not roll an expired primary back to an older fresh legacy entry', async () => {
+    const requestedUrl = 'https://example.com/profiles/business-a.json'
+    const now = Date.now()
+    const primary: CacheEntry<{ source: string }> = {
+      url: requestedUrl,
+      fetched_at: now - 60_000,
+      expires_at: now - 1,
+      body: { source: 'expired-primary' },
+    }
+    const legacy: CacheEntry<{ source: string }> = {
+      url: requestedUrl,
+      fetched_at: now - 120_000,
+      expires_at: now + 60_000,
+      body: { source: 'legacy' },
+    }
+    await Promise.all([
+      writeFile(
+        join(cacheDir, `${urlToFilename(requestedUrl)}.json`),
+        JSON.stringify(primary),
+        'utf-8',
+      ),
+      writeFile(
+        join(cacheDir, `${originToFilename(requestedUrl)}.json`),
+        JSON.stringify(legacy),
+        'utf-8',
+      ),
+    ])
+    const mock = makeMockFetch([
+      { body: { source: 'network' }, headers: { 'cache-control': 'max-age=300' } },
+    ])
+
+    const result = await fetchCached(requestedUrl, {
+      cacheDir,
+      errorCodes: codes,
+      fetch: mock.fn,
+    })
+
+    expect(mock.calls).toHaveLength(1)
+    expect(result).toEqual({ source: 'network' })
+  })
+
+  it('never reuses a mismatching legacy origin-key entry', async () => {
+    const requestedUrl = 'https://cdn.example.com/profiles/business-b.json'
+    const legacyPath = join(cacheDir, `${originToFilename(requestedUrl)}.json`)
+    await writeFreshCache(legacyPath, 'https://cdn.example.com/profiles/business-a.json', {
+      business: 'A',
+    })
+    const mock = makeMockFetch([
+      { body: { business: 'B' }, headers: { 'cache-control': 'max-age=300' } },
+    ])
+
+    const result = await fetchCached(requestedUrl, {
+      cacheDir,
+      errorCodes: codes,
+      fetch: mock.fn,
+    })
+
+    expect(result).toEqual({ business: 'B' })
+    expect(mock.calls).toHaveLength(1)
+    expect(await readdir(cacheDir)).toContain(`${urlToFilename(requestedUrl)}.json`)
   })
 
   it('force:true bypasses cache even when fresh', async () => {
@@ -213,11 +386,7 @@ describe('fetchCached', () => {
     const mock = makeMockFetch([{ body: {}, headers: { 'cache-control': 'no-store' } }])
     await fetchCached('https://example.com/x', { cacheDir, errorCodes: codes, fetch: mock.fn })
 
-    const exists = await readFile(join(cacheDir, 'example.com.json'), 'utf-8').then(
-      () => true,
-      () => false,
-    )
-    expect(exists).toBe(false)
+    expect(await readdir(cacheDir)).toEqual([])
   })
 
   it('validates body against the supplied zod schema', async () => {
@@ -368,6 +537,26 @@ describe('cacheCompute', () => {
     expect(a).toEqual({ v: 1 })
     expect(b).toEqual({ v: 1 })
     expect(calls).toBe(1)
+  })
+
+  it('treats a fresh entry whose opaque envelope key mismatches as a miss', async () => {
+    await writeFreshCache(join(cacheDir, 'k.json'), 'another-key', { v: 1 })
+    let calls = 0
+
+    const result = await cacheCompute({
+      cacheDir,
+      cacheKey: 'k',
+      ttlSeconds: 300,
+      compute: async () => {
+        calls++
+        return { v: 2 }
+      },
+    })
+
+    expect(result).toEqual({ v: 2 })
+    expect(calls).toBe(1)
+    const rewritten = JSON.parse(await readFile(join(cacheDir, 'k.json'), 'utf-8')) as CacheEntry
+    expect(rewritten.url).toBe('k')
   })
 
   it('force:true bypasses cache even when fresh', async () => {

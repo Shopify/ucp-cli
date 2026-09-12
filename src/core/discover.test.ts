@@ -5,20 +5,21 @@
 // verbatim business profile plus negotiated dispatch view out, and the
 // two-layer cache behavior for profile + tools/list.
 //
-// Tests either inject a validated `AgentProfile` or exercise the explicit
-// no-name template fallback. That profile is the platform side of negotiation
-// and selects one exact protocol version; there is no range in this file.
+// Tests inject singleton DIY Profiles or exercise the implicit managed
+// Profile. Discovery reads the Business offer before selecting one exact
+// rendering; there is no range or date-order inference in this file.
 //
 // Scenario names (S3′, S4, S5, S6, S8) refer to the negotiation design doc's
 // consumer-experience section.
 
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { agentProfileFixture } from '../test-utils.js'
+import { profileFixture, rendering } from '../test-utils.js'
+import { urlToFilename } from './cache.js'
 import { discover } from './discover.js'
 import { RELEASES } from './releases.js'
 import { setVerboseWriter } from './verbose.js'
@@ -27,9 +28,9 @@ const BUSINESS_URL = 'https://shop.example.invalid'
 const MCP_ENDPOINT = 'https://shop.example.invalid/ucp/mcp'
 
 /** The default identity: Shopify's published agent profile for the latest release. */
-const AGENT = agentProfileFixture({ version: '2026-08-25' })
+const PROFILE = profileFixture({ version: '2026-08-25' })
 /** Same binary, other profile. S3′ / S6 use this one. */
-const AGENT_0408 = agentProfileFixture({ version: '2026-04-08', name: 'agent-0408' })
+const PROFILE_0408 = profileFixture({ version: '2026-04-08', name: 'agent-0408' })
 
 const SAMPLE_PROFILE = {
   ucp: {
@@ -88,12 +89,18 @@ interface MockFetchOpts {
 
 function mockFetch(opts: MockFetchOpts = {}): {
   fetch: typeof fetch
-  calls: { url: string; method: string }[]
+  calls: { url: string; method: string; body?: unknown }[]
 } {
-  const calls: { url: string; method: string }[] = []
+  const calls: { url: string; method: string; body?: unknown }[] = []
   const fetch = vi.fn(async (url: string | URL | Request, init: RequestInit = {}) => {
     const u = String(url)
-    calls.push({ url: u, method: init.method ?? 'GET' })
+    const requestBody =
+      typeof init.body === 'string' ? (JSON.parse(init.body) as unknown) : undefined
+    calls.push({
+      url: u,
+      method: init.method ?? 'GET',
+      ...(requestBody !== undefined ? { body: requestBody } : {}),
+    })
     if (u.endsWith('/.well-known/ucp')) {
       return new Response(JSON.stringify(opts.profile ?? SAMPLE_PROFILE), {
         status: 200,
@@ -112,11 +119,10 @@ function mockFetch(opts: MockFetchOpts = {}): {
         headers: { 'content-type': 'application/json', 'cache-control': 'max-age=300' },
       })
     }
-    const requestBody =
-      typeof init.body === 'string' ? (JSON.parse(init.body) as { id?: unknown }) : undefined
     const requestId =
-      typeof requestBody?.id === 'string' || typeof requestBody?.id === 'number'
-        ? requestBody.id
+      typeof (requestBody as { id?: unknown } | undefined)?.id === 'string' ||
+      typeof (requestBody as { id?: unknown } | undefined)?.id === 'number'
+        ? ((requestBody as { id: string | number }).id as string | number)
         : 1
     const toolsList =
       opts.toolsList === undefined
@@ -143,7 +149,7 @@ describe('discover — composition', () => {
 
   it('returns verbatim profile + dispatch view keyed by capability and tool name', async () => {
     const { fetch } = mockFetch()
-    const result = await discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })
+    const result = await discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch })
 
     expect(result.business).toBe('https://shop.example.invalid')
     expect(result.profile.ucp.version).toBe('2026-08-25')
@@ -163,13 +169,14 @@ describe('discover — composition', () => {
 
   it('reports which document supplied the rendering and at what version', async () => {
     const { fetch } = mockFetch()
-    const result = await discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })
+    const result = await discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch })
 
     // No `businessVersion`: `source` already carries that bit, and a second
     // date invites date-order compatibility inference.
     expect(result.protocol).toEqual({
       version: '2026-08-25',
       source: 'well-known',
+      agentProfileUrl: rendering(PROFILE, '2026-08-25').url,
       businessProfileUrl: `${BUSINESS_URL}/.well-known/ucp`,
     })
   })
@@ -188,7 +195,7 @@ describe('discover — composition', () => {
       },
     }
     const { fetch } = mockFetch({ profile })
-    const result = await discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })
+    const result = await discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch })
 
     expect([...result.expectedCapabilities].sort()).toEqual([
       'dev.shopify.catalog',
@@ -206,7 +213,7 @@ describe('discover — composition', () => {
     // against a business that advertises it. The server negotiates it (it
     // fetches the same document); `expectedCapabilities` is the client-side
     // prediction the CTA layer reads, so it must contain it.
-    const agent = agentProfileFixture({
+    const runtimeProfile = profileFixture({
       version: '2026-08-25',
       url: 'https://you.example/agent.json',
       name: 'mine',
@@ -226,7 +233,7 @@ describe('discover — composition', () => {
       },
     }
     const { fetch } = mockFetch({ profile })
-    const result = await discover(BUSINESS_URL, { cacheDir, agent, fetch })
+    const result = await discover(BUSINESS_URL, { cacheDir, profile: runtimeProfile, fetch })
 
     expect([...result.expectedCapabilities].sort()).toEqual([
       'com.acme.loyalty',
@@ -236,13 +243,30 @@ describe('discover — composition', () => {
 
   it('issues exactly one profile fetch + one tools/list per capability', async () => {
     const { fetch, calls } = mockFetch()
-    await discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })
+    await discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch })
 
     const profileCalls = calls.filter((c) => c.url.endsWith('/.well-known/ucp'))
     const rpcCalls = calls.filter((c) => c.method === 'POST')
     expect(profileCalls).toHaveLength(1)
     expect(rpcCalls).toHaveLength(1)
     expect(rpcCalls[0]?.url).toBe(MCP_ENDPOINT)
+  })
+
+  it('sends the selected AgentProfile URL in tools/list metadata', async () => {
+    const selectedUrl = 'https://agent.example.invalid/selected.json'
+    const { fetch, calls } = mockFetch()
+    const result = await discover(BUSINESS_URL, {
+      cacheDir,
+      profile: profileFixture({ version: '2026-08-25', url: selectedUrl }),
+      fetch,
+    })
+
+    const rpc = calls.find((call) => call.method === 'POST')
+    expect(result.protocol.agentProfileUrl).toBe(selectedUrl)
+    expect(rpc?.body).toMatchObject({
+      method: 'tools/list',
+      params: { arguments: { meta: { 'ucp-agent': { profile: selectedUrl } } } },
+    })
   })
 
   it('respects an explicit capability filter', async () => {
@@ -265,7 +289,7 @@ describe('discover — composition', () => {
     const { fetch, calls } = mockFetch({ profile })
     const result = await discover(BUSINESS_URL, {
       cacheDir,
-      agent: AGENT,
+      profile: PROFILE,
       capabilities: ['dev.ucp.shopping'],
       fetch,
     })
@@ -302,7 +326,7 @@ describe('discover — composition', () => {
       },
     }
     const { fetch, calls } = mockFetch({ profile })
-    const result = await discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })
+    const result = await discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch })
 
     expect(Object.keys(result.negotiated)).toEqual(['dev.ucp.shopping'])
     expect(Object.keys(result.profile.ucp.services ?? {}).sort()).toEqual([
@@ -322,7 +346,7 @@ describe('discover — composition', () => {
       lines.push(msg)
     })
     const { fetch } = mockFetch()
-    await discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })
+    await discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch })
     expect(lines.join('')).not.toContain('not negotiating')
     setVerboseWriter(null)
   })
@@ -347,16 +371,14 @@ describe('discover — composition', () => {
     await expect(
       discover(BUSINESS_URL, {
         cacheDir,
-        agent: AGENT,
+        profile: PROFILE,
         capabilities: ['com.other.x'],
         fetch,
       }),
     ).rejects.toMatchObject({ code: 'AGENT_PROFILE_SERVICE_UNDECLARED', layer: 'client' })
   })
 
-  it('uses the published template fallback when the caller supplies no profile', async () => {
-    // This exercises the no-name fallback directly; production CLI paths
-    // resolve a named profile and read its profile.json instead.
+  it('uses managed when the caller supplies no Profile', async () => {
     const { fetch } = mockFetch()
     const result = await discover(BUSINESS_URL, { cacheDir, fetch })
 
@@ -364,61 +386,36 @@ describe('discover — composition', () => {
   })
 })
 
-// ─── Step 0 costs no round trip ──────────────────────────────────────────
+// ─── Local Profile resolution costs no round trip ────────────────────────
 //
-// A named profile is resolved from its local profile.json at every URL. The
-// identity therefore adds no pre-flight fetch or availability dependency;
-// only `ucp doctor` reads the profile URL.
-//
-// These assert on CALL COUNTS, not on outcomes: every other test here would
-// still pass if a pre-flight GET were introduced. The full call list proves a
-// negotiation makes exactly the requests the BUSINESS conversation needs.
+// Session resolution materializes a named DIY Profile before discovery. The
+// identity therefore adds no pre-flight fetch; only Business GETs and MCP
+// POSTs appear here.
 describe('discover — the agent identity never costs a request', () => {
   const SELF_HOSTED = 'https://agent.example.invalid/agent.json'
   let cacheDir: string
-  let home: string
 
   beforeEach(async () => {
     cacheDir = await mkdtemp(join(tmpdir(), 'ucp-cli-discover-test-'))
-    home = await mkdtemp(join(tmpdir(), 'ucp-cli-discover-home-'))
-    vi.stubEnv('UCP_HOME', home)
   })
 
   afterEach(async () => {
-    vi.unstubAllEnvs()
     await rm(cacheDir, { recursive: true, force: true })
-    await rm(home, { recursive: true, force: true })
   })
 
-  /** A local profile serving `version`'s published document — what `profile init` writes. */
-  async function localProfile(name: string, version: '2026-04-08' | '2026-08-25'): Promise<void> {
-    const dir = join(home, 'profiles', name)
-    await mkdir(dir, { recursive: true })
-    await writeFile(join(dir, 'profile.json'), RELEASES[version].agentProfileJson)
-  }
+  it('uses a release-default DIY rendering with Business traffic only', async () => {
+    const { fetch, calls } = mockFetch()
+    const result = await discover(BUSINESS_URL, {
+      cacheDir,
+      fetch,
+      profile: profileFixture({ version: '2026-08-25' }),
+    })
 
-  it('resolves a release-default URL from profile.json — business traffic only', async () => {
-    await localProfile('agent', '2026-08-25')
-    for (const profileUrl of [undefined, RELEASES['2026-08-25'].defaultAgentProfileUrl]) {
-      const { fetch, calls } = mockFetch()
-      const result = await discover(BUSINESS_URL, {
-        cacheDir,
-        fetch,
-        force: true,
-        profileName: 'agent',
-        ...(profileUrl === undefined ? {} : { profileUrl }),
-      })
-
-      expect(result.protocol.version).toBe('2026-08-25')
-      expect(calls.map((c) => c.url)).toEqual([`${BUSINESS_URL}/.well-known/ucp`, MCP_ENDPOINT])
-    }
+    expect(result.protocol.version).toBe('2026-08-25')
+    expect(calls.map((c) => c.url)).toEqual([`${BUSINESS_URL}/.well-known/ucp`, MCP_ENDPOINT])
   })
 
-  it('resolves a URL of your own from the local profile.json — still business traffic only', async () => {
-    // profile.json is the 04-08 document, so if the identity came from
-    // anywhere else (a fetch, or the latest published template) this
-    // negotiates 08-25.
-    await localProfile('mine', '2026-04-08')
+  it('uses a self-hosted singleton rendering with Business traffic only', async () => {
     const leafUrl = `${BUSINESS_URL}/.well-known/ucp/2026-04-08`
     const { fetch, calls } = mockFetch({
       profile: { ucp: { ...SAMPLE_PROFILE.ucp, supported_versions: { '2026-04-08': leafUrl } } },
@@ -428,11 +425,11 @@ describe('discover — the agent identity never costs a request', () => {
     const result = await discover(BUSINESS_URL, {
       cacheDir,
       fetch,
-      profileUrl: SELF_HOSTED,
-      profileName: 'mine',
+      profile: profileFixture({ version: '2026-04-08', name: 'mine', url: SELF_HOSTED }),
     })
 
     expect(result.protocol.version).toBe('2026-04-08')
+    expect(result.protocol.agentProfileUrl).toBe(SELF_HOSTED)
     expect(calls.map((c) => c.url)).toEqual([
       `${BUSINESS_URL}/.well-known/ucp`,
       leafUrl,
@@ -452,12 +449,15 @@ describe('discover — caching', () => {
     await rm(cacheDir, { recursive: true, force: true })
   })
 
-  it('writes tools/list to <cache>/toolslist/<origin>/<capability>.json', async () => {
+  it('writes tools/list under a negotiation-scoped hash', async () => {
     const { fetch } = mockFetch()
-    await discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })
+    await discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch })
 
-    const cacheFile = join(cacheDir, 'toolslist', 'shop.example.invalid', 'dev.ucp.shopping.json')
-    const cached = JSON.parse(await readFile(cacheFile, 'utf-8')) as {
+    const toolsDir = join(cacheDir, 'toolslist', 'shop.example.invalid')
+    const entries = await readdir(toolsDir)
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatch(/^[a-f0-9]{64}\.json$/)
+    const cached = JSON.parse(await readFile(join(toolsDir, entries[0] as string), 'utf-8')) as {
       body: { tools: { name: string }[] }
     }
     expect(cached.body.tools.map((t) => t.name).sort()).toEqual(['get_product', 'search_catalog'])
@@ -465,20 +465,115 @@ describe('discover — caching', () => {
 
   it('second discover call hits caches — no network', async () => {
     const { fetch, calls } = mockFetch()
-    await discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })
-    await discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })
+    await discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch })
+    await discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch })
     // 1 profile + 1 tools/list, total 2 — second call is fully cached.
     expect(calls).toHaveLength(2)
   })
 
   it('force:true re-issues both profile and tools/list', async () => {
     const { fetch, calls } = mockFetch()
-    await discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })
-    await discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch, force: true })
+    await discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch })
+    await discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch, force: true })
     const profileCalls = calls.filter((c) => c.url.endsWith('/.well-known/ucp'))
     const rpcCalls = calls.filter((c) => c.method === 'POST')
     expect(profileCalls).toHaveLength(2)
     expect(rpcCalls).toHaveLength(2)
+  })
+
+  const toolsResult = (name: string) => ({
+    jsonrpc: '2.0',
+    id: 1,
+    result: { tools: [{ name, inputSchema: { type: 'object' } }] },
+  })
+
+  it('does not reuse tools/list across selected protocol versions', async () => {
+    const sharedUrl = 'https://agent.example.invalid/shared.json'
+    const first = mockFetch({
+      profile: SAMPLE_PROFILE_0408,
+      profileCacheControl: 'no-store',
+      toolsList: toolsResult('from_0408'),
+    })
+    await discover(BUSINESS_URL, {
+      cacheDir,
+      profile: profileFixture({ version: '2026-04-08', url: sharedUrl }),
+      fetch: first.fetch,
+    })
+
+    const second = mockFetch({
+      profile: SAMPLE_PROFILE,
+      profileCacheControl: 'no-store',
+      toolsList: toolsResult('from_0825'),
+    })
+    const result = await discover(BUSINESS_URL, {
+      cacheDir,
+      profile: profileFixture({ version: '2026-08-25', url: sharedUrl }),
+      fetch: second.fetch,
+    })
+
+    expect(Object.keys(result.negotiated['dev.ucp.shopping']?.tools ?? {})).toEqual(['from_0825'])
+    expect(second.calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+  })
+
+  it('does not reuse tools/list across selected AgentProfile URLs', async () => {
+    const first = mockFetch({
+      profileCacheControl: 'no-store',
+      toolsList: toolsResult('from_first_profile'),
+    })
+    await discover(BUSINESS_URL, {
+      cacheDir,
+      profile: profileFixture({ url: 'https://agent.example.invalid/first.json' }),
+      fetch: first.fetch,
+    })
+
+    const second = mockFetch({
+      profileCacheControl: 'no-store',
+      toolsList: toolsResult('from_second_profile'),
+    })
+    const result = await discover(BUSINESS_URL, {
+      cacheDir,
+      profile: profileFixture({ url: 'https://agent.example.invalid/second.json' }),
+      fetch: second.fetch,
+    })
+
+    expect(Object.keys(result.negotiated['dev.ucp.shopping']?.tools ?? {})).toEqual([
+      'from_second_profile',
+    ])
+    expect(second.calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+  })
+
+  it('does not reuse tools/list across full endpoints', async () => {
+    const selectedProfile = profileFixture({ url: 'https://agent.example.invalid/shared.json' })
+    const profileAt = (endpoint: string) => ({
+      ucp: {
+        ...SAMPLE_PROFILE.ucp,
+        services: {
+          'dev.ucp.shopping': [{ version: '2026-08-25', transport: 'mcp', endpoint }],
+        },
+      },
+    })
+    const first = mockFetch({
+      profile: profileAt(`${MCP_ENDPOINT}?tenant=first`),
+      profileCacheControl: 'no-store',
+      toolsList: toolsResult('from_first_endpoint'),
+    })
+    await discover(BUSINESS_URL, { cacheDir, profile: selectedProfile, fetch: first.fetch })
+
+    const second = mockFetch({
+      profile: profileAt(`${MCP_ENDPOINT}?tenant=second`),
+      profileCacheControl: 'no-store',
+      toolsList: toolsResult('from_second_endpoint'),
+    })
+    const result = await discover(BUSINESS_URL, {
+      cacheDir,
+      profile: selectedProfile,
+      fetch: second.fetch,
+    })
+
+    expect(Object.keys(result.negotiated['dev.ucp.shopping']?.tools ?? {})).toEqual([
+      'from_second_endpoint',
+    ])
+    expect(second.calls.filter((call) => call.method === 'POST')).toHaveLength(1)
   })
 })
 
@@ -504,7 +599,7 @@ describe('discover — error propagation', () => {
     await expect(
       discover(BUSINESS_URL, {
         cacheDir,
-        agent: AGENT,
+        profile: PROFILE,
         capabilities: ['dev.ucp.shopping.checkout'],
         fetch,
       }),
@@ -515,7 +610,7 @@ describe('discover — error propagation', () => {
   })
 
   it('CAPABILITY_NOT_OFFERED when the profile declares a service the business omits', async () => {
-    const agent = agentProfileFixture({
+    const runtimeProfile = profileFixture({
       version: '2026-08-25',
       services: {
         'dev.ucp.shopping': [{ version: '2026-08-25', transport: 'mcp' }],
@@ -524,7 +619,12 @@ describe('discover — error propagation', () => {
     })
     const { fetch } = mockFetch()
     await expect(
-      discover(BUSINESS_URL, { cacheDir, agent, capabilities: ['com.acme.svc'], fetch }),
+      discover(BUSINESS_URL, {
+        cacheDir,
+        profile: runtimeProfile,
+        capabilities: ['com.acme.svc'],
+        fetch,
+      }),
     ).rejects.toThrowError(
       expect.objectContaining({ code: 'CAPABILITY_NOT_OFFERED' }) as unknown as Error,
     )
@@ -541,7 +641,9 @@ describe('discover — error propagation', () => {
       },
     }
     const { fetch } = mockFetch({ profile })
-    await expect(discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })).rejects.toThrowError(
+    await expect(
+      discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch }),
+    ).rejects.toThrowError(
       expect.objectContaining({
         code: 'SERVICE_ENDPOINT_MISSING',
         layer: 'transport',
@@ -553,7 +655,9 @@ describe('discover — error propagation', () => {
     const { fetch } = mockFetch({
       toolsList: { jsonrpc: '2.0', id: 1, result: { tools: 'oops' } },
     })
-    await expect(discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })).rejects.toThrow(/tools/)
+    await expect(discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch })).rejects.toThrow(
+      /tools/,
+    )
   })
 
   it('surfaces tools/list transport failures with their original error code', async () => {
@@ -568,7 +672,9 @@ describe('discover — error propagation', () => {
       return new Response('boom', { status: 503 })
     }) as unknown as typeof globalThis.fetch
 
-    await expect(discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })).rejects.toThrowError(
+    await expect(
+      discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch }),
+    ).rejects.toThrowError(
       expect.objectContaining({
         code: 'SERVICE_UNAVAILABLE',
         http_status: 503,
@@ -579,7 +685,7 @@ describe('discover — error propagation', () => {
   it('rejects non-https business URLs', async () => {
     const { fetch } = mockFetch()
     await expect(
-      discover('http://shop.example.invalid', { cacheDir, agent: AGENT, fetch }),
+      discover('http://shop.example.invalid', { cacheDir, profile: PROFILE, fetch }),
     ).rejects.toThrowError(
       expect.objectContaining({ code: 'INVALID_INPUT', layer: 'client' }) as unknown as Error,
     )
@@ -587,7 +693,7 @@ describe('discover — error propagation', () => {
 
   it('sanitizes cache key for capabilities that are not filesystem-safe', async () => {
     const unsafeCapability = '../bad'
-    const agent = agentProfileFixture({
+    const runtimeProfile = profileFixture({
       version: '2026-08-25',
       services: { [unsafeCapability]: [{ version: '2026-08-25', transport: 'mcp' }] },
     })
@@ -603,7 +709,7 @@ describe('discover — error propagation', () => {
     const { fetch } = mockFetch({ profile })
     await discover(BUSINESS_URL, {
       cacheDir,
-      agent,
+      profile: runtimeProfile,
       fetch,
       capabilities: [unsafeCapability],
     })
@@ -659,16 +765,98 @@ describe('discover — supported_versions selection', () => {
     },
   }
 
+  it.each([
+    {
+      name: '04-only',
+      root: SAMPLE_PROFILE_0408,
+      leaves: {},
+      version: '2026-04-08' as const,
+      source: 'well-known' as const,
+    },
+    {
+      name: '08-only',
+      root: SAMPLE_PROFILE,
+      leaves: {},
+      version: '2026-08-25' as const,
+      source: 'well-known' as const,
+    },
+    {
+      name: 'both chooses newest',
+      root: {
+        ucp: {
+          ...SAMPLE_PROFILE_0408.ucp,
+          supported_versions: { '2026-08-25': LEAF_0825_URL },
+        },
+      },
+      leaves: { '2026-08-25': SAMPLE_PROFILE },
+      version: '2026-08-25' as const,
+      source: 'supported_versions' as const,
+    },
+    {
+      name: 'future root with known leaves chooses newest leaf',
+      root: TOP_FUTURE,
+      leaves: { '2026-08-25': SAMPLE_PROFILE, '2026-04-08': SAMPLE_PROFILE_0408 },
+      version: '2026-08-25' as const,
+      source: 'supported_versions' as const,
+    },
+  ])('managed discovery: $name', async ({ root, leaves, version, source }) => {
+    const { fetch } = mockFetch({ profile: root, versionedProfiles: leaves })
+    const result = await discover(BUSINESS_URL, { cacheDir, fetch })
+
+    expect(result.protocol).toMatchObject({
+      version,
+      source,
+      agentProfileUrl: RELEASES[version].defaultAgentProfileUrl,
+    })
+  })
+
+  it('managed discovery rejects a future-only Business before any MCP POST', async () => {
+    const { supported_versions: _omitted, ...futureOnly } = TOP_FUTURE.ucp
+    const { fetch, calls } = mockFetch({ profile: { ucp: futureOnly } })
+
+    await expect(discover(BUSINESS_URL, { cacheDir, fetch })).rejects.toMatchObject({
+      code: 'PROTOCOL_VERSION_INCOMPATIBLE',
+      message: expect.stringContaining(
+        "managed Profile already offers every rendering installed in this ucp-cli build, so no local Profile using this build's installed versions can recover",
+      ),
+      context: {
+        offered: ['2026-12-01'],
+        profileVersions: ['2026-04-08', '2026-08-25'],
+        profileSource: 'managed',
+      },
+    })
+    expect(calls.filter((call) => call.method === 'POST')).toHaveLength(0)
+  })
+
+  it('does not fall back to an older root when the selected newest leaf fails', async () => {
+    const root = {
+      ucp: {
+        ...SAMPLE_PROFILE_0408.ucp,
+        supported_versions: { '2026-08-25': LEAF_0825_URL },
+      },
+    }
+    const { fetch, calls } = mockFetch({ profile: root, versionedProfiles: {} })
+
+    await expect(discover(BUSINESS_URL, { cacheDir, fetch })).rejects.toMatchObject({
+      code: 'PROFILE_FETCH_FAILED',
+    })
+    expect(calls.map((call) => [call.method, call.url])).toEqual([
+      ['GET', `${BUSINESS_URL}/.well-known/ucp`],
+      ['GET', LEAF_0825_URL],
+    ])
+  })
+
   it('S3′: the 04-08 profile negotiates at 04-08 through the leaf — same binary', async () => {
     const { fetch, calls } = mockFetch({
       profile: TOP_0825,
       versionedProfiles: { '2026-04-08': SAMPLE_PROFILE_0408 },
     })
-    const result = await discover(BUSINESS_URL, { cacheDir, agent: AGENT_0408, fetch })
+    const result = await discover(BUSINESS_URL, { cacheDir, profile: PROFILE_0408, fetch })
 
     expect(result.protocol).toEqual({
       version: '2026-04-08',
       source: 'supported_versions',
+      agentProfileUrl: rendering(PROFILE_0408, '2026-04-08').url,
       businessProfileUrl: LEAF_0408_URL,
     })
     expect(result.profile.ucp.version).toBe('2026-04-08')
@@ -686,7 +874,7 @@ describe('discover — supported_versions selection', () => {
       profile: TOP_0825,
       versionedProfiles: { '2026-04-08': SAMPLE_PROFILE_0408 },
     })
-    const result = await discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })
+    const result = await discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch })
 
     expect(result.protocol.source).toBe('well-known')
     expect(result.protocol.version).toBe('2026-08-25')
@@ -702,11 +890,12 @@ describe('discover — supported_versions selection', () => {
       profile: TOP_FUTURE,
       versionedProfiles: { '2026-08-25': SAMPLE_PROFILE },
     })
-    const result = await discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })
+    const result = await discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch })
 
     expect(result.protocol).toEqual({
       version: '2026-08-25',
       source: 'supported_versions',
+      agentProfileUrl: rendering(PROFILE, '2026-08-25').url,
       businessProfileUrl: LEAF_0825_URL,
     })
     expect(result.negotiated['dev.ucp.shopping']?.endpoint).toBe(MCP_ENDPOINT)
@@ -717,37 +906,66 @@ describe('discover — supported_versions selection', () => {
       profile: TOP_FUTURE,
       versionedProfiles: { '2026-08-25': SAMPLE_PROFILE },
     })
-    await discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })
+    await discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch })
     const firstPass = calls.length
 
+    const topUrl = `${BUSINESS_URL}/.well-known/ucp`
     const top = JSON.parse(
-      await readFile(join(cacheDir, 'businesses', 'shop.example.invalid.json'), 'utf8'),
+      await readFile(join(cacheDir, 'businesses', `${urlToFilename(topUrl)}.json`), 'utf8'),
     ) as { body: { ucp: { version: string } } }
     const leaf = JSON.parse(
       await readFile(
-        join(cacheDir, 'businesses', '2026-08-25', 'shop.example.invalid.json'),
+        join(cacheDir, 'businesses', '2026-08-25', `${urlToFilename(LEAF_0825_URL)}.json`),
         'utf8',
       ),
     ) as { body: { ucp: { version: string } } }
     expect(top.body.ucp.version).toBe('2026-12-01')
     expect(leaf.body.ucp.version).toBe('2026-08-25')
 
-    await discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })
+    await discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch })
     expect(calls.length).toBe(firstPass)
   })
 
   it('S5: business at a single unknown release → PROTOCOL_VERSION_INCOMPATIBLE naming both sets', async () => {
     const { supported_versions: _omit, ...ucp } = TOP_FUTURE.ucp
     const { fetch } = mockFetch({ profile: { ucp } })
-    await expect(discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })).rejects.toMatchObject({
+    await expect(
+      discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch }),
+    ).rejects.toMatchObject({
       code: 'PROTOCOL_VERSION_INCOMPATIBLE',
       layer: 'transport',
       message:
-        "https://shop.example.invalid offers UCP 2026-12-01; profile 'agent' uses 2026-08-25. ucp-cli supports 2026-04-08, 2026-08-25",
+        "https://shop.example.invalid offers UCP 2026-12-01; profile 'agent' offers 2026-08-25. ucp-cli supports 2026-04-08, 2026-08-25. A DIY Profile is pinned to this one rendering.",
       context: {
         businessVersion: '2026-12-01',
         offered: ['2026-12-01'],
         supported: ['2026-04-08', '2026-08-25'],
+        profileSource: 'diy',
+        profileUrlOverride: false,
+        agentVersion: '2026-08-25',
+      },
+    })
+  })
+
+  it('reports explicit URL precedence independently from a DIY body source', async () => {
+    const { fetch } = mockFetch({ profile: SAMPLE_PROFILE_0408 })
+    const overridden = profileFixture({
+      version: '2026-08-25',
+      url: 'https://agent.example.invalid/override.json',
+      urlOverride: true,
+    })
+
+    await expect(
+      discover(BUSINESS_URL, { cacheDir, profile: overridden, fetch }),
+    ).rejects.toMatchObject({
+      code: 'PROTOCOL_VERSION_INCOMPATIBLE',
+      message: expect.stringContaining(
+        'Remove --profile-url/UCP_AGENT_PROFILE_URL or make that URL serve the intended exact authored/bundled rendering',
+      ),
+      context: {
+        offered: ['2026-04-08'],
+        profileSource: 'diy',
+        profileUrlOverride: true,
         agentVersion: '2026-08-25',
       },
     })
@@ -757,12 +975,18 @@ describe('discover — supported_versions selection', () => {
     // The recovery is switching profiles, not upgrading the CLI: AGENT_0408
     // would negotiate with this same business.
     const { fetch } = mockFetch({ profile: SAMPLE_PROFILE_0408 })
-    await expect(discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })).rejects.toMatchObject({
+    await expect(
+      discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch }),
+    ).rejects.toMatchObject({
       code: 'PROTOCOL_VERSION_INCOMPATIBLE',
-      context: { offered: ['2026-04-08'], agentVersion: '2026-08-25' },
+      context: {
+        offered: ['2026-04-08'],
+        profileSource: 'diy',
+        agentVersion: '2026-08-25',
+      },
     })
     const { fetch: fetch2 } = mockFetch({ profile: SAMPLE_PROFILE_0408 })
-    const ok = await discover(BUSINESS_URL, { cacheDir, agent: AGENT_0408, fetch: fetch2 })
+    const ok = await discover(BUSINESS_URL, { cacheDir, profile: PROFILE_0408, fetch: fetch2 })
     expect(ok.protocol).toMatchObject({ version: '2026-04-08', source: 'well-known' })
   })
 
@@ -773,7 +997,7 @@ describe('discover — supported_versions selection', () => {
       versionedProfiles: { '2026-04-08': SAMPLE_PROFILE },
     })
     await expect(
-      discover(BUSINESS_URL, { cacheDir, agent: AGENT_0408, fetch }),
+      discover(BUSINESS_URL, { cacheDir, profile: PROFILE_0408, fetch }),
     ).rejects.toMatchObject({
       code: 'PROFILE_VERSION_MISMATCH',
       layer: 'transport',
@@ -801,7 +1025,7 @@ describe('discover — supported_versions selection', () => {
       profile: TOP_0825,
       versionedProfiles: { '2026-04-08': nested },
     })
-    const result = await discover(BUSINESS_URL, { cacheDir, agent: AGENT_0408, fetch })
+    const result = await discover(BUSINESS_URL, { cacheDir, profile: PROFILE_0408, fetch })
 
     expect(result.protocol.version).toBe('2026-04-08')
     expect(lines.join('')).toContain('version-specific documents are leaves')
@@ -814,14 +1038,16 @@ describe('discover — supported_versions selection', () => {
     // job it exists for.
     const profile = { ucp: { ...TOP_FUTURE.ucp, services: 'reshaped' } }
     const { fetch } = mockFetch({ profile, versionedProfiles: { '2026-08-25': SAMPLE_PROFILE } })
-    const result = await discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })
+    const result = await discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch })
     expect(result.negotiated['dev.ucp.shopping']?.version).toBe('2026-08-25')
   })
 
   it('still validates a selected top-level document against the full profile schema', async () => {
     const profile = { ...SAMPLE_PROFILE, ucp: { ...SAMPLE_PROFILE.ucp, services: 'reshaped' } }
     const { fetch } = mockFetch({ profile })
-    await expect(discover(BUSINESS_URL, { cacheDir, agent: AGENT, fetch })).rejects.toMatchObject({
+    await expect(
+      discover(BUSINESS_URL, { cacheDir, profile: PROFILE, fetch }),
+    ).rejects.toMatchObject({
       code: 'PROFILE_SCHEMA_INVALID',
       layer: 'transport',
     })
@@ -835,14 +1061,14 @@ describe('discover — supported_versions selection', () => {
       },
     })
     await expect(
-      discover(BUSINESS_URL, { cacheDir, agent: AGENT_0408, fetch }),
+      discover(BUSINESS_URL, { cacheDir, profile: PROFILE_0408, fetch }),
     ).rejects.toMatchObject({ code: 'PROFILE_SCHEMA_INVALID', layer: 'transport' })
   })
 
   it('surfaces a failed leaf fetch as PROFILE_FETCH_FAILED', async () => {
     const { fetch } = mockFetch({ profile: TOP_0825, versionedProfiles: {} })
     await expect(
-      discover(BUSINESS_URL, { cacheDir, agent: AGENT_0408, fetch }),
+      discover(BUSINESS_URL, { cacheDir, profile: PROFILE_0408, fetch }),
     ).rejects.toMatchObject({ code: 'PROFILE_FETCH_FAILED' })
   })
 
@@ -855,7 +1081,7 @@ describe('discover — supported_versions selection', () => {
     }
     const { fetch } = mockFetch({ profile })
     await expect(
-      discover(BUSINESS_URL, { cacheDir, agent: AGENT_0408, fetch }),
+      discover(BUSINESS_URL, { cacheDir, profile: PROFILE_0408, fetch }),
     ).rejects.toMatchObject({ code: 'PROFILE_SCHEMA_INVALID', layer: 'transport' })
   })
 })

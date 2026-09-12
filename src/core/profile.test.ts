@@ -8,8 +8,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import type { CacheEntry } from './cache.js'
-import { type BusinessProfile, fetchBusinessProfile, parsePlatformProfile } from './profile.js'
+import { createAdHocProfile, createDiyProfile, createManagedProfile } from './agent.js'
+import { type CacheEntry, urlToFilename } from './cache.js'
+import {
+  type BusinessProfile,
+  fetchBusinessProfile,
+  fetchCompatibleBusinessProfile,
+  parsePlatformProfile,
+} from './profile.js'
 import { RELEASES, SUPPORTED_VERSIONS } from './releases.js'
 
 // `profile init --version <v>` writes `RELEASES[v].agentProfileJson` verbatim.
@@ -138,8 +144,9 @@ describe('fetchBusinessProfile', () => {
     expect(profile.ucp.version).toBe('2026-08-25')
     expect(mock.calls[0]?.url).toBe('https://shop.example.com/.well-known/ucp')
 
+    const profileUrl = 'https://shop.example.com/.well-known/ucp'
     const cached = JSON.parse(
-      await readFile(join(cacheDir, 'shop.example.com.json'), 'utf-8'),
+      await readFile(join(cacheDir, `${urlToFilename(profileUrl)}.json`), 'utf-8'),
     ) as CacheEntry<BusinessProfile>
     expect(cached.body.ucp.version).toBe('2026-08-25')
   })
@@ -218,11 +225,12 @@ describe('fetchBusinessProfile', () => {
     expect(mock.calls).toHaveLength(2)
   })
 
-  it('uses URL.origin for cache filename (different paths share a cache entry)', async () => {
+  it('resolves business inputs to the canonical well-known URL before caching', async () => {
     const mock = makeMockFetch([
       { body: SAMPLE_PROFILE, headers: { 'cache-control': 'max-age=300' } },
     ])
-    // First fetch with extra path; second with bare origin — both map to the same cache file.
+    // A path on the business input never replaces the fixed discovery path,
+    // so both calls request the same full URL and share its cache entry.
     await fetchBusinessProfile('https://shop.example.com/some/other/path', {
       cacheDir,
       fetch: mock.fn,
@@ -237,6 +245,59 @@ describe('fetchBusinessProfile', () => {
     ).rejects.toMatchObject({
       code: 'INVALID_INPUT',
       layer: 'client',
+    })
+  })
+
+  it('gives managed guidance before considering URL override provenance', async () => {
+    const mock = makeMockFetch([{ body: { ucp: { version: '2026-12-01' } } }])
+
+    await expect(
+      fetchCompatibleBusinessProfile('https://shop.example.com', {
+        cacheDir,
+        fetch: mock.fn,
+        profile: { ...createManagedProfile(), urlOverride: true },
+      }),
+    ).rejects.toMatchObject({
+      code: 'PROTOCOL_VERSION_INCOMPATIBLE',
+      message: expect.stringContaining('The managed Profile already offers every rendering'),
+    })
+  })
+
+  it('gives reachable URL-only guidance for an ad-hoc Profile', async () => {
+    const mock = makeMockFetch([{ body: { ucp: { version: '2026-04-08' } } }])
+
+    await expect(
+      fetchCompatibleBusinessProfile('https://shop.example.com', {
+        cacheDir,
+        fetch: mock.fn,
+        profile: createAdHocProfile(RELEASES['2026-08-25'].defaultAgentProfileUrl),
+      }),
+    ).rejects.toMatchObject({
+      code: 'PROTOCOL_VERSION_INCOMPATIBLE',
+      message: expect.stringContaining(
+        'A URL-only ad-hoc Profile is pinned to this one bundled rendering',
+      ),
+    })
+  })
+
+  it('retains authored-body guidance for a named DIY Profile with a URL override', async () => {
+    const mock = makeMockFetch([{ body: { ucp: { version: '2026-04-08' } } }])
+    const profile = createDiyProfile({
+      name: 'mine',
+      body: JSON.parse(RELEASES['2026-08-25'].agentProfileJson),
+      url: 'https://agent.example.com/profile.json',
+      urlOverride: true,
+    })
+
+    await expect(
+      fetchCompatibleBusinessProfile('https://shop.example.com', {
+        cacheDir,
+        fetch: mock.fn,
+        profile,
+      }),
+    ).rejects.toMatchObject({
+      code: 'PROTOCOL_VERSION_INCOMPATIBLE',
+      message: expect.stringMatching(/editable local DIY body.*authored document/),
     })
   })
 })

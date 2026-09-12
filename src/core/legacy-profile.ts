@@ -1,0 +1,232 @@
+// One-time upgrade of local profiles written before the managed/DIY split.
+//
+// ── What this exists for ──────────────────────────────────────────────────
+//
+// Before local Profiles gained stored kinds, `ucp profile init` wrote ONE
+// generated body plus a `meta.json` with no discriminator. Read through
+// today's session resolver that document becomes a singleton DIY Profile
+// pinned to one release — and for every 0.4.2 … 0.7.0 install it is worse
+// than pinned: that generated body declares `dev.ucp.shopping` at UCP
+// 2026-01-23 inside a 2026-04-08 profile, which `loadAgentProfile`'s snapshot
+// rule rejects outright (`AGENT_PROFILE_VERSION_MISMATCH`). An untouched
+// generated body is not an authored declaration; it is an old spelling of
+// "give me whatever this CLI ships". So the upgrade re-reads it as the
+// multi-rendering managed Profile, and negotiation may select any release
+// installed in this binary.
+//
+// An EDITED body, or a body paired with a URL the user owns, is the opposite:
+// somebody decided what this agent claims and where the counterparty reads
+// it. Those stay DIY — singleton, pinned, byte-preserved.
+//
+// ── Why a fingerprint, and why canonical JSON ─────────────────────────────
+//
+// The only evidence on disk is the body itself, so classification is exact
+// equality against the finite set of bodies ucp-cli has ever generated.
+// Fingerprints are sha256 over CANONICAL JSON (recursively key-sorted,
+// separator-free) rather than raw bytes: re-indenting or key-reordering a
+// document with `jq` is not a semantic edit and must not cost a user their
+// upgrade, while any added/removed/changed value must. Array order is
+// preserved — in a profile it is data, not formatting.
+//
+// ── Provenance (verified from git, not from prose) ────────────────────────
+//
+// Published npm versions of @shopify/ucp-cli: 0.4.2, 0.4.3, 0.5.0, 0.6.0,
+// 0.6.1, 0.6.2, 0.6.3, 0.7.0, 0.8.0. Evaluating `localAgentProfileBody()`
+// with each release's build defines yields exactly two distinct published
+// bodies (STOCK-A, STOCK-B) plus one pre-publication body (STOCK-A0) that
+// only ever existed in dev builds of the internal 0.1.x tree. Frozen copies
+// and the full derivation live in test/fixtures/legacy-profiles/.
+//
+// Those releases never wrote `meta.profile_url` on their own: `profile init`
+// set it only from an explicit `--profile-url`, and the upload seam that
+// could otherwise have filled it (`noopUploadProfile`) always returned `{}`.
+// A stock 0.4.2 … 0.8.0 profile therefore has NO profile_url, and any URL
+// found next to a stock body was typed by a human — which is why a URL that
+// is not this binary's published default for that body means DIY.
+//
+// ── Scope ─────────────────────────────────────────────────────────────────
+//
+// Pure. No I/O, no filesystem, no knowledge of where the bytes were read
+// from: core/profile-store.ts owns the read, the atomic marker write, and the
+// warn-and-continue policy. Nothing in agent/profile/discover/operation may
+// grow a legacy branch — the whole legacy vocabulary is this module.
+
+import { createHash } from 'node:crypto'
+
+import { RELEASES, releaseByDefaultAgentProfileUrl, type Version } from './releases.js'
+
+/**
+ * How a local profile's body is treated at runtime.
+ *
+ * - `managed`: the body is one ucp-cli generated, so the Profile is rebuilt
+ *   from the bundled templates and offers every installed release.
+ * - `diy`: somebody authored this identity. Exactly one rendering, pinned to
+ *   the body's own `ucp.version`, at the body's own URL.
+ */
+export type ProfileKind = 'managed' | 'diy'
+
+/**
+ * `meta.format_version` written by the upgrade. Bump only when the on-disk
+ * meaning of the profile directory changes; the marker is what makes the
+ * upgrade a one-time event instead of a fingerprint on every read.
+ */
+export const PROFILE_FORMAT_VERSION = 2
+
+/**
+ * The fields of `meta.json` classification reads. Structural on purpose:
+ * this module must not import the store it is called from.
+ */
+export interface StoredProfileMarker {
+  readonly format_version?: number | undefined
+  readonly kind?: ProfileKind | undefined
+  readonly profile_url?: string | undefined
+}
+
+export interface ProfileClassification {
+  /** The kind this profile is read as from now on. */
+  readonly kind: ProfileKind
+  /**
+   * True when `meta.json` still has to be stamped. False for an already
+   * marked profile — the marker is the promise that no body is fingerprinted
+   * twice, and re-stamping an unchanged file is a write nobody asked for.
+   */
+  readonly needsMarker: boolean
+}
+
+/** One body ucp-cli has generated, identified by canonical-JSON digest. */
+interface GeneratedBody {
+  /** `ucp.version` the body declares — selects the URL that keeps it managed. */
+  readonly version: Version
+  /** sha256 of {@link canonicalJson} over the parsed body. */
+  readonly sha256: string
+  /** Exactly where these bytes come from. */
+  readonly provenance: string
+}
+
+/**
+ * Bodies shipped by releases that no longer exist in the tree. Frozen
+ * literals, never recomputed: the whole point is to recognize documents
+ * written by binaries this source can no longer build.
+ *
+ * Regenerate/verify with test/fixtures/legacy-profiles/PROVENANCE.md.
+ */
+const HISTORICAL_GENERATED_BODIES: readonly GeneratedBody[] = Object.freeze([
+  {
+    version: '2026-04-08',
+    sha256: '508d145091f0efb805aacd7b21bc738b3dfa108c7b1d59748c66c00fe391b3cd',
+    provenance:
+      'STOCK-A — localAgentProfileBody() in npm 0.4.2 … 0.7.0 (git v0.7.0:src/core/profile.ts). Declares dev.ucp.shopping at 2026-01-23 inside a 2026-04-08 profile.',
+  },
+  {
+    version: '2026-08-25',
+    sha256: '3a75f9cf8e416ecbc716c303b6356dc1c9f6dce702f419654460eda0bf692ff5',
+    provenance: 'STOCK-B — localAgentProfileBody() in npm 0.8.0 (git v0.8.0:src/core/profile.ts).',
+  },
+  {
+    version: '2026-04-08',
+    sha256: 'c928a7ed8d841f2da6571203845c8cb87d42c7d94fac28d48b39a65073e55c76',
+    provenance:
+      'STOCK-A0 — localAgentProfileBody() in the internal 0.1.x tree (git 89f0074:src/core/profile.ts, branch local/init-history). Never published to npm; recognized because dev builds of that tree wrote it, and it pins dev.ucp.shopping to an unreachable example.invalid endpoint that is useless as a DIY declaration.',
+  },
+])
+
+/**
+ * Canonical JSON: recursively key-sorted, no insignificant whitespace.
+ * Deterministic for any `JSON.parse` output, which is the only input shape
+ * this module ever sees.
+ */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (typeof value === 'object' && value !== null) {
+    const record = value as Record<string, unknown>
+    const fields = Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+    return `{${fields.join(',')}}`
+  }
+  // `undefined` cannot appear in parsed JSON; JSON.stringify would return it
+  // as `undefined`, so normalize to null rather than emit a broken digest.
+  return JSON.stringify(value) ?? 'null'
+}
+
+/** sha256 of {@link canonicalJson} — the identity used for classification. */
+export function profileBodyFingerprint(body: unknown): string {
+  return createHash('sha256').update(canonicalJson(body)).digest('hex')
+}
+
+/**
+ * Every body ucp-cli is known to have generated, as digest → declared
+ * release. Historical entries are frozen literals; the current release
+ * templates are hashed at load so a codegen refresh cannot silently turn a
+ * freshly-initialized profile into "user-authored".
+ */
+export const GENERATED_BODY_FINGERPRINTS: ReadonlyMap<string, Version> = new Map<string, Version>([
+  ...HISTORICAL_GENERATED_BODIES.map((entry) => [entry.sha256, entry.version] as const),
+  ...Object.values(RELEASES).map(
+    (rel) => [profileBodyFingerprint(JSON.parse(rel.agentProfileJson)), rel.version] as const,
+  ),
+])
+
+/** Provenance strings for the frozen historical entries; for tests and docs. */
+export const HISTORICAL_GENERATED_BODY_PROVENANCE: readonly GeneratedBody[] =
+  HISTORICAL_GENERATED_BODIES
+
+/**
+ * The release a body was generated for, or `undefined` when these bytes are
+ * not one ucp-cli ever wrote (i.e. the user authored or edited them).
+ */
+export function generatedBodyVersion(body: unknown): Version | undefined {
+  return GENERATED_BODY_FINGERPRINTS.get(profileBodyFingerprint(body))
+}
+
+/**
+ * Whether `profileUrl` still lets a generated body count as managed.
+ *
+ * Absent is the stock case (0.4.2 … 0.8.0 never wrote one). The only URL that
+ * survives is THIS binary's published default for the release the body
+ * declares — the document a managed rendering would advertise anyway. A
+ * different release's default URL is as much of a decision as example.com,
+ * so it is DIY too: the pairing says the user wants that exact URL, and a
+ * managed Profile would not send it.
+ */
+function keepsManagedUrl(version: Version, profileUrl: string | undefined): boolean {
+  if (profileUrl === undefined) return true
+  return releaseByDefaultAgentProfileUrl(profileUrl)?.version === version
+}
+
+/**
+ * Resolve a stored profile's kind, and say whether `meta.json` still needs
+ * the marker.
+ *
+ * Order matters: an explicit `kind` wins over any fingerprint. A profile that
+ * says it is DIY is never re-upgraded because its body happens to match a
+ * template, and a profile that says it is managed is not demoted by a body
+ * this build no longer recognizes.
+ */
+export function classifyStoredProfile(
+  body: unknown,
+  meta: StoredProfileMarker,
+): ProfileClassification {
+  const marked = meta.kind
+  if (marked !== undefined) {
+    const complete =
+      meta.format_version !== undefined && meta.format_version >= PROFILE_FORMAT_VERSION
+    return { kind: marked, needsMarker: !complete }
+  }
+  const version = generatedBodyVersion(body)
+  if (version === undefined) return { kind: 'diy', needsMarker: true }
+  return { kind: keepsManagedUrl(version, meta.profile_url) ? 'managed' : 'diy', needsMarker: true }
+}
+
+/**
+ * The marked form of `meta`. Appends the two canonical fields and touches
+ * nothing else — `created_at`/`updated_at`, `protocol_versions`, `defaults`,
+ * and any unknown key a future (or older) build wrote all survive, in place.
+ * `updated_at` deliberately does NOT move: the user changed nothing.
+ */
+export function markProfileMeta<T extends StoredProfileMarker>(
+  meta: T,
+  kind: ProfileKind,
+): T & { format_version: number; kind: ProfileKind } {
+  return { ...meta, format_version: PROFILE_FORMAT_VERSION, kind }
+}

@@ -8,12 +8,12 @@
 // publishes at `/.well-known/ucp`. Service endpoints are required before we can
 // dispatch.
 //
-// Version model (spec "Protocol Version"): exact-version equality. The agent
-// profile declares ONE `ucp.version`; a business is negotiable iff it offers
-// that exact version — as its top-level rendering or as a `supported_versions`
-// leaf. Compatibility is never inferred from date order. Every parse below
-// selects its schema from the release registry (releases.ts) by the document's
-// own `ucp.version`.
+// Version model (spec "Protocol Version"): exact-version equality. A runtime
+// Profile contributes one or more exact AgentProfile renderings; a Business
+// contributes its root version plus `supported_versions` keys. Negotiation
+// selects the newest installed version in that intersection. Compatibility is
+// never inferred from date order, and selection is never retried at an older
+// version after the chosen rendering fails.
 
 import { join } from 'node:path'
 
@@ -22,7 +22,7 @@ import { z } from 'incur'
 import { ErrorCodes, UcpError } from '../lib/errors.js'
 import { omitUndefined } from '../lib/omit-undefined.js'
 import { formatZodIssues } from '../lib/zod-format.js'
-import { type AgentProfile, agentLabel } from './agent.js'
+import type { AgentProfile, Profile } from './agent.js'
 import { fetchCached, ucpHomeDir } from './cache.js'
 import {
   type BusinessProfile,
@@ -92,12 +92,11 @@ export function parsePlatformProfile(input: unknown, label = 'platform profile')
 
 // There is deliberately NO `parseBusinessProfile`. Every business document
 // the CLI touches arrives through `fetchCompatibleBusinessProfile` below,
-// which selects the release from the AGENT profile's version (exact-version
-// equality) and reports a version it cannot serve as
-// PROTOCOL_VERSION_INCOMPATIBLE. A standalone "parse a business document at
-// whatever version it claims" helper had no callers, and the error code that
-// existed only for it (`PROFILE_VERSION_UNSUPPORTED`) invited the idea that a
-// business's own version selects our schema — it does not.
+// which selects the newest exact release shared by the runtime Profile and
+// Business offer. A standalone "parse a business document at whatever version
+// it claims" helper had no callers, and the error code that existed only for
+// it (`PROFILE_VERSION_UNSUPPORTED`) invited the idea that a Business's root
+// version alone selects our schema — it does not.
 
 /**
  * Default catalog business URL — the origin whose `/.well-known/ucp` discovery
@@ -138,10 +137,9 @@ const PROFILE_ERROR_CODES = {
 /**
  * Fetch and validate a business profile from an explicit document URL: the
  * canonical `<origin>/.well-known/ucp`, or a version-specific document linked
- * from `supported_versions`. Callers pick `cacheDir`; `fetchCached` names the
- * file after the URL's origin, so documents that share an origin need
- * distinct directories. `schema` selects the release to validate against;
- * defaults to the latest release's business schema.
+ * from `supported_versions`. Callers pick `cacheDir`; `fetchCached` names each
+ * file with a hash of the canonical full URL. `schema` selects the release to
+ * validate against; defaults to the latest release's business schema.
  */
 export async function fetchBusinessProfileFromUrl(
   profileUrl: string,
@@ -192,15 +190,17 @@ const profileEnvelopeSchema = z
   .catchall(z.unknown())
 
 export interface ResolveProfileOptions extends FetchProfileOptions {
-  /** The fetched, validated agent identity to negotiate for. */
-  agent: AgentProfile
+  /** Runtime Profile whose exact renderings are eligible for selection. */
+  profile: Profile
 }
 
 export interface ResolvedBusinessProfile {
   profile: BusinessProfile
+  /** The exact AgentProfile rendering selected for this Business. */
+  agentProfile: AgentProfile
   /** URL of the document `profile` was parsed from. */
   profileUrl: string
-  /** Negotiated protocol version — always the agent profile's exact version. */
+  /** Negotiated protocol version shared by both selected renderings. */
   version: Version
   /** `ucp.version` of the top-level `/.well-known/ucp` rendering. */
   businessVersion: string
@@ -208,39 +208,69 @@ export interface ResolvedBusinessProfile {
   source: 'well-known' | 'supported_versions'
 }
 
+function profileLabel(profile: Profile): string {
+  if (profile.source === 'managed') {
+    return profile.name === undefined ? 'managed Profile' : `managed Profile '${profile.name}'`
+  }
+  if (profile.source === 'url') {
+    const rendering = Object.values(profile.renderings)[0]
+    return rendering === undefined
+      ? 'profile URL override'
+      : `profile URL override ${rendering.url}`
+  }
+  if (profile.name !== undefined) return `profile '${profile.name}'`
+  const rendering = Object.values(profile.renderings)[0]
+  return rendering === undefined ? 'DIY Profile' : `agent profile ${rendering.url}`
+}
+
+function incompatibleProfileRemedy(profile: Profile): string {
+  // Body provenance determines whether the declaration is editable. Check it
+  // before independent URL-override provenance, matching service remedies.
+  if (profile.source === 'managed') {
+    return "The managed Profile already offers every rendering installed in this ucp-cli build, so no local Profile using this build's installed versions can recover; install a ucp-cli build that supports a Business-offered release."
+  }
+  if (profile.source === 'url') {
+    return 'A URL-only ad-hoc Profile is pinned to this one bundled rendering. The explicit --profile-url/UCP_AGENT_PROFILE_URL override outranks stored meta/profile-name switching. Remove --profile-url/UCP_AGENT_PROFILE_URL or make that URL serve the intended exact authored/bundled rendering; to edit the declaration itself, create a DIY Profile and a Profile URL you control.'
+  }
+  if (profile.urlOverride) {
+    return 'This is still an editable local DIY body. Update profile.json, then upload that authored document to the active --profile-url/UCP_AGENT_PROFILE_URL override. It outranks stored meta/profile-name switching. Remove --profile-url/UCP_AGENT_PROFILE_URL or make that URL serve the intended exact authored/bundled rendering.'
+  }
+  return 'A DIY Profile is pinned to this one rendering.'
+}
+
 /**
- * Fetch the business profile rendering that matches the agent profile's exact
- * version, per the spec's "Protocol Version" rules:
+ * Fetch the newest exact Business/Agent rendering pair, per the spec's
+ * "Protocol Version" rules:
  *
- *   1. Fetch `/.well-known/ucp` (envelope parse only). The business offers
- *      `{ucp.version} ∪ keys(supported_versions)`.
- *   2. If the agent's version IS the top-level version, that document is the
- *      profile (validated against the agent release's business schema).
- *   3. Else if the agent's version is a `supported_versions` key, fetch the
- *      linked document (https only). Its `ucp.version` MUST equal the key,
- *      else the platform MUST NOT use it (`PROFILE_VERSION_MISMATCH`,
- *      kind: 'supported_versions'). Version-specific documents are leaves: their own
- *      `supported_versions` (if any) is logged and not followed.
- *   4. Otherwise `PROTOCOL_VERSION_INCOMPATIBLE` — the business does not
- *      offer the version this profile speaks. Not by date order: a business
- *      one release AHEAD of us that publishes a leaf for our version
- *      negotiates fine via rule 3.
+ *   1. Fetch `/.well-known/ucp` and parse only its envelope. The Business
+ *      offers `{ucp.version} ∪ keys(supported_versions)`.
+ *   2. Intersect that set with the runtime Profile's rendering keys and pick
+ *      the newest installed release.
+ *   3. If selected version is the root, validate that document. Otherwise
+ *      fetch the selected `supported_versions` leaf (https only), verify that
+ *      its `ucp.version` equals its key, then validate it. Leaves are not
+ *      traversed.
+ *   4. If the intersection is empty, fail `PROTOCOL_VERSION_INCOMPATIBLE`.
  *
- * Cache layout: the top-level document lives at `<cacheDir>/<origin>.json`;
- * a version-specific document lives at `<cacheDir>/<version>/<origin>.json`
- * (origin of the linked URL, which may differ from the business origin).
+ * Once step 2 selects a version there is no fallback: a bad leaf, service,
+ * endpoint, or tools response fails the call rather than silently retrying an
+ * older protocol rendering.
+ *
+ * Cache layout: the top-level document lives at `<cacheDir>/<url-sha256>.json`;
+ * a version-specific document lives at
+ * `<cacheDir>/<version>/<url-sha256>.json`.
  */
 export async function fetchCompatibleBusinessProfile(
   businessUrl: string,
   options: ResolveProfileOptions,
 ): Promise<ResolvedBusinessProfile> {
-  const { agent, ...fetchOptions } = options
+  const { profile: runtimeProfile, ...fetchOptions } = options
   const cacheDir = fetchOptions.cacheDir ?? defaultBusinessCacheDir()
   const baseUrl = parseHttpsUrl(businessUrl, 'business URL')
   const wellKnownUrl = new URL('/.well-known/ucp', baseUrl).toString()
-  const v = agent.version
-  const rel = agent.release
 
+  // Envelope first. Profile kind does not get a vote until the Business's
+  // complete offered-version set is known.
   const top = await fetchCached(wellKnownUrl, {
     cacheDir,
     schema: profileEnvelopeSchema,
@@ -256,6 +286,43 @@ export async function fetchCompatibleBusinessProfile(
   const businessVersion = top.ucp.version
   const supported = top.ucp.supported_versions ?? {}
   const offered = [...new Set([businessVersion, ...Object.keys(supported)])].sort()
+  const offeredSet = new Set(offered)
+  const profileVersions = SUPPORTED_VERSIONS.filter((version) =>
+    Object.hasOwn(runtimeProfile.renderings, version),
+  )
+  const v = profileVersions.filter((version) => offeredSet.has(version)).at(-1)
+
+  if (v === undefined) {
+    const soleVersion = profileVersions.length === 1 ? profileVersions[0] : undefined
+    const soleAgent = soleVersion === undefined ? undefined : runtimeProfile.renderings[soleVersion]
+    throw new UcpError({
+      layer: 'transport',
+      code: ErrorCodes.PROTOCOL_VERSION_INCOMPATIBLE,
+      message: `${baseUrl.origin} offers UCP ${offered.join(', ')}; ${profileLabel(runtimeProfile)} offers ${profileVersions.join(', ') || 'no installed renderings'}. ucp-cli supports ${SUPPORTED_VERSIONS.join(', ')}. ${incompatibleProfileRemedy(runtimeProfile)}`,
+      context: {
+        business: baseUrl.origin,
+        businessVersion,
+        offered,
+        supported: [...SUPPORTED_VERSIONS],
+        profileVersions,
+        profileSource: runtimeProfile.source,
+        profileUrlOverride: runtimeProfile.urlOverride,
+        ...(soleAgent !== undefined
+          ? { agentVersion: soleAgent.version, agentProfileUrl: soleAgent.url }
+          : {}),
+        ...(runtimeProfile.name !== undefined ? { profileName: runtimeProfile.name } : {}),
+      },
+    })
+  }
+
+  // `v` survived the own-key filter above, so this lookup is total by
+  // construction; the guard is an internal-invariant check in the same key
+  // as the supported_versions one below, not a compatibility fallback.
+  const agent = runtimeProfile.renderings[v]
+  if (agent === undefined) {
+    throw new Error(`selected UCP ${v} but the runtime profile has no rendering for it`)
+  }
+  const rel = agent.release
 
   if (v === businessVersion) {
     const result = rel.businessProfileSchema.safeParse(top)
@@ -268,6 +335,7 @@ export async function fetchCompatibleBusinessProfile(
     }
     return {
       profile: result.data,
+      agentProfile: agent,
       profileUrl: wellKnownUrl,
       version: v,
       businessVersion,
@@ -275,27 +343,12 @@ export async function fetchCompatibleBusinessProfile(
     }
   }
 
+  // `v` came from a supported_versions key because it is not the root.
+  // Keep the guard as an internal-invariant check, not a compatibility
+  // fallback: once selected, another rendering must never be attempted.
   const versionedUrl = supported[v]
   if (versionedUrl === undefined) {
-    throw new UcpError({
-      layer: 'transport',
-      code: ErrorCodes.PROTOCOL_VERSION_INCOMPATIBLE,
-      // Both sets are in the MESSAGE, not just `context`: choosing between
-      // "upgrade the CLI" and "switch profile" needs `offered` AND
-      // `supported`, and cli.ts never serializes `context` to the wire.
-      message: `${baseUrl.origin} offers UCP ${offered.join(', ')}; ${agentLabel(agent)} uses ${v}. ucp-cli supports ${SUPPORTED_VERSIONS.join(', ')}`,
-      context: {
-        business: baseUrl.origin,
-        businessVersion,
-        /** Versions the BUSINESS offers. */
-        offered,
-        /** Versions THIS BUILD ships schemas for — the other half of the choice. */
-        supported: [...SUPPORTED_VERSIONS],
-        agentVersion: v,
-        agentProfileUrl: agent.url,
-        ...(agent.name !== undefined ? { profileName: agent.name } : {}),
-      },
-    })
+    throw new Error(`selected UCP ${v} but Business supplied no supported_versions URL`)
   }
 
   if (!acceptsHttpsUrl(versionedUrl)) {
@@ -356,6 +409,7 @@ export async function fetchCompatibleBusinessProfile(
 
   return {
     profile: parsedLeaf.data,
+    agentProfile: agent,
     profileUrl: versionedUrl,
     version: v,
     businessVersion,

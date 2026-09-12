@@ -11,9 +11,9 @@
 // a narrower capability list and call discovery once per group.
 //
 // Cache layout:
-//   <ucpHome>/cache/businesses/<origin>.json
-//   <ucpHome>/cache/businesses/<version>/<origin>.json   (supported_versions)
-//   <ucpHome>/cache/toolslist/<origin>/<capability-or-hash>.json
+//   <ucpHome>/cache/businesses/<url-sha256>.json
+//   <ucpHome>/cache/businesses/<version>/<url-sha256>.json   (supported_versions)
+//   <ucpHome>/cache/toolslist/<business-origin>/<negotiation-hash>.json
 
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
@@ -22,14 +22,15 @@ import { z } from 'incur'
 
 import { ErrorCodes, UcpError } from '../lib/errors.js'
 import { omitUndefined } from '../lib/omit-undefined.js'
-import type { Transport } from '../lib/types.js'
+import type { CtaBlock, Transport } from '../lib/types.js'
 import {
   type AgentProfile,
   type AgentServiceEntry,
   agentLabel,
+  createManagedProfile,
   ENGINE_TRANSPORTS,
   isDevUcpKey,
-  resolveAgentProfile,
+  type Profile,
 } from './agent.js'
 import { cacheCompute, originToFilename, ucpHomeDir } from './cache.js'
 import { mcpRpc } from './mcp-client.js'
@@ -64,9 +65,9 @@ export interface NegotiatedCapability {
  * Which document supplied the negotiated business rendering and at what
  * version.
  *
- * `version` is always the agent profile's exact version (the profile IS the
- * pick) and is deliberately unqualified: it mirrors `ucp.version` on the
- * wire.
+ * `version` is the exact version shared by the selected AgentProfile and
+ * Business rendering. It is deliberately unqualified: it mirrors
+ * `ucp.version` on the wire.
  *
  * There is no `businessVersion`. It encoded the same bit `source` already
  * carries — the biconditional (`businessVersion !== version` ⇔ `source ===
@@ -80,11 +81,11 @@ export interface NegotiatedCapability {
 export interface NegotiatedProtocol {
   version: Version
   source: 'well-known' | 'supported_versions'
+  /** URL of the exact AgentProfile rendering selected for this exchange. */
+  agentProfileUrl: string
   /**
-   * URL of the BUSINESS document `profile` was parsed from. Named in full
-   * because everywhere else in this codebase (`DiscoverOptions.profileUrl`,
-   * `--profile-url`, `AgentProfile.url`) `profileUrl` means the AGENT's URL,
-   * and that collision would ship inside JSON agents script against.
+   * URL of the BUSINESS document `profile` was parsed from. Named in full to
+   * distinguish it from `agentProfileUrl` and the CLI's `--profile-url`.
    */
   businessProfileUrl: string
 }
@@ -115,13 +116,10 @@ export interface DiscoveredBusiness {
 
 export interface DiscoverOptions {
   /**
-   * The resolved, validated agent identity (NOT the local `ActiveProfile`
-   * pointer). When omitted, `discover` resolves it from `profileUrl` +
-   * `profileName` via `resolveAgentProfile`: a named profile comes from its
-   * local `profile.json`; without a name, a published release template is the
-   * fallback. Neither path uses the network.
+   * Runtime Profile eligible for negotiation. When omitted, discovery uses a
+   * fresh managed Profile containing every installed release rendering.
    */
-  agent?: AgentProfile
+  profile?: Profile
   /**
    * Capabilities to resolve. When omitted, the capabilities negotiated are
    * `keys(agent.services) ∩ keys(business.ucp.services)` — what both sides
@@ -137,17 +135,6 @@ export interface DiscoverOptions {
   force?: boolean
   /** AbortSignal forwarded to fetch + JSON-RPC. */
   signal?: AbortSignal
-  /** Platform profile URL advertised to the business during MCP discovery. */
-  profileUrl?: string
-  /**
-   * LOCAL name of the profile `profileUrl` belongs to. Two jobs: it selects
-   * the `profile.json` used for negotiation, and it labels messages — a
-   * version mismatch reads `profile 'agent-0408' speaks 2026-04-08` and the
-   * remedy is `--profile agent-0408`, where the raw URL (`agentLabel`) names
-   * no switchable thing. Ignored when `agent` is injected — that object
-   * already carries both.
-   */
-  profileName?: string
   /**
    * Outbound headers (auth, tenancy, etc) attached to every HTTP call made
    * during discovery: the `/.well-known/ucp` GET and any `tools/list` POSTs.
@@ -181,23 +168,14 @@ export async function discover(
   const profileCacheDir = join(cacheRoot, 'businesses')
   const toolsListCacheRoot = join(cacheRoot, 'toolslist', originToFilename(normalizedBusiness))
 
-  // Step 0 — agent identity, resolved locally. A named profile always comes
-  // from its `profile.json`; only the no-name fallback uses a published
-  // release template. Neither costs a request. Callers that already hold a
-  // resolved AgentProfile inject it.
-  const agent =
-    options.agent ??
-    (await resolveAgentProfile(
-      omitUndefined({ url: options.profileUrl, name: options.profileName }),
-    ))
-  // Advertise the URL paired with the local declaration. The business reads
-  // that URL; `ucp doctor` checks that its document agrees with profile.json.
-  const advertisedProfileUrl = options.profileUrl ?? agent.url
+  // Step 0 — local eligibility only. No rendering is selected until after
+  // the Business envelope has been fetched in Step 1.
+  const runtimeProfile = options.profile ?? createManagedProfile()
 
-  // Step 1 — business profile selection at the agent's exact version.
+  // Step 1 — newest exact rendering in Profile ∩ Business offer.
   const resolved = await fetchCompatibleBusinessProfile(normalizedBusiness.origin, {
     cacheDir: profileCacheDir,
-    agent,
+    profile: runtimeProfile,
     ...omitUndefined({
       fetch: options.fetch,
       signal: options.signal,
@@ -205,7 +183,7 @@ export async function discover(
       headers: options.headers,
     }),
   })
-  const { profile } = resolved
+  const { agentProfile: agent, profile } = resolved
   if (resolved.source === 'supported_versions') {
     vlog(
       `discover: /.well-known/ucp is UCP ${resolved.businessVersion}; using supported_versions[${resolved.version}] → ${resolved.profileUrl}`,
@@ -262,8 +240,8 @@ export async function discover(
       capability,
       negotiation: { ...negotiation, endpoint },
       cacheDir: toolsListCacheRoot,
-      cacheKey: capabilityToCacheKey(capability),
-      profileUrl: advertisedProfileUrl,
+      cacheKey: toolsListCacheKey(capability, resolved.version, agent.url, endpoint),
+      profileUrl: agent.url,
       ...omitUndefined({
         force: options.force,
         fetch: options.fetch,
@@ -284,7 +262,7 @@ export async function discover(
   const expectedCapabilities =
     businessCapabilities === undefined
       ? []
-      : agent.capabilities.filter((c) => businessCapabilities[c] !== undefined)
+      : agent.capabilities.filter((c) => Object.hasOwn(businessCapabilities, c))
 
   return {
     business: normalizedBusiness.origin,
@@ -292,6 +270,7 @@ export async function discover(
     protocol: {
       version: resolved.version,
       source: resolved.source,
+      agentProfileUrl: agent.url,
       businessProfileUrl: resolved.profileUrl,
     },
     expectedCapabilities,
@@ -346,9 +325,18 @@ async function hydrateCapability(opts: HydrateOptions): Promise<NegotiatedCapabi
   }
 }
 
-function capabilityToCacheKey(capability: string): string {
-  if (/^[a-z0-9._-]+$/.test(capability)) return capability
-  return createHash('sha256').update(capability).digest('hex')
+function toolsListCacheKey(
+  capability: string,
+  version: Version,
+  agentProfileUrl: string,
+  endpoint: string,
+): string {
+  // The tools a Business returns can vary across every coordinate below.
+  // Hash the full tuple so a fresh cache entry can never be mistaken for a
+  // different selected release, agent identity, or endpoint path/query.
+  return createHash('sha256')
+    .update(JSON.stringify([capability, version, agentProfileUrl, endpoint]))
+    .digest('hex')
 }
 
 function profileParams(profileUrl: string): {
@@ -428,6 +416,83 @@ export interface NegotiateOptions {
   agent: AgentProfile
 }
 
+function serviceDeclarationCta(agent: AgentProfile): CtaBlock {
+  if (agent.source === 'managed') {
+    return {
+      description:
+        'Managed renderings are bundled and not locally editable. Adding or changing services requires an explicit DIY Profile and a Profile URL you control.',
+      commands: [
+        {
+          command: 'ucp profile init --help',
+          description: 'see how to create and select a DIY Profile',
+        },
+      ],
+    }
+  }
+  if (agent.source === 'url') {
+    return {
+      description:
+        'A scalar --profile-url/UCP_AGENT_PROFILE_URL override pins a bundled rendering. Change or remove that override, or create a DIY Profile and a Profile URL you control.',
+      commands: [
+        {
+          command: 'ucp profile init --help',
+          description: 'see how to create and select a DIY Profile',
+        },
+      ],
+    }
+  }
+  if (agent.urlOverride) {
+    return {
+      description: `This is still an editable local DIY body. Update profile.json, then upload it to the active --profile-url/UCP_AGENT_PROFILE_URL override ${agent.url}, or unset the override. The stored Profile URL cannot replace an active override.`,
+      commands: [{ command: 'ucp profile show', description: 'print the active DIY document' }],
+    }
+  }
+  return {
+    description:
+      'Your profile is the platform side of every negotiation. Declare the service in profile.json and make the profile URL serve the corrected document before requesting it; if you cannot change that URL, use one you own.',
+    commands: [{ command: 'ucp profile show', description: 'print the active profile document' }],
+  }
+}
+
+function undeclaredServiceRemedy(agent: AgentProfile): string {
+  if (agent.source === 'managed') {
+    return 'The selected managed rendering is bundled; declaring this service requires an explicit DIY Profile and a Profile URL you control.'
+  }
+  if (agent.source === 'url') {
+    return 'Change or remove the scalar --profile-url/UCP_AGENT_PROFILE_URL override, or create a DIY Profile and a Profile URL you control that declares this service.'
+  }
+  if (agent.urlOverride) {
+    return `Add it to local profile.json, then upload that authored document to the active --profile-url/UCP_AGENT_PROFILE_URL override ${agent.url}, or unset the override. Changing the stored Profile URL cannot affect this request while the override is set.`
+  }
+  return 'Add it to the local profile and make its Profile URL serve the corrected document.'
+}
+
+function incompatibleServiceRemedy(agent: AgentProfile): { message: string; cta?: CtaBlock } {
+  if (agent.source === 'managed') {
+    return {
+      message:
+        'The selected managed rendering is bundled and not locally editable. Changing this service declaration requires an explicit DIY Profile and a Profile URL you control. Otherwise, accept unavailability.',
+      cta: serviceDeclarationCta(agent),
+    }
+  }
+  if (agent.source === 'url') {
+    return {
+      message:
+        'Change or remove the scalar --profile-url/UCP_AGENT_PROFILE_URL override, point it at a bundled rendering with the intended declaration, or create a DIY Profile and a Profile URL you control. Otherwise, accept unavailability.',
+      cta: serviceDeclarationCta(agent),
+    }
+  }
+  if (agent.urlOverride) {
+    return {
+      message: `Update the service declaration in local profile.json to a version the business offers, then upload that authored document to the active --profile-url/UCP_AGENT_PROFILE_URL override ${agent.url}, or unset the override. Changing the stored Profile URL cannot affect this request while the override is set. Otherwise, accept unavailability.`,
+      cta: serviceDeclarationCta(agent),
+    }
+  }
+  return {
+    message: `Update the service declaration in profile.json to a version the business offers, then make ${agent.url} serve the corrected document; if you cannot change that URL, use one you own. Otherwise, accept unavailability.`,
+  }
+}
+
 export function negotiateService(options: NegotiateOptions): NegotiatedService {
   const { profile, capability, agent } = options
   const who = agentLabel(agent)
@@ -478,17 +543,19 @@ export function negotiateService(options: NegotiateOptions): NegotiatedService {
   }
 
   if (declared === undefined) {
-    // The business DOES offer it — so the profile is genuinely the fix, and
-    // naming both sides lets an agent tell "add it to my profile" from "I
-    // typo'd the id" without another round-trip. Both sets go in the message
-    // as well as `context`: cli.ts serializes only {code, message, cta}.
+    // The business DOES offer it — so our selected rendering is genuinely the
+    // side that must change. Body provenance decides whether it is editable;
+    // independent URL-override provenance decides where a DIY correction must
+    // be published. Both service sets stay in the message because CLI JSON drops
+    // `context`.
     const declaredIds = Object.keys(agent.services).sort()
+    const diagnostic = isCapabilityId
+      ? `${who} declares ${capability} as a capability, not a service, but the business offers it as one (declared services: [${declaredIds.join(', ')}])`
+      : `${who} does not declare ${capability}, which the business offers (declared: [${declaredIds.join(', ')}]; business offers: [${offeredIds.join(', ')}])`
     throw new UcpError({
       layer: 'client',
       code: ErrorCodes.AGENT_PROFILE_SERVICE_UNDECLARED,
-      message: isCapabilityId
-        ? `${who} declares ${capability} as a capability, not a service, but the business offers it as one; declare it under ucp.services to negotiate it (declared services: [${declaredIds.join(', ')}])`
-        : `${who} does not declare ${capability}, which the business offers; add it to the profile to negotiate it (declared: [${declaredIds.join(', ')}]; business offers: [${offeredIds.join(', ')}])`,
+      message: `${diagnostic}. ${undeclaredServiceRemedy(agent)}`,
       context: {
         capability,
         /** Service ids OUR profile declares. */
@@ -496,15 +563,11 @@ export function negotiateService(options: NegotiateOptions): NegotiatedService {
         /** Service ids the BUSINESS offers. */
         offered: offeredIds,
         profileUrl: agent.url,
+        profileSource: agent.source,
+        profileUrlOverride: agent.urlOverride,
         ...(agent.name !== undefined ? { profile: agent.name } : {}),
       },
-      cta: {
-        description:
-          'Your profile is the platform side of every negotiation. Declare the service in profile.json and make the profile URL serve the corrected document before requesting it; if you cannot change that URL, use one you own.',
-        commands: [
-          { command: 'ucp profile show', description: 'print the active profile document' },
-        ],
-      },
+      cta: serviceDeclarationCta(agent),
     })
   }
 
@@ -581,24 +644,28 @@ export function negotiateService(options: NegotiateOptions): NegotiatedService {
       })
     }
 
-    // Two independent version lines that do not meet. Typical for
-    // third-party components (`com.acme.svc`): both documents are internally
-    // consistent, they just disagree. The local profile is the declaration
-    // the reader can update; its URL must serve the same correction for the
-    // business to observe it.
+    // Two independent version lines that do not meet. Typical for third-party
+    // components (`com.acme.svc`): both documents are internally consistent,
+    // they just disagree. Body provenance decides whether the declaration is
+    // editable; URL-override provenance independently decides where a DIY
+    // correction has to be published.
     const declaredList = uniqueSorted([...declaredVersions]).join(', ')
     const offeredList = uniqueSorted(bizEntries.map((e) => e.version)).join(', ')
+    const remedy = incompatibleServiceRemedy(agent)
     throw new UcpError({
       layer: 'transport',
       code: ErrorCodes.SERVICE_VERSION_INCOMPATIBLE,
-      message: `${capability}: ${who} declares [${declaredList}], business offers [${offeredList}]. Update the service declaration in profile.json to a version the business offers, then make ${agent.url} serve the corrected document; if you cannot change that URL, use one you own. Otherwise, accept unavailability.`,
+      message: `${capability}: ${who} declares [${declaredList}], business offers [${offeredList}]. ${remedy.message}`,
       context: {
         capability,
         declaredVersions: uniqueSorted([...declaredVersions]),
         offeredVersions: uniqueSorted(bizEntries.map((e) => e.version)),
         profileUrl: agent.url,
+        profileSource: agent.source,
+        profileUrlOverride: agent.urlOverride,
         ...(agent.name !== undefined ? { profile: agent.name } : {}),
       },
+      ...(remedy.cta !== undefined ? { cta: remedy.cta } : {}),
     })
   }
 

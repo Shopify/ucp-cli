@@ -61,6 +61,7 @@ import {
   platformProfileSchema as platformProfileSchema20260825,
 } from './generated/2026-08-25/platform_profile.zod.js'
 import { reverseDomainPattern as reverseDomainPattern20260825 } from './generated/2026-08-25/reverse_domain.js'
+import { parseHttpsUrl } from './url.js'
 
 /** Spec releases this CLI ships schemas for. */
 export type Version = '2026-04-08' | '2026-08-25'
@@ -131,6 +132,27 @@ export const RELEASES: Readonly<Record<Version, SpecRelease>> = Object.freeze({
   '2026-04-08': RELEASE_2026_04_08,
   '2026-08-25': RELEASE_2026_08_25,
 })
+
+const RELEASES_BY_DEFAULT_AGENT_PROFILE_URL: ReadonlyMap<string, SpecRelease> = new Map(
+  Object.values(RELEASES).map((rel) => [
+    parseHttpsUrl(rel.defaultAgentProfileUrl, 'agent profile URL').toString(),
+    rel,
+  ]),
+)
+
+/**
+ * Release whose published default agent-profile URL matches `url` after HTTPS
+ * URL canonicalization; `undefined` for invalid URLs and valid nonmatches.
+ */
+export function releaseByDefaultAgentProfileUrl(url: string): SpecRelease | undefined {
+  try {
+    return RELEASES_BY_DEFAULT_AGENT_PROFILE_URL.get(
+      parseHttpsUrl(url, 'agent profile URL').toString(),
+    )
+  } catch {
+    return undefined
+  }
+}
 
 /** Supported versions, sorted ascending (ISO dates sort lexicographically). */
 export const SUPPORTED_VERSIONS: readonly Version[] = Object.freeze([
