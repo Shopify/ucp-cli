@@ -18,7 +18,7 @@ import {
   loadAgentProfile,
 } from './agent.js'
 import { LATEST, RELEASES, SUPPORTED_VERSIONS } from './releases.js'
-import { setWarnWriter } from './verbose.js'
+import { setVerboseWriter, setWarnWriter } from './verbose.js'
 
 const SELF_HOSTED = 'https://agent.example.invalid/agent.json'
 const DEFAULT_0825 = RELEASES['2026-08-25'].defaultAgentProfileUrl
@@ -30,6 +30,22 @@ function publishedBody(): { ucp: Record<string, unknown>; [k: string]: unknown }
   }
 }
 
+function profile042To070Body(): {
+  ucp: {
+    services: Record<string, Array<Record<string, unknown>>>
+    capabilities: Record<string, Array<Record<string, unknown>>>
+  }
+  [key: string]: unknown
+} {
+  const body = JSON.parse(RELEASES['2026-04-08'].agentProfileJson) as ReturnType<
+    typeof profile042To070Body
+  >
+  const shopping = body.ucp.services['dev.ucp.shopping']?.[0]
+  if (shopping === undefined) throw new Error('published shopping entry missing')
+  shopping.version = '2026-01-23'
+  return body
+}
+
 function captureWarnings(): string[] {
   const lines: string[] = []
   setWarnWriter((msg) => {
@@ -39,6 +55,7 @@ function captureWarnings(): string[] {
 }
 
 afterEach(() => {
+  setVerboseWriter(null)
   setWarnWriter(null)
 })
 
@@ -93,6 +110,32 @@ describe('loadAgentProfile — failure codes are all AGENT_PROFILE_*', () => {
         message: `${SELF_HOSTED} declares UCP 2026-12-01; ucp-cli supports 2026-04-08, 2026-08-25`,
       }) as unknown as Error,
     )
+  })
+})
+
+describe('createDiyProfile — ucp-cli 0.4.2–0.7.0 Profile compatibility', () => {
+  it('normalizes only the runtime body at the DIY boundary and logs it', () => {
+    const body = profile042To070Body()
+    body.ucp.capabilities['com.acme.loyalty'] = [
+      {
+        version: '2026-04-08',
+        spec: 'https://acme.test/loyalty/spec',
+        schema: 'https://acme.test/loyalty/schema.json',
+      },
+    ]
+    const before = structuredClone(body)
+    const verbose: string[] = []
+    setVerboseWriter((line) => verbose.push(line))
+
+    const profile = createDiyProfile({ name: 'edited-042-070', body, url: SELF_HOSTED })
+    const loaded = rendering(profile, '2026-04-08')
+
+    expect(Object.keys(profile.renderings)).toEqual(['2026-04-08'])
+    expect(loaded).toMatchObject({ source: 'diy', name: 'edited-042-070', url: SELF_HOSTED })
+    expect(loaded.capabilities).toContain('com.acme.loyalty')
+    expect(loaded.body).not.toBe(body)
+    expect(body).toStrictEqual(before)
+    expect(verbose.join('')).toContain('source bytes remain unchanged')
   })
 })
 
@@ -153,21 +196,38 @@ describe('loadAgentProfile — AGENT_PROFILE_VERSION_MISMATCH', () => {
     expect(caught?.context).not.toHaveProperty('kind')
   })
 
-  // Who serves the URL changes nothing about validating the local declaration.
-  // `ucp doctor` separately detects disagreement with the served document.
-  it('is fatal on a release-default URL too', () => {
+  function mismatchError(name: string, url = SELF_HOSTED): UcpError {
+    try {
+      loadAgentProfile({ body: mixedVersionBody(), url, source: 'diy', urlOverride: false, name })
+    } catch (err) {
+      const mismatch = err as UcpError
+      expect(mismatch.code).toBe(ErrorCodes.AGENT_PROFILE_VERSION_MISMATCH)
+      return mismatch
+    }
+    throw new Error('expected profile mismatch')
+  }
+
+  it('uses the safe Profile name in the inspection command for a custom hosted URL', () => {
+    const caught = mismatchError('mine')
+    expect(caught.cta?.description).toContain('configured hosted URL')
+    expect(
+      caught.cta?.commands.map((entry) => (typeof entry === 'string' ? entry : entry.command)),
+    ).toEqual(['ucp profile show mine', 'ucp doctor'])
+  })
+
+  it('falls back to bare profile show for an untrusted name', () => {
+    const caught = mismatchError('mine; rm -rf ~')
+    expect(caught.cta?.commands[0]).toMatchObject({ command: 'ucp profile show' })
+    expect(JSON.stringify(caught.cta)).not.toContain('mine; rm -rf ~')
+  })
+
+  it('directs release-default users to host and select the complete corrected document', () => {
     captureWarnings()
-    expect(() =>
-      loadAgentProfile({
-        body: mixedVersionBody(),
-        url: DEFAULT_0825,
-        source: 'diy',
-        urlOverride: false,
-        name: 'agent',
-      }),
-    ).toThrowError(
-      expect.objectContaining({ code: 'AGENT_PROFILE_VERSION_MISMATCH' }) as unknown as Error,
-    )
+    const caught = mismatchError('agent', DEFAULT_0825)
+    expect(caught.cta?.description).toContain('Shopify release-default URL')
+    expect(caught.cta?.description).toContain('complete corrected document at a URL you control')
+    expect(caught.cta?.description).toContain('--profile-url or UCP_AGENT_PROFILE_URL')
+    expect(JSON.stringify(caught.cta)).not.toMatch(/profile init|--force|profile use/)
   })
 
   // The one place always-fatal could break an install that did nothing wrong:
@@ -353,6 +413,22 @@ describe('fetchAgentProfileLive — AGENT_PROFILE_UNREACHABLE carries a reason',
     expect(live.agent.version).toBe('2026-04-08')
     expect(live.agent.source).toBe('url')
     expect(live.cacheControl).toBe('public, max-age=300')
+  })
+
+  it('rejects raw hosted ucp-cli 0.4.2–0.7.0 Profile instead of applying local DIY compatibility', async () => {
+    const fetch = fetchStub(
+      () => new Response(JSON.stringify(profile042To070Body()), { status: 200 }),
+    )
+
+    await expect(fetchAgentProfileLive({ url: SELF_HOSTED, fetch })).rejects.toMatchObject({
+      code: ErrorCodes.AGENT_PROFILE_VERSION_MISMATCH,
+      context: {
+        url: SELF_HOSTED,
+        registry: 'services',
+        key: 'dev.ucp.shopping',
+        versions: ['2026-01-23'],
+      },
+    })
   })
 
   it("reason 'network' for a failed connection", async () => {

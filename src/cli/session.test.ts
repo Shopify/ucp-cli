@@ -1,12 +1,10 @@
 // resolveSession tests.
 
-import { readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { createDiyProfile } from '../core/agent.js'
 import { PROFILE_FORMAT_VERSION } from '../core/legacy-profile.js'
 import type { PlatformProfile } from '../core/profile.js'
 import { saveUserProfile, writeActive } from '../core/profile-store.js'
@@ -295,9 +293,8 @@ describe('resolveSession — user profile branch', () => {
 // The upgraded-legacy path, end to end from disk. The classification itself is
 // core/legacy-profile.test.ts's job; what matters here is that an operator who
 // ran `ucp profile init` on 0.7.0 gets a working, multi-rendering session out
-// of the same directory — today that profile cannot dispatch at all, because
-// its generated body declares dev.ucp.shopping at 2026-01-23 inside a
-// 2026-04-08 document and loadAgentProfile's snapshot rule rejects it.
+// of the same directory. Migrating an untouched 0.4.2–0.7.0 Profile gives it
+// every installed rendering rather than applying the DIY compatibility path.
 describe('resolveSession — upgraded legacy profile', () => {
   const FIXTURE_DIR = fileURLToPath(
     new URL('../../test/fixtures/legacy-profiles/', import.meta.url),
@@ -330,7 +327,7 @@ describe('resolveSession — upgraded legacy profile', () => {
   }
 
   it('resolves an untouched v0.7 profile to every installed rendering, under its own name', async () => {
-    const dir = await seedLegacy('legacy07', 'stock-a-2026-04-08.json')
+    const dir = await seedLegacy('legacy07', 'profile-0.4.2-to-0.7.0.json')
     const before = await readFile(join(dir, 'profile.json'), 'utf-8')
 
     const session = await resolveSession({ homeDir, env: {}, profile: 'legacy07' })
@@ -353,26 +350,8 @@ describe('resolveSession — upgraded legacy profile', () => {
     expect(await readFile(join(dir, 'profile.json'), 'utf-8')).toBe(before)
   })
 
-  it('does not raise AGENT_PROFILE_VERSION_MISMATCH on the v0.7 body', async () => {
-    await seedLegacy('legacy07', 'stock-a-2026-04-08.json')
-
-    // Guard the premise: that body really is the one the snapshot rule kills.
-    expect(() =>
-      createDiyProfile({
-        name: 'legacy07',
-        body: JSON.parse(
-          readFileSync(join(FIXTURE_DIR, 'stock-a-2026-04-08.json'), 'utf-8'),
-        ) as unknown,
-      }),
-    ).toThrow(expect.objectContaining({ code: 'AGENT_PROFILE_VERSION_MISMATCH' }))
-
-    await expect(resolveSession({ homeDir, env: {}, profile: 'legacy07' })).resolves.toMatchObject({
-      profile: { source: 'managed' },
-    })
-  })
-
   it('resolves an untouched v0.8 profile to managed too', async () => {
-    await seedLegacy('legacy08', 'stock-b-2026-08-25.json')
+    await seedLegacy('legacy08', 'profile-0.8.0.json')
 
     const session = await resolveSession({ homeDir, env: {}, profile: 'legacy08' })
 
@@ -407,7 +386,7 @@ describe('resolveSession — upgraded legacy profile', () => {
   })
 
   it('keeps a stock body with a user-owned URL as a pinned DIY singleton', async () => {
-    await seedLegacy('hosted', 'stock-b-2026-08-25.json', {
+    await seedLegacy('hosted', 'profile-0.8.0.json', {
       ...LEGACY_META,
       profile_url: 'https://mybot.example.com/.well-known/ucp',
     } as typeof LEGACY_META)
@@ -422,7 +401,7 @@ describe('resolveSession — upgraded legacy profile', () => {
   it('lets an explicit --profile-url pin an upgraded profile to that one URL', async () => {
     const warnings: string[] = []
     setWarnWriter((message) => warnings.push(message))
-    await seedLegacy('legacy07', 'stock-a-2026-04-08.json')
+    await seedLegacy('legacy07', 'profile-0.4.2-to-0.7.0.json')
 
     const session = await resolveSession({
       homeDir,

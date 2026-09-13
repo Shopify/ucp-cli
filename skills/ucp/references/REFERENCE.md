@@ -73,7 +73,7 @@ Branch on the full `code`; CTAs are advisory. `PROFILE_FETCH_FAILED` and `PROFIL
 | `AGENT_PROFILE_UNREACHABLE` | Advertised Profile URL cannot be fetched or used | Run `ucp doctor`; repair hosting or Profile selection in [SETUP](SETUP.md) |
 | `AGENT_PROFILE_VERSION_UNSUPPORTED` | Profile declares a release unsupported by this CLI build | Select a supported DIY release or another CLI build |
 | `AGENT_PROFILE_SCHEMA_INVALID` | Profile fails its release schema | Repair the DIY document and hosted copy; managed issues require another build |
-| `AGENT_PROFILE_VERSION_MISMATCH` | Internally inconsistent `dev.ucp.*` entries disagree with the Profile's declared UCP release | Align the DIY document and hosted copy; managed issues require another build |
+| `AGENT_PROFILE_VERSION_MISMATCH` | Internally inconsistent `dev.ucp.*` entries disagree with the Profile's declared UCP release | Align every `dev.ucp.*` entry and publish the complete corrected document at its configured hosted URL; when moving off a Shopify release-default URL, select the new URL with `--profile-url` or `UCP_AGENT_PROFILE_URL` |
 | `AGENT_PROFILE_SERVICE_UNDECLARED` | Selected Profile omits an explicitly requested Business service | Use a DIY Profile that declares it, or accept that it is unavailable |
 | `PROFILE_NOT_FOUND` | An explicitly selected local name or required file is missing/unreadable | Inspect `ucp profile list` and the selection precedence; see [SETUP](SETUP.md) |
 | `AUTH_REQUIRED` | Merchant requires authentication (HTTP 401) | No merchant auth in this CLI. Hand off using the best prior URL: checkout/cart `continue_url`, then `variant.checkout_url`, then variant/product `url`, then `seller.url`, then the `--business` URL or `https://<seller.domain>` |
