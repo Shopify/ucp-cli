@@ -96,18 +96,16 @@ async function removeHomeAndClose(home: string, mock: MockUcpShopping): Promise<
   await rm(home, { recursive: true, force: true })
 }
 
-const HISTORICAL_STOCK = [
+const HISTORICAL_GENERATED_PROFILES = [
   {
-    label: 'v0.7 STOCK-A',
+    label: 'ucp-cli 0.4.2–0.7.0 Profile',
     path: fileURLToPath(
-      new URL('../fixtures/legacy-profiles/stock-a-2026-04-08.json', import.meta.url),
+      new URL('../fixtures/legacy-profiles/profile-0.4.2-to-0.7.0.json', import.meta.url),
     ),
   },
   {
-    label: 'v0.8 STOCK-B',
-    path: fileURLToPath(
-      new URL('../fixtures/legacy-profiles/stock-b-2026-08-25.json', import.meta.url),
-    ),
+    label: 'ucp-cli 0.8.0 Profile',
+    path: fileURLToPath(new URL('../fixtures/legacy-profiles/profile-0.8.0.json', import.meta.url)),
   },
 ] as const
 
@@ -232,7 +230,79 @@ describe('managed Profile: compiled integration journeys', () => {
     }
   })
 
-  it.each(HISTORICAL_STOCK)(
+  it('loads an active edited ucp-cli 0.4.2–0.7.0 Profile as DIY with zero recovery action', async () => {
+    const mock = await startMockUcpShopping()
+    const home = await mkdtemp(join(tmpdir(), 'ucp-edited-042-070-'))
+    const name = 'edited-042-070'
+    const dir = join(home, 'profiles', name)
+    const profilePath = join(dir, 'profile.json')
+    const metaPath = join(dir, 'meta.json')
+    const headersPath = join(dir, 'headers.json')
+    const activePath = join(home, 'active.yaml')
+    const storedProfileUrl = 'https://agent.example.test/edited-042-070.json'
+    try {
+      const body = JSON.parse(await readFile(HISTORICAL_GENERATED_PROFILES[0].path, 'utf-8')) as {
+        ucp: { capabilities: Record<string, unknown> }
+      }
+      body.ucp.capabilities['com.acme.loyalty'] = [
+        {
+          version: VERSION_04,
+          spec: 'https://example.com/ucp/loyalty/spec',
+          schema: 'https://example.com/ucp/loyalty/schema.json',
+        },
+      ]
+      const profileBytes = `${JSON.stringify(body, null, 2)}\n`
+      const originalMeta = {
+        created_at: '2026-01-01T00:00:00.000Z',
+        profile_url: storedProfileUrl,
+        protocol_versions: { min: '2026-01-23', max: VERSION_04 },
+      }
+      const headersBytes = `${JSON.stringify({
+        default: { 'Integration-Marker': 'from-profile' },
+      })}\n`
+      const activeBytes = `profile: ${name}\nbusiness: ${mock.url}\n`
+      await mkdir(dir, { recursive: true })
+      await writeFile(profilePath, profileBytes, 'utf-8')
+      await writeFile(metaPath, `${JSON.stringify(originalMeta)}\n`, 'utf-8')
+      await writeFile(headersPath, headersBytes, 'utf-8')
+      await writeFile(activePath, activeBytes, 'utf-8')
+
+      const discovered = await runCli(home, ['discover', '--verbose'])
+      expect(discovered.code, diagnostic(discovered)).toBe(0)
+      expect(discovery(discovered).protocol).toEqual({
+        version: VERSION_04,
+        source: 'supported_versions',
+        agentProfileUrl: storedProfileUrl,
+        businessProfileUrl: `${mock.url}${MOCK_LEGACY_PROFILE_PATH}`,
+      })
+      expect(discovered.stderr).toContain('source bytes remain unchanged')
+      expect(discovered.stderr).toContain('Integration-Marker: from-profile')
+      // The mock records the advertised URL on tools/list; it does not dereference it.
+      expect(toolsListRequests(mock)).toEqual([
+        expect.objectContaining({ agentProfileUrl: storedProfileUrl }),
+      ])
+
+      const shown = await runCli(home, ['profile', 'show'])
+      expect(shown.code, diagnostic(shown)).toBe(0)
+      expect(shown.json).toMatchObject({
+        name,
+        kind: 'diy',
+        active: true,
+        renderings: [{ version: VERSION_04, profile_url: storedProfileUrl }],
+        body: {
+          ucp: { capabilities: { 'com.acme.loyalty': body.ucp.capabilities['com.acme.loyalty'] } },
+        },
+        meta: { ...originalMeta, format_version: 2, kind: 'diy' },
+      })
+      expect(await readFile(activePath, 'utf-8')).toBe(activeBytes)
+      expect(await readFile(profilePath, 'utf-8')).toBe(profileBytes)
+      expect(await readFile(headersPath, 'utf-8')).toBe(headersBytes)
+    } finally {
+      await removeHomeAndClose(home, mock)
+    }
+  })
+
+  it.each(HISTORICAL_GENERATED_PROFILES)(
     '$label is marked managed once, gains every installed rendering, and preserves user bytes',
     async ({ path }) => {
       const mock = await startMockUcpShopping()

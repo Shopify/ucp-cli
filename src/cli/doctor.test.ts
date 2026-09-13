@@ -705,7 +705,7 @@ describe('runDoctor — managed renderings', () => {
   // fetch and compare. A drift warn here would be doctor reporting a
   // difference against a file nothing sends.
   it('audits a named managed profile against the bundled renderings, not its legacy profile.json', async () => {
-    const dir = await seedLegacy('legacy07', 'stock-a-2026-04-08.json')
+    const dir = await seedLegacy('legacy07', 'profile-0.4.2-to-0.7.0.json')
     await writeActive({ profile: 'legacy07' }, { homeDir })
     const before = await readFile(join(dir, 'profile.json'), 'utf-8')
     const { fetch: fetchImpl, calls } = releaseFetch()
@@ -1025,6 +1025,36 @@ describe('runDoctor — protocol + profile drift', () => {
     expect(check.detail).not.toContain('NOT the latest')
     expect(check.detail).toContain(SELF_HOSTED_URL)
     expect(result.ok).toBe(true)
+  })
+
+  it('keeps hosted validation strict for an edited ucp-cli 0.4.2–0.7.0 Profile', async () => {
+    const body = publishedProfile('2026-04-08') as PlatformProfile & {
+      ucp: {
+        services: Record<string, Array<Record<string, unknown>>>
+        capabilities: Record<string, unknown>
+      }
+    }
+    const shopping = body.ucp.services['dev.ucp.shopping']?.[0]
+    if (shopping === undefined) throw new Error('published shopping entry missing')
+    shopping.version = '2026-01-23'
+    body.ucp.capabilities['com.acme.loyalty'] = [
+      {
+        version: '2026-04-08',
+        spec: 'https://acme.test/loyalty/spec',
+        schema: 'https://acme.test/loyalty/schema.json',
+      },
+    ]
+
+    await saveUserProfile({ name: 'edited-042-070', body, meta: DIY_META }, { homeDir })
+    await writeActive({ profile: 'edited-042-070' }, { homeDir })
+
+    const result = await runDoctor({ homeDir, env: {}, fetch: serving(body) })
+
+    expect(findCheck(result, 'active-profile').status).toBe('ok')
+    const protocol = findCheck(result, 'protocol')
+    expect(protocol.status).toBe('fail')
+    expect(protocol.detail).toContain('AGENT_PROFILE_VERSION_MISMATCH')
+    expect(result.ok).toBe(false)
   })
 
   it('says NOT latest — and stays ok — for a supported older release', async () => {
