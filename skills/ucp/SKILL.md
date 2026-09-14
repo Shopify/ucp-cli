@@ -57,7 +57,7 @@ Ops that act on an existing resource take its id as the first positional argumen
 - `order get <order_id>`
 - `catalog get_product <product_or_variant_id>` (pass a Catalog UPID or returned variant ID from prior search/lookup)
 
-All other operations (`cart create`, `checkout create`, `catalog search`, `catalog lookup`, `discover`) take no positional; their full payload goes in `--input`/`--set`. Cart-to-checkout conversion accepts `cart_id` in the `checkout create` body and requires `line_items`, which can be empty for conversion.
+All other operations (`cart create`, `checkout create`, `catalog search`, `catalog lookup`, `discover`) take no positional; their full payload goes in `--input`/`--set`. To convert an existing Cart to Checkout, pass its `id` as `cart_id` in the `checkout create` body and include `line_items: []`; see **Checkout** below.
 
 ```sh
 ucp cart update <cart_id> --business https://<seller-domain> --input '{...}'
@@ -189,7 +189,7 @@ ucp cart create --business https://<seller-domain> --input '{
 
 ### Checkout
 
-`checkout create` has two modes. **If you already built a cart, prefer cart conversion**: pass the cart result `id` as `cart_id` in the checkout body when `checkout create --input-schema` advertises it, and include `line_items: []`. `line_items` is required but can be empty for cart conversion; the merchant uses the cart contents when `cart_id` is present. Use real `line_items` only for buy-now flows where no cart exists. Do not use cart line IDs as variant/item IDs.
+`checkout create` has two modes. **If you already built a Cart, prefer Cart conversion**: pass the Cart result `id` as `cart_id` in the Checkout body and include `line_items: []`. When `cart_id` is present, the Business uses the Cart's actual lines and ignores Checkout `line_items`. Use real `line_items` only for buy-now flows where no Cart exists. Do not use Cart line IDs as variant/item IDs.
 
 ```sh
 # From a cart

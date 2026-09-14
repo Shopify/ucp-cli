@@ -106,7 +106,7 @@ Ops that act on an **existing resource** take the id as the first positional arg
 | `order get` | `<order_id>` |
 | `catalog get_product` | `<product_id>` |
 
-Operations that create or query (`cart create`, `checkout create`, `catalog search`, `catalog lookup`, `discover`) take no positional argument; the full payload goes in `--input`/`--set`. Cart-to-checkout conversion accepts `cart_id` in the `checkout create` body and requires `line_items`, which can be empty for conversion: `--input '{"cart_id":"<cart_id>","line_items":[]}'`. The merchant uses cart contents when `cart_id` is present. Forgetting the positional on a resource-addressing operation fails dispatch with `INVALID_INPUT` ("requires a positional id"); `--input-schema` works without it (it skips dispatch).
+Operations that create or query (`cart create`, `checkout create`, `catalog search`, `catalog lookup`, `discover`) take no positional argument; the full payload goes in `--input`/`--set`. To convert an existing Cart to Checkout, use `--input '{"cart_id":"<cart_id>","line_items":[]}'`. When `cart_id` is present, the Business uses the Cart's actual lines and ignores Checkout `line_items`. Forgetting the positional on a resource-addressing operation fails dispatch with `INVALID_INPUT` ("requires a positional id"); `--input-schema` works without it (it skips dispatch).
 
 A positional id addresses the resource but does not replace a required body. For completion, derive the body with `ucp checkout complete --input-schema --business <url>`, then pass it with `ucp checkout complete <checkout_id> --business <url> --input @complete.json`. A missing required positional fails with `INVALID_INPUT`; `--input-schema` skips dispatch and needs no id.
 
