@@ -10,6 +10,7 @@
 //  - processCheckoutErrors branch matrix (the spec algorithm itself)
 //  - warning + disclosure rendering across checkout/cart/catalog responses
 
+import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -333,11 +334,43 @@ describe('catalog search/lookup CTA', () => {
     // identify the pagination CTA by its cursor field, not by --input alone.
     const next = objectCommands(cta).find((c) => /catalog search.*cursor/.test(c.command))
     expect(next).toBeDefined()
-    expect(next?.command).toMatch(/cursor/)
-    expect(next?.command).toMatch(/limit/)
+    expect(next?.command).toBe(
+      `ucp catalog search --input '{"query":"shoes","pagination":{"limit":10,"cursor":"abc"}}'`,
+    )
     expect(next?.description).toMatch(/more of the same ranking/)
     expect(next?.description).toMatch(/context\.intent/)
     expect(cta?.description).toMatch(/showing 1 of 50/)
+  })
+
+  it.each([
+    undefined,
+    null,
+    {},
+    { has_next_page: false, cursor: 'abc' },
+    { has_next_page: 'true', cursor: 'abc' },
+    { has_next_page: true },
+    { has_next_page: true, cursor: '' },
+    { has_next_page: true, cursor: 123 },
+  ])('omits the next-page CTA without a valid next page: %j', (pagination) => {
+    const cta = buildCta({
+      toolName: 'search_catalog',
+      result: { products: [{ id: 'p1' }], pagination },
+      isEscalation: false,
+    })
+    expect(objectCommands(cta).some((c) => c.command.startsWith('ucp catalog search'))).toBe(false)
+  })
+
+  it('escapes apostrophes throughout the next-page JSON', () => {
+    const cta = buildCta({
+      toolName: 'search_catalog',
+      request: { catalog: { query: "women's shoes", filters: { brand: "O'Brien's" } } },
+      result: { products: [{ id: 'p1' }], pagination: { has_next_page: true, cursor: "'next'" } },
+      isEscalation: false,
+    })
+    const next = objectCommands(cta).find((c) => c.command.startsWith('ucp catalog search'))
+    expect(next?.command).toBe(
+      String.raw`ucp catalog search --input '{"query":"women'\''s shoes","filters":{"brand":"O'\''Brien'\''s"},"pagination":{"cursor":"'\''next'\''"}}'`,
+    )
   })
 
   it('omits the next-page CTA on lookup_catalog (no pagination semantics)', () => {
@@ -355,6 +388,64 @@ describe('catalog search/lookup CTA', () => {
     expect(objectCommands(cta).every((c) => !c.command.includes('cursor'))).toBe(true)
   })
 })
+
+describe.each(['cursor', 'query', 'filter', 'filter key', 'context'])(
+  'catalog next-page CTA — POSIX shell round-trip of %s',
+  (field) => {
+    it.skipIf(process.platform === 'win32').each([
+      { name: 'plain text', value: 'next page' },
+      { name: 'apostrophe', value: "women's shoes" },
+      { name: 'repeated apostrophes', value: "''rock 'n' roll''" },
+      { name: 'backslash adjacent to apostrophe', value: "a\\'b\\" },
+      {
+        name: 'shell metacharacters',
+        value: `$HOME \${HOME} $$ $((1+1)) ; & | < > ( ) * ? [a] ~ #`,
+      },
+      { name: 'command separator', value: "'; cta_marker; #" },
+      { name: 'pipeline', value: "' | cta_marker; #" },
+      { name: 'dollar command substitution', value: "'$(cta_marker)'" },
+      { name: 'backtick command substitution', value: "'`cta_marker`'" },
+      { name: 'JSON escapes and Unicode', value: '"\\\n\r\t\0 café 🛍️' },
+    ])('preserves $name as one --input argument without execution', ({ value }) => {
+      const cursor = field === 'cursor' ? value : 'next-page'
+      const catalog = {
+        query: field === 'query' ? value : 'shoes',
+        filters: {
+          [field === 'filter key' ? value : 'brand']: field === 'filter' ? value : 'example',
+        },
+        context: { intent: field === 'context' ? value : 'shopping' },
+        pagination: { limit: 10, cursor: 'old-page', offset: 20 },
+      }
+      const cta = buildCta({
+        toolName: 'search_catalog',
+        request: { catalog },
+        result: { products: [{ id: 'p1' }], pagination: { has_next_page: true, cursor } },
+        isEscalation: false,
+      })
+      const next = objectCommands(cta).find((c) => c.command.startsWith('ucp catalog search'))
+      expect(next).toBeDefined()
+
+      // Only locally constructed data is executed. Replace ucp with an argv
+      // recorder and use a stderr-only marker to detect unintended execution.
+      // No real CLI, network, external commands, or marker files are involved.
+      const shell = spawnSync(
+        '/bin/sh',
+        [
+          '-c',
+          `ucp() { printf '%s\\0' "$@"; }\ncta_marker() { printf executed >&2; }\n${next?.command}`,
+        ],
+        { encoding: 'utf8', env: { PATH: '' }, timeout: 5000 },
+      )
+      expect(shell.error).toBeUndefined()
+      expect(shell.stderr).toBe('')
+      expect(shell.status).toBe(0)
+      const args = shell.stdout.split('\0')
+      const expected = { ...catalog, pagination: { limit: 10, cursor } }
+      expect(args).toEqual(['catalog', 'search', '--input', JSON.stringify(expected), ''])
+      expect(JSON.parse(args[3] ?? '')).toEqual(expected)
+    })
+  },
+)
 
 describe('update_checkout CTA — spec-status gate', () => {
   it('emits "checkout complete" command when status is ready_for_complete', () => {

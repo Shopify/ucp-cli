@@ -298,10 +298,9 @@ function buildNextPageCommand(request: unknown, result: unknown): string | undef
       cursor,
     },
   }
-  // Single-quoted JSON for shell. Embedded apostrophes in query/filters would
-  // break the command; agents can switch to --input '@file' or stdin (`-`) for
-  // those edge cases. Matches the existing search/cart/checkout CTA convention.
-  return `ucp catalog search --input '${JSON.stringify(nextCatalog)}'`
+  // Quote the complete JSON payload as one POSIX shell argument. JSON escaping
+  // alone does not protect apostrophes from terminating the shell's single quotes.
+  return `ucp catalog search --input '${JSON.stringify(nextCatalog).replace(/'/g, "'\\''")}'`
 }
 
 // ─── Section 2 — Per-op command builders ───────────────────────────────────
