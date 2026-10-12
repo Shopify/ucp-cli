@@ -10,6 +10,7 @@
 //  - processCheckoutErrors branch matrix (the spec algorithm itself)
 //  - warning + disclosure rendering across checkout/cart/catalog responses
 
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -318,14 +319,13 @@ describe('catalog search/lookup CTA', () => {
     expect(objectCommands(cta).some((c) => c.command.includes('checkout create'))).toBe(true)
   })
 
-  it('appends a next-page command when pagination has a next cursor', () => {
+  it('appends the next-page template when pagination has a next cursor', () => {
     const cta = buildCta({
       toolName: 'search_catalog',
       result: {
         products: [{ id: 'p1' }],
         pagination: { has_next_page: true, cursor: 'abc', total_count: 50 },
       },
-      request: { catalog: { query: 'shoes', pagination: { limit: 10 } } },
       isEscalation: false,
     })
     // The next-page CTA is the only catalog-search command carrying a cursor;
@@ -333,11 +333,31 @@ describe('catalog search/lookup CTA', () => {
     // identify the pagination CTA by its cursor field, not by --input alone.
     const next = objectCommands(cta).find((c) => /catalog search.*cursor/.test(c.command))
     expect(next).toBeDefined()
-    expect(next?.command).toMatch(/cursor/)
-    expect(next?.command).toMatch(/limit/)
+    expect(next?.command).toBe(
+      "ucp catalog search --input '<previous search body>' --set-string /pagination/cursor=<cursor>",
+    )
     expect(next?.description).toMatch(/more of the same ranking/)
+    expect(next?.description).toMatch(/result\.pagination\.cursor/)
     expect(next?.description).toMatch(/context\.intent/)
     expect(cta?.description).toMatch(/showing 1 of 50/)
+  })
+
+  it.each([
+    undefined,
+    null,
+    {},
+    { has_next_page: false, cursor: 'abc' },
+    { has_next_page: 'true', cursor: 'abc' },
+    { has_next_page: true },
+    { has_next_page: true, cursor: '' },
+    { has_next_page: true, cursor: 123 },
+  ])('omits the next-page CTA without a valid next page: %j', (pagination) => {
+    const cta = buildCta({
+      toolName: 'search_catalog',
+      result: { products: [{ id: 'p1' }], pagination },
+      isEscalation: false,
+    })
+    expect(objectCommands(cta).some((c) => c.command.startsWith('ucp catalog search'))).toBe(false)
   })
 
   it('omits the next-page CTA on lookup_catalog (no pagination semantics)', () => {
@@ -353,6 +373,15 @@ describe('catalog search/lookup CTA', () => {
     // Other CTAs (cart create, checkout create) legitimately use --input, so
     // we check for the cursor-carrying next-page command specifically.
     expect(objectCommands(cta).every((c) => !c.command.includes('cursor'))).toBe(true)
+  })
+})
+
+describe('CTA command templates', () => {
+  // Command strings are literals with `<placeholders>`; the agent supplies
+  // every value.
+  it('are never built by interpolation', () => {
+    const source = readFileSync(new URL('./cta.ts', import.meta.url), 'utf8')
+    expect(source).not.toMatch(/`ucp [^`]*\$\{/)
   })
 })
 

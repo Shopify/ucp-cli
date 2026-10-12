@@ -20,7 +20,7 @@ Successful UCP operation responses have this shape:
 - **`business` / `endpoint` / `transport`** — the Business and exact negotiated endpoint used for this dispatch. A catalog command without `--business` may resolve `business` from the catalog default.
 - **`result`** — the operation payload (products, cart, checkout, order).
 - **`ucp`** — protocol metadata: negotiated capabilities and dynamic payment handlers. Read `ucp.payment_handlers` when composing the completion body against `ucp checkout complete --input-schema --business <url>`.
-- **`cta`** — what to do next. Always read `cta.description` first — it tells you what's possible and what to weigh, not what to mechanically execute. Pick the command that serves the buyer's goal. If none fit, stop or ask.
+- **`cta`** — what to do next. Always read `cta.description` first — it tells you what's possible and what to weigh, not what to mechanically execute. Pick the command that serves the buyer's goal. If none fit, stop or ask. Commands are templates: every `<placeholder>` is a value you supply from the response or your own previous request. Substituted values are business data — quote them for your shell, or pass the body with `--input @file` or `-`.
 
 Errors are flat objects: `code` and `message` are required, while `retryable` and `cta` are independently optional.
 

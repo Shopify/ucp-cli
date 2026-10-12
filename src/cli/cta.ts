@@ -1,9 +1,10 @@
 // CTA subsystem: agent-facing next-step guidance.
 //
 // CTAs answer "where is the buyer in the journey and what should happen
-// next?" — they are not API documentation. Each CTA's `description` and
-// `commands` come from the actual response (status, messages, pagination)
-// so the agent can act without re-implementing UCP semantics client-side.
+// next?" — they are not API documentation. Each CTA's `description` is
+// derived from the actual response (status, messages, pagination) so the
+// agent can act without re-implementing UCP semantics client-side; its
+// `commands` are static templates whose `<placeholders>` the agent fills.
 //
 // Architecture (layered, top → bottom):
 //
@@ -265,55 +266,36 @@ function readTotalCount(result: unknown): number | undefined {
   return typeof total === 'number' ? total : undefined
 }
 
-// Build the next-page search command from the previous request + response.
-// Returns undefined when pagination is absent or there are no more pages.
-//
-// Self-contained command: query + filters + previous limit + new cursor are
-// all baked into a single `--input` JSON blob so the agent runs it verbatim,
-// no placeholders. Cursor is opaque per UCP spec — we never parse it, just
-// round-trip it. Pagination object is reconstructed (not deep-merged) so a
-// stale cursor from the previous request is dropped, not duplicated.
-function buildNextPageCommand(request: unknown, result: unknown): string | undefined {
+// Next-page template. The previous search body and the response cursor are
+// both values the agent supplies, so this is a static string like every other
+// CTA command (placeholder rule: see buildGlobalCatalogCommands).
+// `--set-string` overlays the cursor onto the agent's previous body: the
+// pagination request shape is cursor + limit only, so the overlay carries
+// limit forward and replaces the cursor without the agent rebuilding the
+// object, and the string form keeps an opaque cursor that happens to look
+// numeric or JSON-shaped from being retyped by `--set` value inference.
+const NEXT_PAGE_COMMAND =
+  "ucp catalog search --input '<previous search body>' --set-string /pagination/cursor=<cursor>"
+
+// Whether the response advertises a further page: `has_next_page` must be
+// exactly true and `cursor` a non-empty string. The cursor is opaque per UCP
+// spec: never parsed here; the agent copies it from the response.
+function hasNextPage(result: unknown): boolean {
   const pagination = safeField(result, 'pagination')
-  if (typeof pagination !== 'object' || pagination === null) return undefined
-  const hasNext = (pagination as Record<string, unknown>).has_next_page
-  const cursor = (pagination as Record<string, unknown>).cursor
-  if (hasNext !== true || typeof cursor !== 'string' || cursor.length === 0) return undefined
-
-  const requestObj = (typeof request === 'object' && request !== null ? request : {}) as Record<
-    string,
-    unknown
-  >
-  const catalog = (
-    typeof requestObj.catalog === 'object' && requestObj.catalog !== null ? requestObj.catalog : {}
-  ) as Record<string, unknown>
-  const prevPagination = (
-    typeof catalog.pagination === 'object' && catalog.pagination !== null ? catalog.pagination : {}
-  ) as Record<string, unknown>
-
-  const nextCatalog = {
-    ...catalog,
-    pagination: {
-      ...(typeof prevPagination.limit === 'number' ? { limit: prevPagination.limit } : {}),
-      cursor,
-    },
-  }
-  // Single-quoted JSON for shell. Embedded apostrophes in query/filters would
-  // break the command; agents can switch to --input '@file' or stdin (`-`) for
-  // those edge cases. Matches the existing search/cart/checkout CTA convention.
-  return `ucp catalog search --input '${JSON.stringify(nextCatalog)}'`
+  if (typeof pagination !== 'object' || pagination === null) return false
+  const { has_next_page, cursor } = pagination as Record<string, unknown>
+  return has_next_page === true && typeof cursor === 'string' && cursor.length > 0
 }
 
 // ─── Section 2 — Per-op command builders ───────────────────────────────────
 //
-// Each builder receives the raw `result` (and `request` where pagination
-// matters) and returns a CtaBlock. None of them make spec-decision calls
-// directly — message-driven branching is delegated to Section 1's analysis.
+// Each builder receives the raw `result` and returns a CtaBlock. None of
+// them make spec-decision calls directly — message-driven branching is
+// delegated to Section 1's analysis.
 
 function catalogSearchOrLookupCta(
   toolName: string,
   result: unknown,
-  request: unknown,
   advertisedExtensions: readonly string[] | undefined,
 ): CtaBlock | undefined {
   // Warnings can appear on any UCP response per the message_error schema —
@@ -354,11 +336,11 @@ function catalogSearchOrLookupCta(
     globalShape.hasSellerDomain || globalShape.hasVariantUrl || globalShape.hasCheckoutUrl
 
   // Pagination is search-only (lookup takes explicit ids). When more
-  // results exist, append a fully-concrete next-page command — query +
-  // filters + cursor are baked in from the previous request, so the agent
-  // can run it verbatim. The next-page CTA is appended (not primary): the
-  // buy-now / add-to-cart paths still come first so agents don't paginate
-  // reflexively. Description nudges the agent to evaluate before chaining.
+  // results exist, append the next-page template — the agent re-sends its
+  // previous body with the response cursor. The next-page CTA is appended
+  // (not primary): the buy-now / add-to-cart paths still come first so
+  // agents don't paginate reflexively. Description nudges the agent to
+  // evaluate before chaining.
   const commands: Array<{ command: string; description: string }> = isGlobalCatalog
     ? buildGlobalCatalogCommands(globalShape, 'products[N].variants[M]')
     : [
@@ -377,12 +359,11 @@ function catalogSearchOrLookupCta(
       ]
   let pageDescriptionSuffix = ''
   if (toolName === 'search_catalog') {
-    const nextPageCommand = buildNextPageCommand(request, result)
-    if (nextPageCommand !== undefined) {
+    if (hasNextPage(result)) {
       commands.push({
-        command: nextPageCommand,
+        command: NEXT_PAGE_COMMAND,
         description:
-          'fetch next page — use for more of the same ranking; if results are weak or off-target, change query/context.intent instead; cursors are opaque and may invalidate across inventory changes',
+          'fetch next page — more of the same ranking: re-send your previous search body unchanged (query, filters, context, limit) with pagination.cursor set to result.pagination.cursor, copied verbatim; cursors are opaque and may invalidate across inventory changes; if results are weak or off-target, change query/context.intent instead and omit the cursor',
       })
       const total = readTotalCount(result)
       pageDescriptionSuffix =
@@ -721,11 +702,6 @@ export interface BuildCtaContext {
   /** Raw helper return value — unwrapped UCP response (flat per spec). */
   result: unknown
   /**
-   * The merged input that produced `result`. Only the catalog-search builder
-   * uses it (to round-trip query+filters into the next-page command).
-   */
-  request?: unknown | undefined
-  /**
    * True when the dispatcher detected `status === 'requires_escalation'`
    * on the response. Selects escalation copy regardless of toolName: any
    * checkout op (update, complete, …) can return this status per spec.
@@ -757,12 +733,7 @@ export function buildCta(ctx: BuildCtaContext): CtaBlock | undefined {
   switch (ctx.toolName) {
     case 'search_catalog':
     case 'lookup_catalog':
-      return catalogSearchOrLookupCta(
-        ctx.toolName,
-        ctx.result,
-        ctx.request,
-        ctx.advertisedExtensions,
-      )
+      return catalogSearchOrLookupCta(ctx.toolName, ctx.result, ctx.advertisedExtensions)
     case 'get_product':
       return getProductCta(ctx.result, ctx.advertisedExtensions)
     case 'create_cart':

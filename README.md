@@ -113,7 +113,7 @@ ucp cart update --input-schema --business https://<seller-domain>       # cart-s
 ucp checkout update --input-schema --business https://<seller-domain>   # full fulfillment option map/final fields
 ```
 
-**Most responses carry a `cta`.** The CLI is context-aware — it tracks where you are in the flow and surfaces the next-best step(s) as structured recommendations the agent should consider. Successful responses point forward (cart created → here are the checkout / refine / search-more commands); recoverable errors point at recovery (schema validation failed → here's the `--input-schema` command to introspect first). The agent doesn't have to memorize the operating model; the CLI threads it through. Errors themselves stay flat — `code` and `message` always, `retryable` and `cta` optional — so branch on the full `code` and read a CTA as advice.
+**Most responses carry a `cta`.** The CLI is context-aware — it tracks where you are in the flow and surfaces the next-best step(s) as structured recommendations the agent should consider. Successful responses point forward (cart created → here are the checkout / refine / search-more commands); recoverable errors point at recovery (schema validation failed → here's the `--input-schema` command to introspect first). The agent doesn't have to memorize the operating model; the CLI threads it through. Command entries are templates — `<placeholders>` are values the agent supplies from the response or its own previous request. Errors themselves stay flat — `code` and `message` always, `retryable` and `cta` optional — so branch on the full `code` and read a CTA as advice.
 
 ```sh
 $ ucp cart create --business https://shop.example.com \
