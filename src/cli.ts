@@ -560,7 +560,6 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       const cta = buildCta({
         toolName: helper.toolName,
         result,
-        request: merged,
         isEscalation,
         advertisedExtensions: allowlistedExtensions(discovered),
       })

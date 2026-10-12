@@ -108,7 +108,7 @@ Don't fabricate context fields you don't have — leave them out. For "more like
 
 ### Pagination — vary the query first
 
-`catalog search` is the only paginated operation. The response carries `result.pagination.cursor`, `has_next_page`, and estimated `total_count` when pagination is available, and the CTA includes the fetch-next command. `limit` can be up to 50 and pagination goes up to 1,000 results; do not use `total_count` for exact page counts. **Pagination gives more of the same ranking.** When results miss the buyer's intent, vary the query first — try synonyms, broader/narrower terms, brand names — then paginate only if the new query confirms the result set is what you want. Cursors are opaque and may be invalidated as inventory changes; don't hand-roll cursor calls, follow the CTA.
+`catalog search` is the only paginated operation. The response carries `result.pagination.cursor`, `has_next_page`, and estimated `total_count` when pagination is available, and the CTA shows the next-page shape. `limit` can be up to 50 and pagination goes up to 1,000 results; do not use `total_count` for exact page counts. **Pagination gives more of the same ranking.** When results miss the buyer's intent, vary the query first — try synonyms, broader/narrower terms, brand names — then paginate only if the new query confirms the result set is what you want. Cursors are opaque and may be invalidated as inventory changes; copy `result.pagination.cursor` verbatim into `pagination.cursor` of your previous search body — never construct, edit, or reuse a cursor across searches.
 
 ### Looking up a specific product
 
