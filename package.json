@@ -60,7 +60,7 @@
   },
   "dependencies": {
     "@jmespath-community/jmespath": "^1.3.0",
-    "incur": "^0.5.1",
+    "incur": "^0.7.0",
     "undici": "^8.10.0",
     "yaml": "^2.9.0"
   },
