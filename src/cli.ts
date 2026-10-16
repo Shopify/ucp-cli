@@ -9,6 +9,7 @@ import { Cli, middleware, z } from 'incur'
 
 import { buildCta } from './cli/cta.js'
 import { type DoctorDeps, runDoctor } from './cli/doctor.js'
+import { unsupportedFulfillmentMethods } from './cli/fulfillment-warning.js'
 import { buildOperationInput } from './cli/input.js'
 import { buildProfileCli, type ProfileCliDependencies } from './cli/profile.js'
 import { buildProfileSwitchCta, localProfilesSpeaking } from './cli/profile-hint.js'
@@ -32,7 +33,7 @@ import { listProfiles, readUserProfile } from './core/profile-store.js'
 import { describeProxyState } from './core/proxy.js'
 import { SUPPORTED_VERSIONS } from './core/releases.js'
 import { acceptsHttpsUrl, parseHttpsUrl } from './core/url.js'
-import { setVerboseWriter, vlog } from './core/verbose.js'
+import { setVerboseWriter, uwarn, vlog } from './core/verbose.js'
 import { ErrorCodes, UcpError } from './lib/errors.js'
 import { omitUndefined } from './lib/omit-undefined.js'
 import type { CtaBlock, Transport } from './lib/types.js'
@@ -526,6 +527,13 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
         ...(c.options.dryRun ? { dryRun: true } : {}),
         _onDiscover: (d) => {
           discovered = d
+          if (bodyKey === 'checkout') {
+            for (const method of unsupportedFulfillmentMethods(d, merged)) {
+              uwarn(
+                `checkout requested fulfillment method "${method}" is not in the merchant's declared allows_method_combinations; the merchant may drop it. The call will still be sent. Check the returned fulfillment and buyer state.`,
+              )
+            }
+          }
         },
       })
       // Dry-run short-circuits the regular envelope: no escalation/CTA

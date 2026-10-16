@@ -2080,3 +2080,59 @@ describe('isSkillsAddInvocation — incur alias awareness', () => {
     expect(isSkillsAddInvocation(['cart', 'create'])).toBe(false)
   })
 })
+
+describe('checkout fulfillment declaration warning', () => {
+  it('warns before dispatch without blocking a pickup checkout update', async () => {
+    const events: string[] = []
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      updateCheckout: async (_business, input, options) => {
+        events.push('discover')
+        options._onDiscover?.({
+          profile: {
+            ucp: {
+              capabilities: {
+                'dev.ucp.shopping.fulfillment': [
+                  {
+                    version: '2026-08-25',
+                    config: { allows_method_combinations: [['shipping']] },
+                  },
+                ],
+              },
+            },
+          },
+          protocol: { version: '2026-08-25' },
+          negotiated: {},
+        } as never)
+        events.push('dispatch')
+        expect(input).toMatchObject({
+          id: 'checkout-1',
+          checkout: { fulfillment: { methods: [{ type: 'pickup' }] } },
+        })
+        return { fulfillment: { methods: [] } }
+      },
+    })
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      events.push('warning')
+      expect(String(chunk)).toContain('pickup')
+      expect(String(chunk)).toContain('merchant may drop it')
+      return true
+    })
+    try {
+      const { output, exitCode } = await serveCli(cli, [
+        'checkout',
+        'update',
+        'checkout-1',
+        '--business',
+        'https://shop.example.com',
+        '--input',
+        JSON.stringify({ fulfillment: { methods: [{ type: 'pickup' }] } }),
+      ])
+      expect(exitCode, output).toBe(0)
+      expect(JSON.parse(output).result.fulfillment.methods).toEqual([])
+      expect(events).toEqual(['discover', 'warning', 'dispatch'])
+    } finally {
+      stderr.mockRestore()
+    }
+  })
+})
