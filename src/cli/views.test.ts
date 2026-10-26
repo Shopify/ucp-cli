@@ -228,4 +228,65 @@ describe('skills/ucp/views/*.jmespath — package-local view artifacts', () => {
       expect(out.result.total).toBeNull()
     })
   })
+
+  describe('location.compact.jmespath', () => {
+    // Fixture mirrors a live UCP 2026-08-25 search_locations response from a
+    // Shopify storefront: schema.org-style postal address keys, optional geo.
+    it('flattens id/name/address/geo per location; missing geo projects to null', async () => {
+      const view = await resolveView({ raw: `@${VIEWS}/location.compact.jmespath` })
+      const envelope = {
+        ucp: UCP,
+        result: {
+          locations: [
+            {
+              id: 'gid://shopify/Location/34739421278',
+              name: 'Nolita Store',
+              address: {
+                street_address: '205 Mulberry Street',
+                address_locality: 'New York',
+                address_region: 'New York',
+                address_country: 'US',
+                postal_code: '10012',
+              },
+              geo: { latitude: 40.7227188, longitude: -73.9946416 },
+            },
+            {
+              id: 'gid://shopify/Location/34739257438',
+              name: 'West Village Store',
+              address: { address_region: 'New York', address_country: 'US' },
+            },
+          ],
+          pagination: { has_next_page: false },
+        },
+      }
+      const out = applyView(envelope, view) as { result: Array<Record<string, unknown>> }
+      expect(out).toEqual({
+        ucp: UCP,
+        result: [
+          {
+            id: 'gid://shopify/Location/34739421278',
+            name: 'Nolita Store',
+            street: '205 Mulberry Street',
+            city: 'New York',
+            region: 'New York',
+            postal_code: '10012',
+            country: 'US',
+            latitude: 40.7227188,
+            longitude: -73.9946416,
+          },
+          {
+            id: 'gid://shopify/Location/34739257438',
+            name: 'West Village Store',
+            street: null,
+            city: null,
+            region: 'New York',
+            postal_code: null,
+            country: 'US',
+            latitude: null,
+            longitude: null,
+          },
+        ],
+      })
+    })
+  })
 })

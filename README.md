@@ -82,6 +82,7 @@ After `ucp skills add`, your agent has the bundled `SKILL.md` — it teaches the
 | "Find me wireless headphones under $200" | `ucp catalog search` against the bundled global catalog (no merchant pinning needed) |
 | "Buy this from store.example.com" | `ucp discover --business <url>` to confirm UCP support, then `cart create` / `checkout create` scoped to that merchant |
 | "Where's my order?" | `ucp order get <order_id> --business <url>` |
+| "Is there a store near me that has these?" | `ucp location search --business <url>` with a buyer-shared `distance.center` and `filters.items` (UCP 2026-08-25 `dev.ucp.common.location.*`) |
 | Anything mid-flow that the merchant requires the buyer to confirm | The configured escalation hook opens the buyer's browser to `result.continue_url`; the agent waits for the buyer to confirm, then resumes |
 
 The skill packages the agent-facing operating model — when to search vs discover, how to compose payloads from the merchant's live schema, how to render totals correctly, how to surface required disclosures, when and how to hand off — in one curated [`skills/ucp/SKILL.md`](skills/ucp/SKILL.md) plus on-demand reference files.
@@ -102,7 +103,7 @@ The parenthetical lists the UCP releases this CLI supports. For each Business, t
 Two scopes for picking which business an operation targets:
 
 - **Global catalog (no `--business`)** — for product discovery across thousands of merchants. Each result names its merchant via `seller.domain`.
-- **Per-merchant (`--business <url>`)** — for cart, checkout, order, or catalog operations scoped to a single merchant.
+- **Per-merchant (`--business <url>`)** — for cart, checkout, order, location, or catalog operations scoped to a single merchant.
 
 **Live introspection so the agent never guesses.** Both `discover` and `--input-schema` read the merchant's own advertised schemas rather than static docs; results are cached briefly, and `--refresh` forces a fresh fetch. The schema you get back is whatever the merchant currently advertises — including extensions they've added since you last shopped there. Merchants stay in authoritative control of their own schemas; they can evolve, deprecate, or extend without coordinated releases against the CLI or the agent. Capability negotiation is real: the agent and merchant agree on what to use based on what's actually offered right now.
 
@@ -137,11 +138,26 @@ $ ucp cart create --business https://shop.example.com \
 
 Three input surfaces — pick the right one for what you're providing:
 
-- **Positional `<id>`** — for operations that address an existing resource: `cart get/update/cancel`, `checkout get/update/complete/cancel`, `order get`, `catalog get_product`. Pass the id as the first argument; it's not a body field, so don't duplicate it in `--input`/`--set`. Creating/searching operations (`cart create`, `checkout create`, `catalog search`, `catalog lookup`, `discover`) take no positional. Cart-to-checkout conversion is a normal `checkout create` body: pass `cart_id` in `--input` when the merchant's input schema advertises it.
+- **Positional `<id>`** — for operations that address an existing resource: `cart get/update/cancel`, `checkout get/update/complete/cancel`, `order get`, `catalog get_product`. Pass the id as the first argument; it's not a body field, so don't duplicate it in `--input`/`--set`. Creating/searching operations (`cart create`, `checkout create`, `catalog search`, `catalog lookup`, `location search`, `location lookup`, `discover`) take no positional. Cart-to-checkout conversion is a normal `checkout create` body: pass `cart_id` in `--input` when the merchant's input schema advertises it.
 - **`--input '<json>'`** — the operation body as a single JSON object. Also accepts `@path` (load from file) or `-` (read from stdin).
 - **`--set <path>=<value>`** — overlay one body field at a [JSON Pointer (RFC 6901)](https://datatracker.ietf.org/doc/html/rfc6901) path. Numeric segments auto-create arrays (the cart example above); `-` as the final segment appends (`--set '/line_items/-=<json>'`). Repeatable. `--set-string` forces string interpretation for numeric-looking values like ZIP codes.
 
 `--input` and `--set` mix freely: `--input '{...base...}' --set /context/address_country=US`. See [`skills/ucp/references/REFERENCE.md`](skills/ucp/references/REFERENCE.md) for the full `--set` syntax (escape rules, array indices, append, etc.). 
+
+### Retail locations
+
+Businesses with physical stores can advertise the `dev.ucp.common` service with the `dev.ucp.common.location.search` and `.lookup` capabilities (UCP 2026-08-25). `ucp location search` lists stores (an empty body returns the first page) and narrows by `query`, `distance` (explicit `center` + inclusive `max` meters), and `filters.items` (variant ids — not product ids, which match no store; a store matches only when every item is available there). `ucp location lookup` re-fetches stores by id.
+
+```sh
+ucp location search --business https://rothys.com --set /query='New York' --view :compact
+ucp location search --business https://rothys.com --input '{
+  "distance": { "center": { "latitude": 40.7128, "longitude": -74.006 }, "max": 10000 },
+  "filters":  { "items": ["gid://shopify/ProductVariant/<id>"] }
+}'
+ucp location lookup --business https://rothys.com --input '{"ids":["gid://shopify/Location/<id>"]}'
+```
+
+Only send `distance.center` from a location the buyer chose to share. Item matches are provisional — not a stock count, pickup promise, or reservation — so confirm availability and fulfillment in cart/checkout before telling the buyer an item is ready.
 
 ### Project responses before reasoning over them
 

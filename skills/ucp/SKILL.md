@@ -1,6 +1,6 @@
 ---
 name: ucp
-description: Use when the user wants to find, compare, buy, or track products from any online merchant. Covers cross-merchant catalog search ("find me X under $Y"), named-merchant transactions ("buy this from Z.com"), and order tracking. Trigger on shopping, products, prices, sellers, carts, checkout, orders, or any commercial intent. Falls back to merchant-hosted handoff when direct in-protocol checkout isn't available.
+description: Use when the user wants to find, compare, buy, or track products from any online merchant. Covers cross-merchant catalog search ("find me X under $Y"), named-merchant transactions ("buy this from Z.com"), order tracking, and finding a merchant's retail stores ("is there a Z store near me that has this?"). Trigger on shopping, products, prices, sellers, carts, checkout, orders, store locations, or any commercial intent. Falls back to merchant-hosted handoff when direct in-protocol checkout isn't available.
 requires_bin: ucp
 command: ucp
 ---
@@ -18,6 +18,7 @@ When a buyer expresses commercial intent — wanting to find, buy, or track prod
 | "Are these still available?" — refreshing prices/stock/validity for known IDs (saved lists, wish lists, stale carts) | `ucp catalog lookup` with the IDs (up to 50). To distinguish OOS from delisted, pass `filters.available: false` — the default filters to in-stock only, so OOS and delisted both look like absence. |
 | "Buy this from \<merchant>" — buyer names a specific merchant | `ucp discover --business <url>` first; if it succeeds, transact via `--business <url>`. If it fails with `PROFILE_FETCH_FAILED`, the merchant doesn't speak UCP — tell the buyer and offer alternatives; any other code is a different failure, so branch on the full `code`. |
 | "Track my order" | `ucp order get <order_id> --business <url>` |
+| "Is there a \<merchant> store near me?", "Which store has this in stock?" | `ucp location search --business <url>` — see **Finding a merchant's retail stores** below. |
 
 **Rule of thumb:** broad product discovery → global catalog (no `--business` needed). Business-scoped operations — cart, checkout, order, or catalog scoped to a specific merchant — → pass `--business <url>`. Reach for one or the other based on the buyer's intent.
 
@@ -57,7 +58,7 @@ Ops that act on an existing resource take its id as the first positional argumen
 - `order get <order_id>`
 - `catalog get_product <product_or_variant_id>` (pass a Catalog UPID or returned variant ID from prior search/lookup)
 
-All other operations (`cart create`, `checkout create`, `catalog search`, `catalog lookup`, `discover`) take no positional; their full payload goes in `--input`/`--set`. To convert an existing Cart to Checkout, pass its `id` as `cart_id` in the `checkout create` body and include `line_items: []`; see **Checkout** below.
+All other operations (`cart create`, `checkout create`, `catalog search`, `catalog lookup`, `location search`, `location lookup`, `discover`) take no positional; their full payload goes in `--input`/`--set`. To convert an existing Cart to Checkout, pass its `id` as `cart_id` in the `checkout create` body and include `line_items: []`; see **Checkout** below.
 
 ```sh
 ucp cart update <cart_id> --business https://<seller-domain> --input '{...}'
@@ -118,6 +119,32 @@ A Catalog UPID aggregates offers from **multiple sellers**, so a bare `get_produ
 
 **`get_product` vs `lookup`**: a single pasted link the buyer wants to *open* (PDP + variant picker) → `get_product`. A batch of saved IDs the buyer wants to *refresh* (prices, stock, validity) → `lookup`.
 
+## Finding a merchant's retail stores
+
+Merchants with physical stores may advertise `dev.ucp.common.location.search` / `.lookup` (UCP 2026-08-25). Location ops are always merchant-scoped — pass `--business <url>`; there is no global-catalog fallback. If the merchant doesn't offer them you'll get `CAPABILITY_NOT_OFFERED` or `OPERATION_NOT_OFFERED`: tell the buyer and point them to the merchant's own store locator.
+
+```sh
+# List stores (first page); narrow by name/address words
+ucp location search --business https://<seller-domain> --set /query='New York' --view :compact
+
+# Stores within 10 km of a point the buyer shared that carry a specific variant
+ucp location search --business https://<seller-domain> --input '{
+  "distance": { "center": { "latitude": 40.7128, "longitude": -74.006 }, "max": 10000 },
+  "filters":  { "items": ["<variant_id>"] }
+}'
+
+# Re-fetch chosen stores (optionally re-check items there)
+ucp location lookup --business https://<seller-domain> --input '{"ids":["<location_id>"]}'
+```
+
+- **`query`** matches words in the store name or address literally — spell out region names ("New York", not "NY").
+- **`distance`** needs an explicit `center` (WGS 84 lat/lng) and an inclusive `max` in **meters**; results come back nearest first. **Only send a center the buyer chose to share** — never infer one from IP, context, or earlier conversation. Stores without coordinates never match a distance filter.
+- **`filters.items`** takes orderable item ids — **variant** ids from catalog `variants[M].id`, up to 10; a store matches only when **every** item is available there. **Never pass `products[N].id`:** a product id silently matches no store, so it looks like "nobody carries this". If the buyer hasn't picked a size/color yet, pass the variant they're most likely to want or check a few variants in separate calls. Matches are provisional — not a stock count, pickup promise, or reservation. Confirm availability and fulfillment in cart/checkout before telling the buyer an item is ready.
+- **Pagination** — `search` returns 10 by default; set `pagination.limit` for more and copy `result.pagination.cursor` verbatim into your previous body for the next page. `lookup` processes a bounded batch of ids and says so in `result.messages` (`batch_limit_applied`); send the rest in another call.
+- Merchants may **reject** filters they don't support (hours, amenities, custom filters, `serves`) with an `invalid_input` error instead of ignoring them — drop the field rather than retrying as-is. Run `--input-schema` to see what this merchant accepts.
+
+Present each store's `name` and `address`; `geo` appears only when the merchant set coordinates.
+
 ## Working with responses
 
 UCP responses can be rich across every operation — catalog search returns dozens of products with full variant trees, cart can carry itemized totals + fulfillment estimates + messages, checkout carries final totals + full fulfillment options + messages, and order responses carry fulfillment events and adjustments. Across all of them, apply the same tactic: grok the response shape, then project the fields relevant to the current task before reasoning over the result. Loading a 300 KB blob into context just to find five product titles (or five total amounts) wastes most of your budget.
@@ -145,7 +172,7 @@ The exact projection depends on what the current task needs — don't paste boil
 - **checkout** — `result.{id, status, currency, line_items, totals, messages, fulfillment, continue_url}`; checkout is the final/full-fidelity fulfillment option surface. Reach into `messages[?severity=='recoverable']` for actionable errors.
 - **order** — `result.{id, status, fulfillment: fulfillment.{status: status, events: events[*].{type: type, at: at, location: location}}}`.
 
-Common JMESPath patterns (filters, sort, multi-select, slicing) are in `references/REFERENCE.md`. Package-local aliases such as `--view :compact` and `--view :summary` resolve from the CLI package's `skills/ucp/views` directory by operation capability (`catalog search --view :summary` → `catalog.summary.jmespath`; `cart create --view :summary` → `cart.summary.jmespath`). Read the files in `views/` as shape references, but **compose your own projection for what THIS call needs**; use `@<path>` for edited/custom views.
+Common JMESPath patterns (filters, sort, multi-select, slicing) are in `references/REFERENCE.md`. Package-local aliases such as `--view :compact` and `--view :summary` resolve from the CLI package's `skills/ucp/views` directory by operation capability (`catalog search --view :summary` → `catalog.summary.jmespath`; `cart create --view :summary` → `cart.summary.jmespath`; `location search --view :compact` → `location.compact.jmespath`). Read the files in `views/` as shape references, but **compose your own projection for what THIS call needs**; use `@<path>` for edited/custom views.
 
 ### Key response fields and conventions
 
