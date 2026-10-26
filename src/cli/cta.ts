@@ -637,6 +637,109 @@ function orderCta(result: unknown): CtaBlock | undefined {
   }
 }
 
+// Location search/lookup (`dev.ucp.common.location.*`). Same placeholder rule
+// as the catalog builders: commands are static templates, never interpolated
+// from business-supplied strings (store names and addresses are data).
+//
+// Branch order: business-rejected request (error messages) → empty result →
+// results. A rejected request must not read as "no stores nearby" — the
+// remedy is to change the payload, not to widen the search.
+const LOCATION_NEXT_PAGE_COMMAND =
+  "ucp location search --input '<previous search body>' --set-string /pagination/cursor=<cursor>"
+
+// Both rules come from the spec's buyer-safety guidance and recur on every
+// non-error branch, so they live in one place.
+const LOCATION_CENTER_RULE =
+  'Only send distance.center from a location the buyer chose to share — never infer it from IP address, context, or earlier conversation.'
+// A product id is the most common wrong input: catalog results carry both
+// `products[N].id` and `variants[M].id`, and the spec's items are orderable
+// item references (a shopping variant). A product id matches no store —
+// verified live: a Shopify product id returned 0 stores where one of its
+// variants returned 38 — so an empty result must send the agent to check its
+// ids BEFORE advising it to drop the item filter.
+const LOCATION_ITEM_ID_RULE =
+  'If filters.items was set, check it holds orderable item ids — variant ids from catalog variants[M].id, not products[N].id; a product id matches no store.'
+const LOCATION_AVAILABILITY_CAVEAT =
+  "Item matches are provisional: they reflect the business's store-availability policy, not a stock count, pickup promise, or reservation — confirm availability and fulfillment in cart/checkout before telling the buyer an item is ready."
+
+function locationCta(toolName: 'search_locations' | 'lookup_locations', result: unknown): CtaBlock {
+  const inputSchemaCommand =
+    toolName === 'search_locations'
+      ? 'ucp location search --input-schema'
+      : 'ucp location lookup --input-schema'
+  const warningNotice = buildWarningNotice(analyzeCheckoutMessages(result))
+  const messages = safeArray(safeField(result, 'messages'))
+
+  const errors = messages
+    .filter((m) => safeField(m, 'type') === 'error')
+    .map((m) => safeField(m, 'content'))
+    .filter((c): c is string => typeof c === 'string')
+  if (errors.length > 0) {
+    return {
+      description: `${warningNotice}The business rejected this location request: ${businessMessageData('Business-supplied error text', errors)}. Remove or correct the rejected fields and retry — businesses may reject filters or relations they do not support (for example hours, amenities, custom filters, or serves) rather than ignoring them. Run --input-schema to see what this business accepts.`,
+      commands: [
+        {
+          command: inputSchemaCommand,
+          description: "print this business's accepted location payload before retrying",
+        },
+      ],
+    }
+  }
+
+  const batchLimited = messages.some((m) => safeField(m, 'code') === 'batch_limit_applied')
+  const batchNotice = batchLimited
+    ? 'Batch limit applied — the business processed only the first ids in location.ids (see result.messages); look up the remaining ids in another request. '
+    : ''
+
+  const locations = safeArray(safeField(result, 'locations'))
+  if (locations.length === 0) {
+    const broaden =
+      toolName === 'search_locations'
+        ? `No locations matched. ${LOCATION_ITEM_ID_RULE} Then broaden before telling the buyer there is no store: drop or shorten query (store name/address words), widen distance.max, or remove filters.items (a location matches only when every listed item is available there).`
+        : `None of the ids resolved to a location — unknown ids are omitted. Pass the canonical id values returned by location search. If filters.items or distance were set, they may have excluded every resolved store. ${LOCATION_ITEM_ID_RULE}`
+    return {
+      description: `${warningNotice}${batchNotice}${broaden} ${LOCATION_CENTER_RULE}`,
+      commands: [
+        {
+          command: "ucp location search --input '{}'",
+          description: 'list retail locations with no narrowing (first page)',
+        },
+        {
+          command:
+            'ucp location search --input \'{"distance":{"center":{"latitude":<lat>,"longitude":<lng>},"max":<meters>}}\'',
+          description:
+            'search around a point the buyer shared — <meters> is an inclusive radius in meters; results come back nearest first',
+        },
+      ],
+    }
+  }
+
+  const commands: Array<{ command: string; description: string }> = []
+  let pageSuffix = ''
+  if (toolName === 'search_locations' && hasNextPage(result)) {
+    commands.push({
+      command: LOCATION_NEXT_PAGE_COMMAND,
+      description:
+        'fetch next page — re-send your previous search body unchanged with pagination.cursor set to result.pagination.cursor, copied verbatim; cursors are opaque',
+    })
+    pageSuffix = ' More locations available; paginate only if the buyer needs them.'
+  }
+  commands.push({
+    command:
+      'ucp location lookup --input \'{"ids":["<location-id>"],"filters":{"items":["<variant-id>"]}}\'',
+    description:
+      'check whether chosen stores carry specific items — substitute <location-id> from result.locations[N].id and <variant-id> from a catalog variants[M].id, never a product id (all listed items must be available); drop filters to just re-fetch the stores',
+  })
+  const inputsNote =
+    toolName === 'lookup_locations'
+      ? ' Each location lists inputs[] — the request ids that resolved to it.'
+      : ''
+  return {
+    description: `${warningNotice}${batchNotice}Found ${locations.length} location(s). Present result.locations[N].name and .address to the buyer; geo is present only when the business set coordinates.${inputsNote} ${LOCATION_AVAILABILITY_CAVEAT} ${LOCATION_CENTER_RULE}${pageSuffix}`,
+    commands,
+  }
+}
+
 function completeCommandDescription(action: CheckoutErrorAction): string {
   switch (action.kind) {
     case 'unrecoverable':
@@ -747,6 +850,9 @@ export function buildCta(ctx: BuildCtaContext): CtaBlock | undefined {
       return updateCheckoutCta(ctx.result)
     case 'get_order':
       return orderCta(ctx.result)
+    case 'search_locations':
+    case 'lookup_locations':
+      return locationCta(ctx.toolName, ctx.result)
     default:
       return undefined
   }

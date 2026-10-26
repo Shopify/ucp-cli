@@ -1,0 +1,14 @@
+{
+  ucp: {version: ucp.version, status: ucp.status},
+  result: result.locations[*].{
+    id: id,
+    name: name,
+    street: address.street_address,
+    city: address.address_locality,
+    region: address.address_region,
+    postal_code: address.postal_code,
+    country: address.address_country,
+    latitude: geo.latitude,
+    longitude: geo.longitude
+  }
+}

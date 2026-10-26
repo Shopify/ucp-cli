@@ -2080,3 +2080,227 @@ describe('isSkillsAddInvocation — incur alias awareness', () => {
     expect(isSkillsAddInvocation(['cart', 'create'])).toBe(false)
   })
 })
+
+describe('createUcpCli — location', () => {
+  const BUSINESS = 'https://rothys.example.com'
+  const STORE = {
+    id: 'gid://shopify/Location/337346566',
+    name: 'Fillmore Store',
+    address: {
+      street_address: '2448 Fillmore Street',
+      address_locality: 'San Francisco',
+      address_region: 'California',
+      address_country: 'US',
+      postal_code: '94115',
+    },
+    geo: { latitude: 37.7922639, longitude: -122.4342714 },
+  }
+
+  it('location search wraps CLI body fields under /location for the wire', async () => {
+    const calls: unknown[] = []
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      searchLocations: async (...args) => {
+        calls.push(args)
+        return { ucp: { version: '2026-08-25' }, locations: [STORE] }
+      },
+    })
+
+    const { output, exitCode } = await serveCli(cli, [
+      'location',
+      'search',
+      '--business',
+      BUSINESS,
+      '--input',
+      '{"distance":{"center":{"latitude":40.7128,"longitude":-74.006},"max":10000}}',
+      '--set',
+      '/pagination/limit=5',
+    ])
+
+    expect(exitCode).toBe(0)
+    expect(JSON.parse(output)).toMatchObject({
+      business: BUSINESS,
+      ucp: { version: '2026-08-25' },
+      result: { locations: [STORE] },
+    })
+    expect(calls).toMatchObject([
+      [
+        BUSINESS,
+        {
+          location: {
+            distance: { center: { latitude: 40.7128, longitude: -74.006 }, max: 10000 },
+            pagination: { limit: 5 },
+          },
+        },
+        { force: false, profile: RUNTIME_PROFILE },
+      ],
+    ])
+  })
+
+  it('bare location search sends an empty /location object (first page)', async () => {
+    const calls: unknown[] = []
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      searchLocations: async (...args) => {
+        calls.push(args)
+        return { locations: [] }
+      },
+    })
+    const { exitCode } = await serveCli(cli, ['location', 'search', '--business', BUSINESS])
+    expect(exitCode).toBe(0)
+    expect(calls[0]).toMatchObject([BUSINESS, { location: {} }, { force: false }])
+  })
+
+  it('location lookup takes ids in the body (no positional id)', async () => {
+    const calls: unknown[] = []
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      lookupLocations: async (...args) => {
+        calls.push(args)
+        return { locations: [{ ...STORE, inputs: [{ id: STORE.id }] }] }
+      },
+    })
+    const { exitCode } = await serveCli(cli, [
+      'location',
+      'lookup',
+      '--business',
+      BUSINESS,
+      '--input',
+      `{"ids":["${STORE.id}"]}`,
+    ])
+    expect(exitCode).toBe(0)
+    expect(calls[0]).toMatchObject([BUSINESS, { location: { ids: [STORE.id] } }, { force: false }])
+  })
+
+  it('does not fall back to meta.defaults.catalog — stores are business-scoped', async () => {
+    const cli = createUcpCli({
+      resolveSession: async () => ({
+        profile: RUNTIME_PROFILE,
+        profileMeta: {
+          created_at: '2026-05-10T00:00:00Z',
+          defaults: { catalog: 'https://catalog.example.com' },
+        },
+      }),
+      searchLocations: async () => {
+        throw new Error('helper should not fire without a resolved business')
+      },
+    })
+    const { output, exitCode } = await serveCli(cli, ['location', 'search'])
+    expect(exitCode).toBe(1)
+    expect(JSON.parse(output).code).toBe('BUSINESS_NOT_RESOLVED')
+  })
+
+  it('--input-schema negotiates dev.ucp.common and projects to /location body fields', async () => {
+    const discoverCalls: unknown[] = []
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      discover: (async (...args: Parameters<typeof import('./core/discover.js').discover>) => {
+        discoverCalls.push(args)
+        return {
+          business: args[0],
+          profile: {
+            ucp: { version: '2026-08-25', status: 'success', services: {}, payment_handlers: {} },
+          },
+          negotiated: {
+            'dev.ucp.common': {
+              capability: 'dev.ucp.common',
+              version: '2026-08-25',
+              transport: 'mcp',
+              endpoint: `${BUSINESS}/api/ucp/mcp`,
+              tools: {
+                search_locations: {
+                  name: 'search_locations',
+                  inputSchema: {
+                    type: 'object',
+                    required: ['meta', 'location'],
+                    properties: {
+                      meta: { type: 'object' },
+                      location: {
+                        type: 'object',
+                        properties: { query: { type: 'string' }, distance: { type: 'object' } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        }
+      }) as never,
+      searchLocations: async () => {
+        throw new Error('helper should not be called when --input-schema is set')
+      },
+    })
+
+    const { output, exitCode } = await serveCli(cli, [
+      'location',
+      'search',
+      '--business',
+      BUSINESS,
+      '--input-schema',
+    ])
+
+    expect(exitCode).toBe(0)
+    expect(discoverCalls[0]).toMatchObject([BUSINESS, { capabilities: ['dev.ucp.common'] }])
+    const parsed = JSON.parse(output)
+    expect(parsed).toMatchObject({
+      endpoint: `${BUSINESS}/api/ucp/mcp`,
+      result: { capability: 'dev.ucp.common', tool: { name: 'search_locations' } },
+    })
+    expect(parsed.result.tool.inputSchema).toEqual({
+      type: 'object',
+      properties: { query: { type: 'string' }, distance: { type: 'object' } },
+    })
+  })
+
+  it('--view :compact resolves location.compact.jmespath', async () => {
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      searchLocations: async () => ({
+        ucp: { version: '2026-08-25', status: 'success' },
+        locations: [STORE, { id: 'gid://shopify/Location/2', name: 'No Coordinates Store' }],
+        pagination: { has_next_page: false },
+      }),
+    })
+    const { output, exitCode } = await serveCli(cli, [
+      'location',
+      'search',
+      '--business',
+      BUSINESS,
+      '--view',
+      ':compact',
+    ])
+    expect(exitCode).toBe(0)
+    // The CTA rides the incur extras channel and survives any projection, so
+    // split it off and pin the projected envelope exactly.
+    const { cta, ...projected } = JSON.parse(output)
+    expect(cta?.description).toMatch(/Found 2 location\(s\)/)
+    expect(projected).toEqual({
+      ucp: { version: '2026-08-25', status: 'success' },
+      result: [
+        {
+          id: STORE.id,
+          name: 'Fillmore Store',
+          street: '2448 Fillmore Street',
+          city: 'San Francisco',
+          region: 'California',
+          postal_code: '94115',
+          country: 'US',
+          latitude: 37.7922639,
+          longitude: -122.4342714,
+        },
+        {
+          id: 'gid://shopify/Location/2',
+          name: 'No Coordinates Store',
+          street: null,
+          city: null,
+          region: null,
+          postal_code: null,
+          country: null,
+          latitude: null,
+          longitude: null,
+        },
+      ],
+    })
+  })
+})

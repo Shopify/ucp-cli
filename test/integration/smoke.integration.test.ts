@@ -324,6 +324,8 @@ describe('smoke: --mcp stdio', () => {
         'checkout_get',
         'checkout_update',
         'discover',
+        'location_lookup',
+        'location_search',
         'order_get',
       ])
     } finally {

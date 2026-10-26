@@ -36,6 +36,7 @@ import { setVerboseWriter, vlog } from './core/verbose.js'
 import { ErrorCodes, UcpError } from './lib/errors.js'
 import { omitUndefined } from './lib/omit-undefined.js'
 import type { CtaBlock, Transport } from './lib/types.js'
+import { lookupLocations, searchLocations } from './services/common.js'
 import {
   cancelCart,
   cancelCheckout,
@@ -135,6 +136,8 @@ export interface UcpCliDependencies {
   completeCheckout?: ShoppingHelperDep
   cancelCheckout?: ShoppingHelperDep
   getOrder?: ShoppingHelperDep
+  searchLocations?: ShoppingHelperDep
+  lookupLocations?: ShoppingHelperDep
   profile?: ProfileCliDependencies
   use?: UseDeps
   doctor?: DoctorDeps
@@ -177,6 +180,8 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
   const completeCheckoutImpl = withMeta(deps.completeCheckout, completeCheckout)
   const cancelCheckoutImpl = withMeta(deps.cancelCheckout, cancelCheckout)
   const getOrderImpl = withMeta(deps.getOrder, getOrder)
+  const searchLocationsImpl = withMeta(deps.searchLocations, searchLocations)
+  const lookupLocationsImpl = withMeta(deps.lookupLocations, lookupLocations)
   // Reuses the `profile` command tree's injectable store so tests drive one
   // set of stubs; the hint is read-only and best-effort either way.
   const profileHintDeps = {
@@ -346,7 +351,7 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
           layer: 'client',
           code: ErrorCodes.INVALID_INPUT,
           message:
-            '--view: discover does not support package-local :<alias> views; use an inline expression or @<path>, or pass --view :<alias> to a catalog/cart/checkout/order operation',
+            '--view: discover does not support package-local :<alias> views; use an inline expression or @<path>, or pass --view :<alias> to a catalog/cart/checkout/order/location operation',
         })
       }
       const viewState =
@@ -722,6 +727,34 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
 
   cli.command(order)
 
+  // Location ops bind to the `dev.ucp.common` service (services/common.ts),
+  // not `dev.ucp.shopping`: discovery negotiates that service on its own
+  // business-profile entry, even when a business serves both from one MCP
+  // endpoint. Body fields are CLI-facing; the dispatcher wraps them under
+  // /location for the wire. Neither op has a positional id — lookup takes
+  // `ids` in the body, symmetric with `catalog lookup`. No catalog-default
+  // fallback: a store list is inherently business-scoped, so --business (or
+  // UCP_BUSINESS / active.yaml) is required.
+  const location = Cli.create('location', {
+    description: "Find a business's physical retail stores and check which carry specific items",
+  })
+    .command('search', {
+      description:
+        "Search a business's retail locations. An empty body lists the first page; narrow with query (store name/address words), distance (explicit center + max meters), or filters.items (variant ids, all must be available).",
+      args: argsEmpty,
+      options: operationOptions,
+      run: opRun(searchLocationsImpl, undefined, 'location'),
+    })
+    .command('lookup', {
+      description:
+        'Fetch retail locations by id (e.g. gid://shopify/Location/123) via --input \'{"ids":[...]}\'. Optional distance and filters.items refine the resolved set.',
+      args: argsEmpty,
+      options: operationOptions,
+      run: opRun(lookupLocationsImpl, undefined, 'location'),
+    })
+
+  cli.command(location)
+
   // `profile *` is hidden from MCP clients per command in cli/profile.ts.
   cli.command(buildProfileCli(deps.profile ?? {}))
 
@@ -824,7 +857,8 @@ interface ShoppingRunContext extends OperationContext {
   options: OperationOptions
 }
 
-// All shopping helpers share this signature (see services/shopping.ts).
+// All service helpers share this signature (see services/shopping.ts and
+// services/common.ts).
 // `capability`, `toolName`, and `opName` are own properties attached by
 // `serviceOp` so `--input-schema` and package-local `--view :alias` can introspect
 // the helper without maintaining parallel registries.
@@ -847,7 +881,7 @@ type ShoppingHelper = {
   opName: string
 }
 
-type OperationBodyKey = 'catalog' | 'cart' | 'checkout'
+type OperationBodyKey = 'catalog' | 'cart' | 'checkout' | 'location'
 
 // Adapter that ensures every helper at the dispatch boundary carries the
 // metadata --input-schema and --view aliases need. Tests inject plain async
