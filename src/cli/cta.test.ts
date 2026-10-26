@@ -17,6 +17,7 @@ import {
   analyzeCheckoutMessages,
   buildCta,
   buildWarningNotice,
+  permalinkCta,
   processCheckoutErrors,
 } from './cta.js'
 
@@ -1010,5 +1011,41 @@ describe('catalog CTA — extension hints from negotiated view', () => {
     })
     expect(cta?.description).toMatch(/global catalog active/)
     expect(cta?.description).not.toMatch(/evil\.example\.com/)
+  })
+})
+
+describe('permalink CTA', () => {
+  const base = {
+    url: 'https://m.example/buy/a:1',
+    endpoint: 'https://m.example/buy',
+    items: [{ id: 'a', quantity: 1, token: 'a' }],
+    fields: [],
+    octets: 26,
+    fits: ['qr', 'sms', 'email'] as Array<'qr' | 'sms' | 'email'>,
+    buyer_prefill: false,
+  }
+
+  it('frames the link as a handoff, never a purchase, and keeps the URL out of commands', () => {
+    const cta = permalinkCta(base)
+    expect(cta.description).toMatch(/does not place an order, reserve stock, or confirm prices/)
+    expect(objectCommands(cta).map((c) => c.command)).toEqual([
+      "ucp cart create --input '<same body>'",
+    ])
+    for (const c of objectCommands(cta)) expect(c.command).not.toContain(base.url)
+  })
+
+  it('warns on buyer prefill and on each budget overrun', () => {
+    expect(permalinkCta({ ...base, buyer_prefill: true }).description).toMatch(
+      /^Contains buyer prefill/,
+    )
+    expect(permalinkCta({ ...base, octets: 700, fits: ['sms', 'email'] }).description).toMatch(
+      /too long for a QR code/,
+    )
+    expect(permalinkCta({ ...base, octets: 1500, fits: ['email'] }).description).toMatch(
+      /too long for QR or SMS/,
+    )
+    expect(permalinkCta({ ...base, octets: 2100, fits: [] }).description).toMatch(
+      /exceeds every spec budget/,
+    )
   })
 })

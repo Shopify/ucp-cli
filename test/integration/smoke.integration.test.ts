@@ -307,9 +307,14 @@ describe('smoke: --mcp stdio', () => {
       await initialize(mcp)
       mcp.send({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
       const response = (await mcp.waitForResponseId(1)) as {
-        result: { tools: { name: string }[] }
+        result: { tools: { name: string; annotations?: { readOnlyHint?: boolean } }[] }
       }
       const names = response.result.tools.map((t) => t.name).sort()
+      // permalink_build only constructs a URL locally; clients may auto-approve
+      // read-only tools instead of prompting as they would for cart_create.
+      expect(
+        response.result.tools.find((t) => t.name === 'permalink_build')?.annotations,
+      ).toMatchObject({ readOnlyHint: true })
       expect(names).toEqual([
         'cart_cancel',
         'cart_create',
@@ -325,6 +330,7 @@ describe('smoke: --mcp stdio', () => {
         'checkout_update',
         'discover',
         'order_get',
+        'permalink_build',
       ])
     } finally {
       await mcp.close()

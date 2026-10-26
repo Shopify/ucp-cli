@@ -82,6 +82,7 @@ After `ucp skills add`, your agent has the bundled `SKILL.md` — it teaches the
 | "Find me wireless headphones under $200" | `ucp catalog search` against the bundled global catalog (no merchant pinning needed) |
 | "Buy this from store.example.com" | `ucp discover --business <url>` to confirm UCP support, then `cart create` / `checkout create` scoped to that merchant |
 | "Where's my order?" | `ucp order get <order_id> --business <url>` |
+| "Send me a link to buy these" | `ucp permalink build --business <url>` builds a `dev.ucp.shopping.permalink` URL that opens the merchant's cart with items and discounts applied |
 | Anything mid-flow that the merchant requires the buyer to confirm | The configured escalation hook opens the buyer's browser to `result.continue_url`; the agent waits for the buyer to confirm, then resumes |
 
 The skill packages the agent-facing operating model — when to search vs discover, how to compose payloads from the merchant's live schema, how to render totals correctly, how to surface required disclosures, when and how to hand off — in one curated [`skills/ucp/SKILL.md`](skills/ucp/SKILL.md) plus on-demand reference files.
@@ -137,11 +138,27 @@ $ ucp cart create --business https://shop.example.com \
 
 Three input surfaces — pick the right one for what you're providing:
 
-- **Positional `<id>`** — for operations that address an existing resource: `cart get/update/cancel`, `checkout get/update/complete/cancel`, `order get`, `catalog get_product`. Pass the id as the first argument; it's not a body field, so don't duplicate it in `--input`/`--set`. Creating/searching operations (`cart create`, `checkout create`, `catalog search`, `catalog lookup`, `discover`) take no positional. Cart-to-checkout conversion is a normal `checkout create` body: pass `cart_id` in `--input` when the merchant's input schema advertises it.
+- **Positional `<id>`** — for operations that address an existing resource: `cart get/update/cancel`, `checkout get/update/complete/cancel`, `order get`, `catalog get_product`. Pass the id as the first argument; it's not a body field, so don't duplicate it in `--input`/`--set`. Creating/searching operations (`cart create`, `checkout create`, `catalog search`, `catalog lookup`, `permalink build`, `discover`) take no positional. Cart-to-checkout conversion is a normal `checkout create` body: pass `cart_id` in `--input` when the merchant's input schema advertises it.
 - **`--input '<json>'`** — the operation body as a single JSON object. Also accepts `@path` (load from file) or `-` (read from stdin).
 - **`--set <path>=<value>`** — overlay one body field at a [JSON Pointer (RFC 6901)](https://datatracker.ietf.org/doc/html/rfc6901) path. Numeric segments auto-create arrays (the cart example above); `-` as the final segment appends (`--set '/line_items/-=<json>'`). Repeatable. `--set-string` forces string interpretation for numeric-looking values like ZIP codes.
 
 `--input` and `--set` mix freely: `--input '{...base...}' --set /context/address_country=US`. See [`skills/ucp/references/REFERENCE.md`](skills/ucp/references/REFERENCE.md) for the full `--set` syntax (escape rules, array indices, append, etc.). 
+
+### Shopping permalinks
+
+Businesses can advertise `dev.ucp.shopping.permalink` (UCP 2026-08-25) with a browser endpoint such as `https://rothys.com/buy`. `ucp permalink build` turns a `cart create`-shaped body into a link the buyer opens: `line_items` become the compact item path (Shopify GIDs encoded as `~base64url`), and every other field becomes a JSON Pointer query parameter — the same paths `--set` uses.
+
+```sh
+ucp permalink build --business https://rothys.com \
+  --set /line_items/0/item/id='gid://shopify/ProductVariant/<id>' --set /line_items/0/quantity=1 \
+  --set /discounts/codes/0=WELCOME10 --set /attribution/utm_source=newsletter \
+  --continue-to /collections/flats
+# → result.url: https://rothys.com/buy/~Z2lk…:1?continue_to=/collections/flats&discounts/codes/0=WELCOME10&attribution/utm_source=newsletter
+```
+
+The link is built locally; opening it makes the business build a cart and redirect (303) to its own page — it never places an order. Because the business silently drops fields it doesn't recognize, the CLI checks the body against the business's `create_cart` schema when it can and lists misses in `result.unrecognized_fields`. It refuses payment data, tokens, secrets, and server-owned fields outright, and `buyer/*` prefill unless `--allow-buyer-prefill` is set. `result.fits` reports which spec URL budgets (QR 512 / SMS 1024 / email 2048 octets) the link meets; `--format json | jq -r .result.url` prints just the URL.
+
+A permalink is a separate command rather than a `cart create` flag because it is a different object: stateless and reusable (every open starts a fresh cart), resolved by the business into a cart *or* a checkout, and never a mutation. The body is identical, so switching from `cart create` is one word.
 
 ### Project responses before reasoning over them
 

@@ -18,6 +18,7 @@ When a buyer expresses commercial intent — wanting to find, buy, or track prod
 | "Are these still available?" — refreshing prices/stock/validity for known IDs (saved lists, wish lists, stale carts) | `ucp catalog lookup` with the IDs (up to 50). To distinguish OOS from delisted, pass `filters.available: false` — the default filters to in-stock only, so OOS and delisted both look like absence. |
 | "Buy this from \<merchant>" — buyer names a specific merchant | `ucp discover --business <url>` first; if it succeeds, transact via `--business <url>`. If it fails with `PROFILE_FETCH_FAILED`, the merchant doesn't speak UCP — tell the buyer and offer alternatives; any other code is a different failure, so branch on the full `code`. |
 | "Track my order" | `ucp order get <order_id> --business <url>` |
+| "Send me a link to buy these", or handing off a basket the buyer will finish on the merchant's site | `ucp permalink build --business <url>` — see **Handing off with a permalink** below. |
 
 **Rule of thumb:** broad product discovery → global catalog (no `--business` needed). Business-scoped operations — cart, checkout, order, or catalog scoped to a specific merchant — → pass `--business <url>`. Reach for one or the other based on the buyer's intent.
 
@@ -57,7 +58,7 @@ Ops that act on an existing resource take its id as the first positional argumen
 - `order get <order_id>`
 - `catalog get_product <product_or_variant_id>` (pass a Catalog UPID or returned variant ID from prior search/lookup)
 
-All other operations (`cart create`, `checkout create`, `catalog search`, `catalog lookup`, `discover`) take no positional; their full payload goes in `--input`/`--set`. To convert an existing Cart to Checkout, pass its `id` as `cart_id` in the `checkout create` body and include `line_items: []`; see **Checkout** below.
+All other operations (`cart create`, `checkout create`, `catalog search`, `catalog lookup`, `permalink build`, `discover`) take no positional; their full payload goes in `--input`/`--set`. To convert an existing Cart to Checkout, pass its `id` as `cart_id` in the `checkout create` body and include `line_items: []`; see **Checkout** below.
 
 ```sh
 ucp cart update <cart_id> --business https://<seller-domain> --input '{...}'
@@ -287,10 +288,11 @@ When the CLI returns a blocking error — auth the CLI cannot perform, an unreco
 URL priority:
 
 1. Current/prior checkout or cart `result.continue_url`.
-2. Selected `variant.checkout_url` for merchant-hosted buy-now.
-3. Selected variant/product `url` (PDP). For cart errors, use this before seller homepage when no checkout URL exists.
-4. `seller.url` / seller homepage.
-5. `--business` URL or `https://<seller.domain>`, last resort.
+2. A permalink from `ucp permalink build` when the merchant advertises one — see **Handing off with a permalink** below. Prefer it over `checkout_url` when the buyer chose several items, quantities above one, or a discount code.
+3. Selected `variant.checkout_url` for merchant-hosted buy-now.
+4. Selected variant/product `url` (PDP). For cart errors, use this before seller homepage when no checkout URL exists.
+5. `seller.url` / seller homepage.
+6. `--business` URL or `https://<seller.domain>`, last resort.
 
 Blocking codes to treat this way:
 
@@ -299,6 +301,26 @@ Blocking codes to treat this way:
 - **`PROFILE_FETCH_FAILED`** — merchant doesn't speak UCP; tell the buyer and offer merchant-site navigation or global-catalog alternatives only with consent.
 
 State what you completed, what blocked you, and the handoff URL. The buyer keeps the value of your prep work and confirms where the protocol stopped supporting you.
+
+### Handing off with a permalink
+
+Merchants advertising `dev.ucp.shopping.permalink` accept a **link** that opens their cart with items, discount codes, and context already applied. `ucp permalink build` builds it locally from the same body you'd send to `cart create` — no request is made to the link, and opening it never places an order.
+
+```sh
+ucp permalink build --business https://<seller-domain> --input '{
+  "line_items": [{"item":{"id":"<variant_id>"},"quantity":1}, {"item":{"id":"<variant_id_2>"},"quantity":2}],
+  "discounts":  {"codes":["<code>"]},
+  "context":    {"postal_code":"<zip>"}
+}' --continue-to /collections/<handle>
+```
+
+- Give the buyer `result.url` and frame it as "your cart at \<merchant>", never as a completed purchase. Prices, availability, and discount validity are settled on the merchant's site.
+- Item ids are **variant** ids (`variants[M].id`); the CLI encodes Shopify GIDs for you. Other body fields become query parameters, so they must be request-shaped — never paste a cart/checkout *response* (ids, totals, status are refused).
+- **Field names come from `ucp cart create --input-schema`** (discount codes go in `discounts.codes`). The merchant silently drops fields it doesn't recognize when the link is opened, so the CLI checks the body against its cart schema: if `result.unrecognized_fields` is present, fix or remove those fields and rebuild before sharing.
+- **Permalink vs `continue_url`:** a permalink is stateless — every open starts a fresh cart, so it can be reused, printed, or sent to several people. A cart's `continue_url` resumes *that one* cart, including any buyer details on it. To let someone else buy the same basket, build a permalink from the same line items rather than forwarding `continue_url`.
+- Payment data, tokens, and secrets are always refused. Buyer fields (`buyer/email`, …) are refused unless you pass `--allow-buyer-prefill`; use it only for a link you send directly to that buyer, since links get shared and logged.
+- `result.fits` says which spec budgets the URL meets (`qr` ≤ 512, `sms` ≤ 1024, `email` ≤ 2048 octets); drop optional fields if the channel needs a shorter link. Project with `--view 'result.{url: url, fits: fits}'`, or pipe `--format json | jq -r .result.url` for the bare URL.
+- `CAPABILITY_NOT_OFFERED` means the merchant has no permalink endpoint — fall back to the next URL in the priority list above.
 
 ## Buyer named a specific merchant
 

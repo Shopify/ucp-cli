@@ -640,7 +640,7 @@ describe('emitted CLI error JSON', () => {
     })
 
     expect(wire.code).toBe('AGENT_PROFILE_SERVICE_UNDECLARED')
-    expect(wire.message).toContain('declared: [dev.ucp.shopping]')
+    expect(wire.message).toContain('declared: [dev.ucp.common, dev.ucp.shopping]')
     expect(wire.message).toContain('business offers: [com.other.x]')
     expect(wire.message).toContain('local profile')
     expect(wire.cta?.commands?.map((c) => c.command)).toContain('ucp profile show')

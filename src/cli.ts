@@ -7,7 +7,7 @@
 
 import { Cli, middleware, z } from 'incur'
 
-import { buildCta } from './cli/cta.js'
+import { buildCta, permalinkCta } from './cli/cta.js'
 import { type DoctorDeps, runDoctor } from './cli/doctor.js'
 import { buildOperationInput } from './cli/input.js'
 import { buildProfileCli, type ProfileCliDependencies } from './cli/profile.js'
@@ -28,9 +28,15 @@ import {
 } from './core/escalation.js'
 import { canonicalizeOrigin, type HeaderMap, resolveHeaders } from './core/headers.js'
 import { isDryRunPreview } from './core/operation.js'
+import {
+  buildPermalink,
+  PERMALINK_CAPABILITY,
+  resolvePermalinkEndpoint,
+  unrecognizedPermalinkFields,
+} from './core/permalink.js'
 import { listProfiles, readUserProfile } from './core/profile-store.js'
 import { describeProxyState } from './core/proxy.js'
-import { SUPPORTED_VERSIONS } from './core/releases.js'
+import { RELEASES, SUPPORTED_VERSIONS, type Version } from './core/releases.js'
 import { acceptsHttpsUrl, parseHttpsUrl } from './core/url.js'
 import { setVerboseWriter, vlog } from './core/verbose.js'
 import { ErrorCodes, UcpError } from './lib/errors.js'
@@ -721,6 +727,178 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
   })
 
   cli.command(order)
+
+  // `permalink build` constructs a `dev.ucp.shopping.permalink` URL locally: a
+  // browser handoff link, not an MCP operation, so it does not go through
+  // opRun/serviceOp and issues no tools/call.
+  //
+  // Surface decisions (see the PR for the full audit):
+  //   - Its own noun, not `cart create --permalink`: the capability is a
+  //     sibling of cart (dev.ucp.shopping.permalink), the business decides
+  //     whether the link lands on a cart, checkout, or session, and a mode
+  //     flag would swap discovery, validation, side effects, output shape,
+  //     and MCP annotations on a command that otherwise mutates state. The
+  //     body is identical to `cart create`, so switching is one noun.
+  //   - `build`, not `create`: nothing is created anywhere (the spec's own
+  //     verb is "builds the URL"), MCP clients and models read `*_create` as
+  //     a mutation, and `create` stays free for a server-minted link if UCP
+  //     ever defines one.
+  //
+  // Discovery: the business profile (for `config.endpoint`) is the only
+  // hard dependency. A second, best-effort discovery of `dev.ucp.shopping`
+  // checks the body against the business's create_cart schema, because a
+  // misspelled field (`discount_codes`) is silently dropped when the link is
+  // opened — there is no server response to report it. Business-scoped like
+  // cart: no meta.defaults.catalog fallback.
+  const permalink = Cli.create('permalink', {
+    description:
+      "Build a browser link that opens a business's cart with items, discounts, and context prefilled",
+  }).command('build', {
+    description:
+      'Build a dev.ucp.shopping.permalink URL from the same body as `cart create` (line_items with item.id + quantity; other fields become pointer query params, e.g. --set /discounts/codes/0=SPRING10). Local only: no request is made to the link, and opening it never places an order.',
+    mcp: { annotations: { readOnlyHint: true } },
+    args: argsEmpty,
+    options: z.object({
+      input: operationOptions.shape.input,
+      set: operationOptions.shape.set,
+      setString: operationOptions.shape.setString,
+      business: z
+        .string()
+        .optional()
+        .describe(
+          'Target business URL. Overrides UCP_BUSINESS / active.yaml; required if neither is set.',
+        ),
+      profile: operationOptions.shape.profile,
+      profileUrl: operationOptions.shape.profileUrl,
+      refresh: z
+        .boolean()
+        .default(false)
+        .describe(
+          'Bypass both cached discovery layers — the Business Profile and the tools/list used for the field check — and re-fetch them.',
+        ),
+      header: z
+        .array(z.string())
+        .default([])
+        .describe(
+          'Add an outbound HTTP header on the discovery requests. Repeatable. Format: --header "Name: Value". Never added to the link itself.',
+        ),
+      continueTo: z
+        .string()
+        .optional()
+        .describe(
+          'Same-origin path the business should land the buyer on after applying the link (continue_to), e.g. /collections/flats.',
+        ),
+      allowBuyerPrefill: z
+        .boolean()
+        .default(false)
+        .describe(
+          'Permit buyer/* fields (email, phone, name). Off by default because permalinks get shared, logged, and forwarded; use only for a link sent directly to that buyer.',
+        ),
+      view: z
+        .string()
+        .optional()
+        .describe(
+          "JMESPath projection applied to the whole envelope (the view output REPLACES the envelope; the CTA survives). Inline expression or `@<path>`, e.g. --view 'result.{url: url, fits: fits}'. No-op in --mcp mode.",
+        ),
+    }),
+    async run(c) {
+      const viewState =
+        c.options.view !== undefined && !inMcpMode
+          ? await resolveView({ raw: c.options.view, capability: 'permalink' })
+          : undefined
+      const session = await resolveSessionImpl(
+        omitUndefined({
+          business: c.options.business,
+          profile: c.options.profile,
+          profileUrl: c.options.profileUrl,
+        }),
+      )
+      const business = session.business
+      if (business === undefined) return c.error(businessNotResolvedError(inMcpMode))
+      // Parse the body BEFORE discovery so a malformed --input fails without
+      // a network round-trip.
+      const body = await buildOperationInput({
+        set: c.options.set,
+        setString: c.options.setString,
+        ...omitUndefined({ json: c.options.input }),
+      })
+      const headers = await resolveCallHeaders(c.options, session.profile, business)
+      const discovered = await discoverImpl(business, {
+        capabilities: [],
+        force: c.options.refresh,
+        profile: session.profile,
+        headers,
+      })
+      const { endpoint, version } = resolvePermalinkEndpoint({
+        capabilities: discovered.profile.ucp.capabilities,
+        version: discovered.protocol.version,
+        business: discovered.business,
+      })
+      const built = buildPermalink({
+        endpoint,
+        body,
+        allowBuyerPrefill: c.options.allowBuyerPrefill,
+        ...omitUndefined({ continueTo: c.options.continueTo }),
+      })
+      const unrecognized = await checkPermalinkFields({
+        business,
+        body,
+        version: discovered.protocol.version,
+        options: { force: c.options.refresh, profile: session.profile, headers },
+      })
+      const envelope = {
+        business: discovered.business,
+        result: {
+          capability: PERMALINK_CAPABILITY,
+          version,
+          ...built,
+          ...(unrecognized.length > 0 ? { unrecognized_fields: unrecognized } : {}),
+        },
+      }
+      return c.ok(applyView(envelope, viewState), {
+        cta: permalinkCta(built, { unrecognizedFields: unrecognized }),
+      })
+    },
+  })
+
+  // Best-effort: [] when the check cannot run (business serves no
+  // dev.ucp.shopping MCP, profile doesn't declare it, no create_cart tool,
+  // transport failure). The link is still valid without it, so a failure
+  // here never fails the command; `--verbose` says why it was skipped.
+  async function checkPermalinkFields(opts: {
+    business: string
+    body: Record<string, unknown>
+    version: Version
+    options: { force: boolean; profile: Profile; headers: HeaderMap }
+  }): Promise<string[]> {
+    try {
+      const shopping = await discoverImpl(opts.business, {
+        capabilities: ['dev.ucp.shopping'],
+        ...opts.options,
+      })
+      const tool = shopping.negotiated['dev.ucp.shopping']?.tools.create_cart
+      if (tool === undefined) {
+        vlog('permalink: field check skipped — business exposes no create_cart tool')
+        return []
+      }
+      const unrecognized = unrecognizedPermalinkFields({
+        createCartInputSchema: tool.inputSchema,
+        body: opts.body,
+        reverseDomainPattern: RELEASES[opts.version].reverseDomainPattern,
+      })
+      if (unrecognized === undefined) {
+        vlog('permalink: field check skipped — create_cart schema has no cart.properties')
+        return []
+      }
+      return unrecognized
+    } catch (err) {
+      if (!(err instanceof UcpError)) throw err
+      vlog(`permalink: field check skipped — ${err.code}: ${err.message}`)
+      return []
+    }
+  }
+
+  cli.command(permalink)
 
   // `profile *` is hidden from MCP clients per command in cli/profile.ts.
   cli.command(buildProfileCli(deps.profile ?? {}))
