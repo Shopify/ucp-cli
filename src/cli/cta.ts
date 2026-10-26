@@ -658,16 +658,21 @@ export function permalinkCta(
   const share = built.buyer_prefill
     ? 'Contains buyer prefill (buyer/*): send it only directly to that buyer — never post, broadcast, or log it. '
     : ''
+  // Over 2048 octets is refused in core/permalink.ts, so `fits` always has email.
   let length = ''
-  if (built.fits.length === 0) {
-    length = `At ${built.octets} octets the URL exceeds every spec budget (2048 max); drop optional fields or split items, since some channels and businesses truncate long URLs. `
-  } else if (!built.fits.includes('sms')) {
+  if (!built.fits.includes('sms')) {
     length = `At ${built.octets} octets it is too long for QR or SMS; use email or a direct handoff. `
   } else if (!built.fits.includes('qr')) {
     length = `At ${built.octets} octets it is too long for a QR code. `
   }
+  // The business routes a link it cannot fully apply (an unavailable item, an
+  // invalid code) to continue_to when one is set, so the buyer sees the
+  // landing page either way and only the cart reveals the problem.
+  const landing = built.fields.includes('continue_to')
+    ? 'Because continue_to is set, the buyer lands on that page even when the business cannot apply part of the link, so tell them to check their cart there. '
+    : ''
   return {
-    description: `${typo}${share}${length}Hand result.url to the buyer to open in a browser. The business builds a cart (or checkout) from it and redirects to its own page; it does not place an order, reserve stock, or confirm prices — the buyer reviews and pays on the business's site, where unavailable items or invalid discount codes surface. Each open starts a fresh cart, so the same link can be reused or shared. Present it as a link to the merchant, not as a completed purchase.`,
+    description: `${typo}${share}${length}${landing}Hand result.url to the buyer to open in a browser. The business builds a cart (or checkout) from it and redirects to its own page; it does not place an order, reserve stock, or confirm prices — the buyer reviews and pays on the business's site, where unavailable items or invalid discount codes surface. Each open starts a fresh cart, so the same link can be reused or shared. Present it as a link to the merchant, not as a completed purchase.`,
     commands: [
       {
         command: "ucp cart create --input '<same body>'",

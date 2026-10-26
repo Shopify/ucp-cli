@@ -32,6 +32,14 @@
 //   - any path segment that names a credential (token, secret, password, …)
 //   - `buyer/*` unless the caller opts in (spec: buyer prefill only for
 //     buyer-directed links, never broadly shared ones)
+//
+// Malformed links are refused too, because a Business answers them with a
+// plain fallback redirect and no cart — and when `continue_to` is set the
+// buyer lands on that page, so the failure looks like success. Checked
+// against Shopify's /buy parser: control characters anywhere, a Shopify GID
+// that is not a ProductVariant, a URL over 2048 octets, empty or duplicate
+// keys (a body `continue_to` next to --continue-to), and a --continue-to with
+// a query string all produce a link that silently loses the cart or a field.
 
 import { ErrorCodes, UcpError } from '../lib/errors.js'
 import { findUnknownPlainFields } from './operation.js'
@@ -43,6 +51,14 @@ const ENDPOINT_PATTERN = /^https:\/\/[^/?#\s\\@]+(?:\/[^?#\s\\]*[^/?#\s\\])?$/
 
 const RAW_ITEM_TOKEN = /^[A-Za-z0-9._-]+$/
 
+// Spec: a Business rejects item ids, field names, and values containing
+// control characters. Shopify's /buy matches `[[:cntrl:]]` (Unicode Cc).
+const CONTROL_CHARACTER = /\p{Cc}/u
+
+// Shopify resolves only ProductVariant GIDs (or bare numeric variant ids);
+// a Product GID — the easy one to copy from catalog results — yields no cart.
+const SHOPIFY_GID_TYPE = /^gid:\/\/shopify\/([^/]+)\//
+
 /**
  * Spec URL budgets (recommended maximums, UTF-8 octets). Ordered smallest
  * first so `fits` reads tightest-channel-first.
@@ -52,6 +68,10 @@ export const PERMALINK_BUDGETS = [
   { channel: 'sms', octets: 1024 },
   { channel: 'email', octets: 2048 },
 ] as const
+
+// The spec's largest budget is also a hard limit in practice: Shopify's /buy
+// answers a longer URL with its fallback redirect and builds no cart.
+const MAX_URL_OCTETS = 2048
 
 export type PermalinkChannel = (typeof PERMALINK_BUDGETS)[number]['channel']
 
@@ -95,7 +115,7 @@ export interface BuiltPermalink {
   fields: string[]
   /** UTF-8 octet length of `url`. */
   octets: number
-  /** Spec budgets the URL fits within, tightest first. Empty = over 2048 octets. */
+  /** Spec budgets the URL fits within, tightest first. Never empty: longer URLs are refused. */
   fits: PermalinkChannel[]
   /** True when `buyer/*` fields are present — only for buyer-directed channels. */
   buyer_prefill: boolean
@@ -111,19 +131,24 @@ export interface BuildPermalinkOptions {
   allowBuyerPrefill?: boolean
 }
 
-export function buildPermalink(options: BuildPermalinkOptions): BuiltPermalink {
-  const endpoint = options.endpoint
-  if (!isPermalinkEndpoint(endpoint)) {
-    // Callers pass the business-advertised value; a bad one is a merchant
-    // document defect, and `resolvePermalinkEndpoint` reports it as such.
-    // Reaching here means a library caller passed its own string.
-    throw new UcpError({
-      layer: 'client',
-      code: ErrorCodes.INVALID_INPUT,
-      message: `permalink endpoint must be an absolute https URL without query, fragment, userinfo, or trailing slash (got ${JSON.stringify(endpoint)})`,
-    })
-  }
+/** Validated items and query fields, before an endpoint is known. */
+export interface PreparedPermalink {
+  items: PermalinkItem[]
+  query: Array<[path: string[], value: string]>
+  buyerPrefill: boolean
+}
 
+export function buildPermalink(options: BuildPermalinkOptions): BuiltPermalink {
+  return assemblePermalink(options.endpoint, preparePermalink(options))
+}
+
+/**
+ * Apply every input refusal without an endpoint, so a caller can reject a bad
+ * body before discovery makes a network round-trip.
+ */
+export function preparePermalink(
+  options: Omit<BuildPermalinkOptions, 'endpoint'>,
+): PreparedPermalink {
   const { line_items: lineItems, ...rest } = options.body
   const items = compactItems(lineItems)
 
@@ -146,6 +171,11 @@ export function buildPermalink(options: BuildPermalinkOptions): BuiltPermalink {
   // but a caller that sends a payment (or totals, or a token) block at all has
   // pasted the wrong document and should hear about it.
   for (const key of Object.keys(rest)) {
+    if (key === 'continue_to') {
+      // Not a cart field, and a second `continue_to` next to --continue-to is
+      // a duplicate key the spec forbids (Shopify then drops both).
+      throw invalid('continue_to is not a body field; pass the landing path with --continue-to')
+    }
     assertAllowedPath([key], options.allowBuyerPrefill === true)
   }
   flatten(rest, [], query)
@@ -155,13 +185,33 @@ export function buildPermalink(options: BuildPermalinkOptions): BuiltPermalink {
     if (path[0] === 'buyer') buyerPrefill = true
     assertAllowedPath(path, options.allowBuyerPrefill === true)
   }
+  return { items, query, buyerPrefill }
+}
 
+export function assemblePermalink(endpoint: string, prepared: PreparedPermalink): BuiltPermalink {
+  if (!isPermalinkEndpoint(endpoint)) {
+    // Callers pass the business-advertised value; a bad one is a merchant
+    // document defect, and `resolvePermalinkEndpoint` reports it as such.
+    // Reaching here means a library caller passed its own string.
+    throw new UcpError({
+      layer: 'client',
+      code: ErrorCodes.INVALID_INPUT,
+      message: `permalink endpoint must be an absolute https URL without query, fragment, userinfo, or trailing slash (got ${JSON.stringify(endpoint)})`,
+    })
+  }
+
+  const { items, query } = prepared
   const itemPath = items.map((i) => `${i.token}:${i.quantity}`).join(',')
   const search = query
     .map(([path, value]) => `${path.map(encodeKeySegment).join('/')}=${encodeQueryValue(value)}`)
     .join('&')
   const url = `${endpoint}/${itemPath}${search.length > 0 ? `?${search}` : ''}`
   const octets = Buffer.byteLength(url, 'utf8')
+  if (octets > MAX_URL_OCTETS) {
+    throw invalid(
+      `the link is ${octets} octets, over the ${MAX_URL_OCTETS}-octet maximum; businesses such as Shopify open longer links without a cart. Drop optional fields or split the items across links`,
+    )
+  }
 
   return {
     url,
@@ -170,7 +220,7 @@ export function buildPermalink(options: BuildPermalinkOptions): BuiltPermalink {
     fields: query.map(([path]) => path.join('/')),
     octets,
     fits: PERMALINK_BUDGETS.filter((b) => octets <= b.octets).map((b) => b.channel),
-    buyer_prefill: buyerPrefill,
+    buyer_prefill: prepared.buyerPrefill,
   }
 }
 
@@ -189,28 +239,46 @@ export function isPermalinkEndpoint(value: unknown): value is string {
 
 /**
  * Body fields the business's create_cart schema does not list, as permalink
- * query paths (no leading `/`). The permalink spec applies "only fields its
- * Cart or Checkout schema accepts" and consumes the rest silently — live on
- * rothys.com, `discount_codes/0=…` and `discounts/codes/0=…` both 303 to a
- * cart, only one of them with the discount — so this is the only place a typo
- * can surface. create_cart (not create_checkout) is the reference because
- * checkout adds only `payment` and `cart_id`, neither of which belongs in a
- * permalink. Reverse-DNS extension keys pass, matching operation dispatch.
+ * query paths in the same spelling as `BuiltPermalink.fields`. The permalink
+ * spec applies "only fields its Cart or Checkout schema accepts" and consumes
+ * the rest silently — live on rothys.com, `discount_codes/0=…` and
+ * `discounts/codes/0=…` both 303 to a cart, only one of them with the
+ * discount — so this is the only place a typo can surface. create_cart (not
+ * create_checkout) is the reference because checkout adds only `payment` and
+ * `cart_id`, neither of which belongs in a permalink.
+ *
+ * Two differences from operation dispatch: reverse-DNS extension keys are not
+ * waved through, since the business drops any field its schema does not list
+ * (Shopify: FieldPathParser#ucp_root?); and `context/payment/<n>/handler` is
+ * skipped, since the permalink capability defines it, not the cart schema.
  *
  * Returns `undefined` when the schema has no inspectable `cart.properties`.
  */
 export function unrecognizedPermalinkFields(opts: {
   createCartInputSchema: unknown
   body: Record<string, unknown>
-  reverseDomainPattern: RegExp
 }): string[] | undefined {
   const root = opts.createCartInputSchema
   const cart =
     isPlainObject(root) && isPlainObject(root.properties) ? root.properties.cart : undefined
   if (!isPlainObject(cart) || !isPlainObject(cart.properties)) return undefined
-  return findUnknownPlainFields(cart, opts.body, '', opts.reverseDomainPattern).map((path) =>
-    path.slice(1),
+  return findUnknownPlainFields(cart, withoutPaymentHandler(opts.body), '', NO_EXTENSION_KEYS).map(
+    (pointer) =>
+      pointer
+        .slice(1)
+        .split('/')
+        .map((segment) => segment.replaceAll('~1', '/').replaceAll('~0', '~'))
+        .join('/'),
   )
+}
+
+const NO_EXTENSION_KEYS = /(?!)/
+
+function withoutPaymentHandler(body: Record<string, unknown>): Record<string, unknown> {
+  const { context } = body
+  if (!isPlainObject(context) || !Object.hasOwn(context, 'payment')) return body
+  const { payment: _payment, ...contextRest } = context
+  return { ...body, context: contextRest }
 }
 
 /**
@@ -275,6 +343,15 @@ function compactItems(lineItems: unknown): PermalinkItem[] {
     if (typeof id !== 'string' || id.length === 0) {
       throw invalid(`line_items/${index}/item/id must be a non-empty item (variant) id`)
     }
+    if (CONTROL_CHARACTER.test(id)) {
+      throw invalid(`line_items/${index}/item/id contains a control character`)
+    }
+    const gidType = SHOPIFY_GID_TYPE.exec(id)?.[1]
+    if (gidType !== undefined && gidType !== 'ProductVariant') {
+      throw invalid(
+        `line_items/${index}/item/id is a Shopify ${gidType} id; permalinks take variant ids (variants[M].id from catalog results), and any other id opens without a cart`,
+      )
+    }
     const quantity = (line as Record<string, unknown>).quantity
     if (typeof quantity !== 'number' || !Number.isSafeInteger(quantity) || quantity < 1) {
       throw invalid(
@@ -295,12 +372,32 @@ function flatten(value: unknown, path: string[], out: Array<[string[], string]>)
     return
   }
   if (isPlainObject(value)) {
-    for (const [key, child] of Object.entries(value)) flatten(child, [...path, key], out)
+    for (const [key, child] of Object.entries(value)) {
+      const childPath = [...path, key]
+      if (key.length === 0) throw invalid(`${childPath.join('/')} has an empty field name`)
+      if (CONTROL_CHARACTER.test(key)) {
+        throw invalid(`${JSON.stringify(childPath.join('/'))} contains a control character`)
+      }
+      flatten(child, childPath, out)
+    }
     return
+  }
+  if (typeof value === 'number' && !Number.isSafeInteger(value)) {
+    // `--set` JSON-parses its value, so `=1.50` arrives as 1.5 and a long
+    // numeric code loses digits; the link would carry the changed value.
+    throw invalid(
+      `${path.join('/')} is the JSON number ${value}, which may not be what was typed; pass it as a string (--set-string /${path.join('/')}=…)`,
+    )
   }
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
     const text = String(value)
     if (text.length === 0) throw invalid(`${path.join('/')} is empty; omit the field instead`)
+    if (CONTROL_CHARACTER.test(text)) {
+      // A newline or tab makes the whole link malformed, not just this field.
+      throw invalid(
+        `${path.join('/')} contains a control character (newline, tab, …); businesses reject the whole link`,
+      )
+    }
     out.push([path, text])
     return
   }
@@ -346,15 +443,17 @@ function assertAllowedPath(path: string[], allowBuyerPrefill: boolean): void {
 function validateContinueTo(value: string): string {
   // Same-origin path only (spec): `/collections/spring`, never a scheme,
   // protocol-relative `//host`, or backslash tricks. The Business validates
-  // again server-side; this just fails fast on the obvious cases.
+  // again server-side; this just fails fast on the obvious cases. Queries are
+  // refused too: Shopify keeps continue_to path-only and drops them silently.
   if (
     !value.startsWith('/') ||
     value.startsWith('//') ||
     value.includes('\\') ||
-    /[\s#]/.test(value)
+    /[\s#?]/.test(value) ||
+    CONTROL_CHARACTER.test(value)
   ) {
     throw invalid(
-      `--continue-to must be a same-origin path such as /collections/flats (got ${JSON.stringify(value)})`,
+      `--continue-to must be a same-origin path with no query string or fragment, such as /collections/flats (got ${JSON.stringify(value)})`,
     )
   }
   return value

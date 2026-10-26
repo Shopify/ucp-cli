@@ -1044,8 +1044,12 @@ describe('permalink CTA', () => {
     expect(permalinkCta({ ...base, octets: 1500, fits: ['email'] }).description).toMatch(
       /too long for QR or SMS/,
     )
-    expect(permalinkCta({ ...base, octets: 2100, fits: [] }).description).toMatch(
-      /exceeds every spec budget/,
-    )
+  })
+
+  it('warns that continue_to hides partial failures', () => {
+    expect(permalinkCta(base).description).not.toMatch(/continue_to is set/)
+    expect(
+      permalinkCta({ ...base, fields: ['continue_to'] }).description,
+    ).toMatch(/Because continue_to is set, the buyer lands on that page/)
   })
 })

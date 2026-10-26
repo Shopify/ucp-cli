@@ -29,14 +29,15 @@ import {
 import { canonicalizeOrigin, type HeaderMap, resolveHeaders } from './core/headers.js'
 import { isDryRunPreview } from './core/operation.js'
 import {
-  buildPermalink,
+  assemblePermalink,
   PERMALINK_CAPABILITY,
+  preparePermalink,
   resolvePermalinkEndpoint,
   unrecognizedPermalinkFields,
 } from './core/permalink.js'
 import { listProfiles, readUserProfile } from './core/profile-store.js'
 import { describeProxyState } from './core/proxy.js'
-import { RELEASES, SUPPORTED_VERSIONS, type Version } from './core/releases.js'
+import { SUPPORTED_VERSIONS } from './core/releases.js'
 import { acceptsHttpsUrl, parseHttpsUrl } from './core/url.js'
 import { setVerboseWriter, vlog } from './core/verbose.js'
 import { ErrorCodes, UcpError } from './lib/errors.js'
@@ -815,12 +816,17 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       )
       const business = session.business
       if (business === undefined) return c.error(businessNotResolvedError(inMcpMode))
-      // Parse the body BEFORE discovery so a malformed --input fails without
-      // a network round-trip.
+      // Parse and policy-check the body BEFORE discovery so a malformed or
+      // refused --input fails without a network round-trip.
       const body = await buildOperationInput({
         set: c.options.set,
         setString: c.options.setString,
         ...omitUndefined({ json: c.options.input }),
+      })
+      const prepared = preparePermalink({
+        body,
+        allowBuyerPrefill: c.options.allowBuyerPrefill,
+        ...omitUndefined({ continueTo: c.options.continueTo }),
       })
       const headers = await resolveCallHeaders(c.options, session.profile, business)
       const discovered = await discoverImpl(business, {
@@ -834,16 +840,10 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
         version: discovered.protocol.version,
         business: discovered.business,
       })
-      const built = buildPermalink({
-        endpoint,
-        body,
-        allowBuyerPrefill: c.options.allowBuyerPrefill,
-        ...omitUndefined({ continueTo: c.options.continueTo }),
-      })
+      const built = assemblePermalink(endpoint, prepared)
       const unrecognized = await checkPermalinkFields({
         business,
         body,
-        version: discovered.protocol.version,
         options: { force: c.options.refresh, profile: session.profile, headers },
       })
       const envelope = {
@@ -868,7 +868,6 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
   async function checkPermalinkFields(opts: {
     business: string
     body: Record<string, unknown>
-    version: Version
     options: { force: boolean; profile: Profile; headers: HeaderMap }
   }): Promise<string[]> {
     try {
@@ -884,7 +883,6 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       const unrecognized = unrecognizedPermalinkFields({
         createCartInputSchema: tool.inputSchema,
         body: opts.body,
-        reverseDomainPattern: RELEASES[opts.version].reverseDomainPattern,
       })
       if (unrecognized === undefined) {
         vlog('permalink: field check skipped — create_cart schema has no cart.properties')
@@ -892,8 +890,10 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
       }
       return unrecognized
     } catch (err) {
-      if (!(err instanceof UcpError)) throw err
-      vlog(`permalink: field check skipped — ${err.code}: ${err.message}`)
+      // Any failure, not only UcpError: a flaky tools/list can throw a plain
+      // TypeError or SyntaxError, and the link is already built.
+      const reason = err instanceof UcpError ? `${err.code}: ${err.message}` : String(err)
+      vlog(`permalink: field check skipped — ${reason}`)
       return []
     }
   }

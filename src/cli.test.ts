@@ -2315,8 +2315,9 @@ describe('createUcpCli — permalink build field check + output', () => {
     expect(exitCode).toBe(0)
     expect(calls[1]).toMatchObject([BUSINESS, { capabilities: ['dev.ucp.shopping'] }])
     const parsed = JSON.parse(output)
-    // Reverse-DNS extension keys pass, like operation dispatch.
-    expect(parsed.result.unrecognized_fields).toEqual(['discount_codes'])
+    // Unlike operation dispatch, reverse-DNS keys are flagged too: the
+    // business drops any field its schema does not list.
+    expect(parsed.result.unrecognized_fields).toEqual(['discount_codes', 'com.example.loyalty'])
     expect(parsed.cta.description).toMatch(/^FIX BEFORE SHARING/)
     expect(parsed.cta.description).toMatch(/"discount_codes"/)
     expect(parsed.cta.description).toMatch(/discounts\.codes/)
@@ -2355,6 +2356,34 @@ describe('createUcpCli — permalink build field check + output', () => {
     const parsed = JSON.parse(output)
     expect(parsed.result.url).toBe('https://rothys.example.com/buy/sku_1:1?discount_codes/0=W10')
     expect(parsed.result).not.toHaveProperty('unrecognized_fields')
+  })
+
+  it('skips the check without failing when the field check throws a non-UcpError', async () => {
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      discover: stub([], new TypeError('fetch failed')),
+    })
+    const { output, exitCode } = await serveCli(
+      cli,
+      argv('{"line_items":[{"item":{"id":"sku_1"},"quantity":1}]}'),
+    )
+    expect(exitCode).toBe(0)
+    expect(JSON.parse(output).result.url).toBe('https://rothys.example.com/buy/sku_1:1')
+  })
+
+  it('refuses a bad body before any discovery request', async () => {
+    const calls: unknown[] = []
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      discover: stub(calls, CART_SCHEMA),
+    })
+    const { output, exitCode } = await serveCli(
+      cli,
+      argv('{"line_items":[{"item":{"id":"sku_1"},"quantity":1}],"payment":{"instruments":[]}}'),
+    )
+    expect(exitCode).toBe(1)
+    expect(JSON.parse(output).code).toBe('INVALID_INPUT')
+    expect(calls).toEqual([])
   })
 
   it('--view result.url projects the envelope to the URL (CTA still rides along)', async () => {

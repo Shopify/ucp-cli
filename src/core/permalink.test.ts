@@ -120,7 +120,20 @@ describe('buildPermalink — URL grammar', () => {
       })
     expect(pad(600).fits).toEqual(['sms', 'email'])
     expect(pad(1500).fits).toEqual(['email'])
-    expect(pad(2100).fits).toEqual([])
+  })
+
+  it('refuses a URL over 2048 octets (Shopify opens it without a cart)', () => {
+    expect(() =>
+      buildPermalink({
+        endpoint: ENDPOINT,
+        body: { line_items: [line('a')], attribution: { ref: 'x'.repeat(2100) } },
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'INVALID_INPUT',
+        message: expect.stringMatching(/over the 2048-octet maximum/),
+      }),
+    )
   })
 })
 
@@ -136,14 +149,36 @@ describe('buildPermalink — input validation', () => {
     [{ line_items: [line('a', 1.5)] }, /positive integer/],
     [{ line_items: [line('a')], context: { postal_code: null } }, /context\/postal_code is null/],
     [{ line_items: [line('a')], context: { postal_code: '' } }, /context\/postal_code is empty/],
+    // Control characters make Shopify reject the whole link (no cart).
+    [{ line_items: [line('a')], attribution: { utm_content: 'a\nb' } }, /control character/],
+    [{ line_items: [line('a')], discounts: { codes: ['WELCOME\t10'] } }, /control character/],
+    [{ line_items: [line('a')], context: { 'postal\u0000code': '1' } }, /control character/],
+    [{ line_items: [line('a\u0007')] }, /line_items\/0\/item\/id contains a control character/],
+    // Shopify resolves only ProductVariant GIDs.
+    [{ line_items: [line('gid://shopify/Product/7474412290142')] }, /Shopify Product id/],
+    [{ line_items: [line('a')], '': 'x' }, /empty field name/],
+    [{ line_items: [line('a')], context: { '': 'x' } }, /context\/ has an empty field name/],
+    // `--set` JSON-parses values: 1.50 → 1.5, long codes lose digits.
+    [{ line_items: [line('a')], discounts: { codes: [1.5] } }, /--set-string/],
+    [{ line_items: [line('a')], discounts: { codes: [12345678901234567000] } }, /--set-string/],
+    [{ line_items: [line('a')], continue_to: '/collections/flats' }, /--continue-to/],
   ])('%j → INVALID_INPUT', (body, message) => {
     expect(() => buildPermalink({ endpoint: ENDPOINT, body })).toThrowError(
       expect.objectContaining({ code: 'INVALID_INPUT', message: expect.stringMatching(message) }),
     )
   })
 
-  it.each(['collections/flats', '//evil.example/x', 'https://evil.example', '/a\\b', '/a b'])(
-    'rejects --continue-to %j (same-origin path only)',
+  it.each([
+    'collections/flats',
+    '//evil.example/x',
+    'https://evil.example',
+    '/a\\b',
+    '/a b',
+    '/collections/flats?filter.v.option.size=8',
+    '/a#top',
+    '/a\u0000b',
+  ])(
+    'rejects --continue-to %j (same-origin path, no query or fragment)',
     (continueTo) => {
       expect(() =>
         buildPermalink({ endpoint: ENDPOINT, continueTo, body: { line_items: [line('a')] } }),
@@ -167,6 +202,17 @@ describe('buildPermalink — refusal policy', () => {
   it('refuses payment blocks, even empty ones', () => {
     refuse({ payment: { instruments: [{ credential: { token: 'tok_1' } }] } }, /payment/)
     refuse({ payment: { instruments: [] } }, /payment instruments and credentials/)
+  })
+
+  it('accepts Shopify ProductVariant GIDs and safe integers', () => {
+    const built = buildPermalink({
+      endpoint: ENDPOINT,
+      body: {
+        line_items: [line('gid://shopify/ProductVariant/42103178002526')],
+        context: { eligibility: [1000] },
+      },
+    })
+    expect(built.fields).toEqual(['context/eligibility/0'])
   })
 
   it('allows only a handler preference under context/payment', () => {
@@ -275,7 +321,6 @@ describe('resolvePermalinkEndpoint', () => {
 })
 
 describe('unrecognizedPermalinkFields', () => {
-  const REVERSE_DNS = /^[a-z][a-z0-9-]*(?:\.[a-z0-9][a-z0-9_-]*)+$/
   // Trimmed from rothys.com's live create_cart inputSchema.
   const CREATE_CART = {
     type: 'object',
@@ -304,11 +349,7 @@ describe('unrecognizedPermalinkFields', () => {
     },
   }
   const check = (body: Record<string, unknown>, schema: unknown = CREATE_CART) =>
-    unrecognizedPermalinkFields({
-      createCartInputSchema: schema,
-      body,
-      reverseDomainPattern: REVERSE_DNS,
-    })
+    unrecognizedPermalinkFields({ createCartInputSchema: schema, body })
 
   it('returns [] for a body using only listed fields', () => {
     expect(
@@ -330,10 +371,36 @@ describe('unrecognizedPermalinkFields', () => {
     ).toEqual(['line_items/0/qty', 'discount_codes', 'discounts/code'])
   })
 
-  it('lets reverse-DNS extension keys through', () => {
+  it('flags reverse-DNS extension keys the schema does not list (the business drops them)', () => {
     expect(
-      check({ line_items: [{ item: { id: 'a' }, quantity: 1 }], 'com.example.loyalty': {} }),
+      check({
+        line_items: [{ item: { id: 'a' }, quantity: 1 }],
+        'com.example.loyalty': { tier: 'gold' },
+      }),
+    ).toEqual(['com.example.loyalty'])
+  })
+
+  it('skips context/payment/<n>/handler, which the permalink capability defines', () => {
+    const schema = structuredClone(CREATE_CART)
+    schema.properties.cart.properties.context = {
+      type: 'object',
+      properties: { postal_code: { type: 'string' } },
+    } as typeof schema.properties.cart.properties.context
+    expect(
+      check(
+        {
+          line_items: [{ item: { id: 'a' }, quantity: 1 }],
+          context: { postal_code: '10001', payment: [{ handler: 'shop_pay' }] },
+        },
+        schema,
+      ),
     ).toEqual([])
+  })
+
+  it('spells paths like BuiltPermalink.fields (unescaped segments)', () => {
+    expect(
+      check({ line_items: [{ item: { id: 'a' }, quantity: 1 }], 'a/b~c': 'x' }),
+    ).toEqual(['a/b~c'])
   })
 
   it('returns undefined when the schema has no inspectable cart.properties', () => {
