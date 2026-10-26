@@ -840,7 +840,7 @@ export function createUcpCli(deps: UcpCliDependencies = {}) {
         version: discovered.protocol.version,
         business: discovered.business,
       })
-      const built = assemblePermalink(endpoint, prepared)
+      const built = assemblePermalink(endpoint, prepared, { version })
       const unrecognized = await checkPermalinkFields({
         business,
         body,

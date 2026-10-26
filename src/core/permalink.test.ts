@@ -122,6 +122,18 @@ describe('buildPermalink — URL grammar', () => {
     expect(pad(1500).fits).toEqual(['email'])
   })
 
+  it('pins ucp/version last when a version is given', () => {
+    const built = buildPermalink({
+      endpoint: ENDPOINT,
+      version: '2026-08-25',
+      body: { line_items: [line('a')], discounts: { codes: ['W10'] } },
+    })
+    expect(built.url).toBe(
+      'https://merchant.example/buy/a:1?discounts/codes/0=W10&ucp/version=2026-08-25',
+    )
+    expect(built.fields).toEqual(['discounts/codes/0', 'ucp/version'])
+  })
+
   it('refuses a URL over 2048 octets (Shopify opens it without a cart)', () => {
     expect(() =>
       buildPermalink({

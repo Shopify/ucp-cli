@@ -321,6 +321,7 @@ ucp permalink build --business https://<seller-domain> --input '{
 - Payment data, tokens, and secrets are always refused. Buyer fields (`buyer/email`, …) are refused unless you pass `--allow-buyer-prefill`; use it only for a link you send directly to that buyer, since links get shared and logged.
 - `result.fits` says which spec budgets the URL meets (`qr` ≤ 512, `sms` ≤ 1024, `email` ≤ 2048 octets); drop optional fields if the channel needs a shorter link. Links over 2048 octets are refused, as are values with a newline or tab, because the merchant would open them with no cart.
 - With `--continue-to`, the buyer lands on that page even when part of the link fails (an unavailable item, an invalid code), so tell them to check their cart there. Pass a path only: query strings are refused. Project with `--view 'result.{url: url, fits: fits}'`, or pipe `--format json | jq -r .result.url` for the bare URL.
+- The link ends in `ucp/version=<release>`, pinning the release its fields were checked against. Long-lived links (print, QR) stop working when the merchant retires that release; rebuild them then.
 - `CAPABILITY_NOT_OFFERED` means the merchant has no permalink endpoint — fall back to the next URL in the priority list above.
 
 ## Buyer named a specific merchant

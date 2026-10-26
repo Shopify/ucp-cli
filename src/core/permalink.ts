@@ -129,6 +129,8 @@ export interface BuildPermalinkOptions {
   continueTo?: string
   /** Permit `buyer/*` prefill fields. Off by default. */
   allowBuyerPrefill?: boolean
+  /** UCP release the body was checked against, pinned as `ucp/version`. */
+  version?: string
 }
 
 /** Validated items and query fields, before an endpoint is known. */
@@ -139,7 +141,11 @@ export interface PreparedPermalink {
 }
 
 export function buildPermalink(options: BuildPermalinkOptions): BuiltPermalink {
-  return assemblePermalink(options.endpoint, preparePermalink(options))
+  return assemblePermalink(
+    options.endpoint,
+    preparePermalink(options),
+    options.version === undefined ? {} : { version: options.version },
+  )
 }
 
 /**
@@ -188,7 +194,18 @@ export function preparePermalink(
   return { items, query, buyerPrefill }
 }
 
-export function assemblePermalink(endpoint: string, prepared: PreparedPermalink): BuiltPermalink {
+// `ucp/version` pins the release the link is read at. The 2026-08-25 spec
+// does not define it, but Shopify's /buy does: without it the link is read
+// at Shopify's default release, which can move past the one the field check
+// used and silently drop renamed fields. A pinned link stops working when
+// Shopify retires that release — a planned, announced event instead of a
+// silent drift. Other businesses treat it as a non-UCP parameter. The body
+// cannot set it (`ucp` is server-owned), so it is never duplicated.
+export function assemblePermalink(
+  endpoint: string,
+  prepared: PreparedPermalink,
+  opts: { version?: string } = {},
+): BuiltPermalink {
   if (!isPermalinkEndpoint(endpoint)) {
     // Callers pass the business-advertised value; a bad one is a merchant
     // document defect, and `resolvePermalinkEndpoint` reports it as such.
@@ -200,7 +217,11 @@ export function assemblePermalink(endpoint: string, prepared: PreparedPermalink)
     })
   }
 
-  const { items, query } = prepared
+  const { items } = prepared
+  const query =
+    opts.version === undefined
+      ? prepared.query
+      : [...prepared.query, [['ucp', 'version'], opts.version] as [string[], string]]
   const itemPath = items.map((i) => `${i.token}:${i.quantity}`).join(',')
   const search = query
     .map(([path, value]) => `${path.map(encodeKeySegment).join('/')}=${encodeQueryValue(value)}`)

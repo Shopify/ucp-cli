@@ -2150,7 +2150,7 @@ describe('createUcpCli — permalink build', () => {
         capability: 'dev.ucp.shopping.permalink',
         version: '2026-08-25',
         endpoint: 'https://rothys.example.com/buy',
-        url: 'https://rothys.example.com/buy/~Z2lkOi8vc2hvcGlmeS9Qcm9kdWN0VmFyaWFudC80MjEwMzE3ODAwMjUyNg:2?continue_to=/collections/flats&discounts/codes/0=WELCOME10&context/postal_code=10012',
+        url: 'https://rothys.example.com/buy/~Z2lkOi8vc2hvcGlmeS9Qcm9kdWN0VmFyaWFudC80MjEwMzE3ODAwMjUyNg:2?continue_to=/collections/flats&discounts/codes/0=WELCOME10&context/postal_code=10012&ucp/version=2026-08-25',
         fits: ['qr', 'sms', 'email'],
         buyer_prefill: false,
       },
@@ -2354,7 +2354,9 @@ describe('createUcpCli — permalink build field check + output', () => {
     )
     expect(exitCode).toBe(0)
     const parsed = JSON.parse(output)
-    expect(parsed.result.url).toBe('https://rothys.example.com/buy/sku_1:1?discount_codes/0=W10')
+    expect(parsed.result.url).toBe(
+      'https://rothys.example.com/buy/sku_1:1?discount_codes/0=W10&ucp/version=2026-08-25',
+    )
     expect(parsed.result).not.toHaveProperty('unrecognized_fields')
   })
 
@@ -2368,7 +2370,9 @@ describe('createUcpCli — permalink build field check + output', () => {
       argv('{"line_items":[{"item":{"id":"sku_1"},"quantity":1}]}'),
     )
     expect(exitCode).toBe(0)
-    expect(JSON.parse(output).result.url).toBe('https://rothys.example.com/buy/sku_1:1')
+    expect(JSON.parse(output).result.url).toBe(
+      'https://rothys.example.com/buy/sku_1:1?ucp/version=2026-08-25',
+    )
   })
 
   it('refuses a bad body before any discovery request', async () => {
@@ -2397,7 +2401,7 @@ describe('createUcpCli — permalink build field check + output', () => {
     )
     expect(exitCode).toBe(0)
     const parsed = JSON.parse(output)
-    expect(parsed.data).toBe('https://rothys.example.com/buy/sku_1:2')
+    expect(parsed.data).toBe('https://rothys.example.com/buy/sku_1:2?ucp/version=2026-08-25')
     expect(parsed.cta.description).toMatch(/does not place an order/)
   })
 
