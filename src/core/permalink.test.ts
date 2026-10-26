@@ -189,14 +189,11 @@ describe('buildPermalink — input validation', () => {
     '/collections/flats?filter.v.option.size=8',
     '/a#top',
     '/a\u0000b',
-  ])(
-    'rejects --continue-to %j (same-origin path, no query or fragment)',
-    (continueTo) => {
-      expect(() =>
-        buildPermalink({ endpoint: ENDPOINT, continueTo, body: { line_items: [line('a')] } }),
-      ).toThrowError(expect.objectContaining({ code: 'INVALID_INPUT' }))
-    },
-  )
+  ])('rejects --continue-to %j (same-origin path, no query or fragment)', (continueTo) => {
+    expect(() =>
+      buildPermalink({ endpoint: ENDPOINT, continueTo, body: { line_items: [line('a')] } }),
+    ).toThrowError(expect.objectContaining({ code: 'INVALID_INPUT' }))
+  })
 })
 
 describe('buildPermalink — refusal policy', () => {
@@ -410,9 +407,9 @@ describe('unrecognizedPermalinkFields', () => {
   })
 
   it('spells paths like BuiltPermalink.fields (unescaped segments)', () => {
-    expect(
-      check({ line_items: [{ item: { id: 'a' }, quantity: 1 }], 'a/b~c': 'x' }),
-    ).toEqual(['a/b~c'])
+    expect(check({ line_items: [{ item: { id: 'a' }, quantity: 1 }], 'a/b~c': 'x' })).toEqual([
+      'a/b~c',
+    ])
   })
 
   it('returns undefined when the schema has no inspectable cart.properties', () => {

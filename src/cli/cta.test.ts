@@ -1048,8 +1048,8 @@ describe('permalink CTA', () => {
 
   it('warns that continue_to hides partial failures', () => {
     expect(permalinkCta(base).description).not.toMatch(/continue_to is set/)
-    expect(
-      permalinkCta({ ...base, fields: ['continue_to'] }).description,
-    ).toMatch(/Because continue_to is set, the buyer lands on that page/)
+    expect(permalinkCta({ ...base, fields: ['continue_to'] }).description).toMatch(
+      /Because continue_to is set, the buyer lands on that page/,
+    )
   })
 })
