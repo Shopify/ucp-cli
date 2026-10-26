@@ -448,7 +448,13 @@ function formatUnknownFields(fields: string[]): string {
   return `${shown}, +${fields.length - 5} more`
 }
 
-function findUnknownPlainFields(
+/**
+ * JSON Pointer paths of plain (non-reverse-DNS) keys in `value` that `schema`
+ * does not list. Exported for `permalink build`, which checks its body against
+ * the business's create_cart schema: a permalink has no server round-trip to
+ * report a misspelled field, so the business silently drops it.
+ */
+export function findUnknownPlainFields(
   schema: unknown,
   value: unknown,
   path: string,

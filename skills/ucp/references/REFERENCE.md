@@ -64,10 +64,11 @@ Branch on the full `code`; CTAs are advisory. `PROFILE_FETCH_FAILED` and `PROFIL
 | `SCHEMA_VALIDATION_FAILED` | Operation input or an explicitly selected local Profile file is schema-invalid | Read `message` and `cta`; only operation-input failures use `--input-schema` |
 | `BUSINESS_NOT_RESOLVED` | Operation needs a merchant; none resolved | Pass `--business <url>`, or `ucp use <url>` for the session. Catalog ops fall back to the global catalog automatically |
 | `OPERATION_NOT_OFFERED` | Merchant doesn't expose this operation | `ucp discover --business <url>` to see what's offered |
-| `CAPABILITY_NOT_OFFERED` | Merchant doesn't advertise the requested service id — **including when your profile also lacks it** (a typo is not a profile problem) | Check the id against `ucp discover --business <url>` |
+| `CAPABILITY_NOT_OFFERED` | Merchant doesn't advertise the requested service id — **including when your profile also lacks it** (a typo is not a profile problem) — or, for `permalink build`, doesn't advertise `dev.ucp.shopping.permalink` at the negotiated release | Check the id against `ucp discover --business <url>`; for permalinks, hand off with the next URL in SKILL.md's priority list |
 | `PROFILE_FETCH_FAILED` | Merchant doesn't speak UCP (or `.well-known/ucp` is unreachable) | Surface to buyer; offer non-UCP fallback (other tools, navigation, alternate merchants with consent) |
 | `PROTOCOL_VERSION_INCOMPATIBLE` | Business and effective Profile share no exact release | Read both sets in `message`; see [SETUP](SETUP.md#selection-and-profile-url-overrides) for intentional selection changes |
 | `PROFILE_VERSION_MISMATCH` | A Business Profile contradicts its claimed release | Business-side fault; surface it |
+| `PROFILE_SCHEMA_INVALID` | A Business Profile fails its release schema, or advertises a capability with an unusable config (e.g. a malformed permalink `config.endpoint`) | Business-side fault; surface it and hand off by another route |
 | `NO_COMPATIBLE_TRANSPORT` | Right version, no transport both sides can speak | `message` names all three sets (merchant offers / profile declares / ucp-cli supports). Not fixable mid-task |
 | `SERVICE_VERSION_INCOMPATIBLE` | Requested service versions do not intersect | Select or repair an intentional Profile, or use another Business |
 | `AGENT_PROFILE_UNREACHABLE` | Advertised Profile URL cannot be fetched or used | Run `ucp doctor`; repair hosting or Profile selection in [SETUP](SETUP.md) |

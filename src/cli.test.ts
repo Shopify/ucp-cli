@@ -2080,3 +2080,343 @@ describe('isSkillsAddInvocation — incur alias awareness', () => {
     expect(isSkillsAddInvocation(['cart', 'create'])).toBe(false)
   })
 })
+
+describe('createUcpCli — permalink build', () => {
+  const BUSINESS = 'https://rothys.example.com'
+  const GID = 'gid://shopify/ProductVariant/42103178002526'
+
+  const discoverWith = (capabilities: Record<string, unknown>, calls: unknown[] = []) =>
+    (async (...args: Parameters<typeof import('./core/discover.js').discover>) => {
+      calls.push(args)
+      return {
+        business: args[0],
+        profile: {
+          ucp: {
+            version: '2026-08-25',
+            status: 'success',
+            services: {},
+            capabilities,
+            payment_handlers: {},
+          },
+        },
+        protocol: {
+          version: '2026-08-25',
+          source: 'well-known',
+          agentProfileUrl: PROFILE_URL,
+          businessProfileUrl: `${args[0]}/.well-known/ucp`,
+        },
+        expectedCapabilities: [],
+        negotiated: {},
+      }
+    }) as never
+
+  const PERMALINK = {
+    'dev.ucp.shopping.permalink': [
+      { version: '2026-08-25', config: { endpoint: 'https://rothys.example.com/buy' } },
+    ],
+  }
+
+  it('builds the URL from the advertised endpoint with profile-only discovery', async () => {
+    const calls: unknown[] = []
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      discover: discoverWith(PERMALINK, calls),
+    })
+    const { output, exitCode } = await serveCli(cli, [
+      'permalink',
+      'build',
+      '--business',
+      BUSINESS,
+      '--set',
+      `/line_items/0/item/id=${GID}`,
+      '--set',
+      '/line_items/0/quantity=2',
+      '--set',
+      '/discounts/codes/0=WELCOME10',
+      '--set-string',
+      '/context/postal_code=10012',
+      '--continue-to',
+      '/collections/flats',
+    ])
+
+    expect(exitCode).toBe(0)
+    // Empty capability list: the business profile is all a permalink needs,
+    // so discovery must not hydrate tools/list for any service.
+    expect(calls[0]).toMatchObject([BUSINESS, { capabilities: [], profile: RUNTIME_PROFILE }])
+    const parsed = JSON.parse(output)
+    expect(parsed).toMatchObject({
+      business: BUSINESS,
+      result: {
+        capability: 'dev.ucp.shopping.permalink',
+        version: '2026-08-25',
+        endpoint: 'https://rothys.example.com/buy',
+        url: 'https://rothys.example.com/buy/~Z2lkOi8vc2hvcGlmeS9Qcm9kdWN0VmFyaWFudC80MjEwMzE3ODAwMjUyNg:2?continue_to=/collections/flats&discounts/codes/0=WELCOME10&context/postal_code=10012&ucp/version=2026-08-25',
+        fits: ['qr', 'sms', 'email'],
+        buyer_prefill: false,
+      },
+    })
+    expect(parsed.cta.description).toMatch(/does not place an order/)
+    expect(parsed.cta.description).not.toMatch(/buyer prefill/)
+  })
+
+  it('refuses buyer prefill unless --allow-buyer-prefill, then warns in the CTA', async () => {
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      discover: discoverWith(PERMALINK),
+    })
+    const argv = [
+      'permalink',
+      'build',
+      '--business',
+      BUSINESS,
+      '--input',
+      '{"line_items":[{"item":{"id":"sku_1"},"quantity":1}],"buyer":{"email":"alice@foo.com"}}',
+    ]
+    const refused = await serveCli(cli, argv)
+    expect(refused.exitCode).toBe(1)
+    expect(JSON.parse(refused.output)).toMatchObject({ code: 'INVALID_INPUT' })
+
+    const allowed = await serveCli(cli, [...argv, '--allow-buyer-prefill'])
+    expect(allowed.exitCode).toBe(0)
+    const parsed = JSON.parse(allowed.output)
+    expect(parsed.result.url).toContain('buyer/email=alice%40foo.com')
+    expect(parsed.result.buyer_prefill).toBe(true)
+    expect(parsed.cta.description).toMatch(/send it only directly to that buyer/)
+  })
+
+  it('CAPABILITY_NOT_OFFERED when the business does not advertise permalinks', async () => {
+    const cli = createUcpCli({ resolveSession: passthroughSession, discover: discoverWith({}) })
+    const { output, exitCode } = await serveCli(cli, [
+      'permalink',
+      'build',
+      '--business',
+      BUSINESS,
+      '--set',
+      '/line_items/0/item/id=sku_1',
+      '--set',
+      '/line_items/0/quantity=1',
+    ])
+    expect(exitCode).toBe(1)
+    expect(JSON.parse(output).code).toBe('CAPABILITY_NOT_OFFERED')
+  })
+
+  it('requires a resolved business and fails a malformed body before discovery', async () => {
+    const calls: unknown[] = []
+    const noBusiness = createUcpCli({
+      resolveSession: async () => ({ profile: RUNTIME_PROFILE, profileMeta: {} }),
+      discover: discoverWith(PERMALINK, calls),
+    })
+    const unresolved = await serveCli(noBusiness, ['permalink', 'build'])
+    expect(unresolved.exitCode).toBe(1)
+    expect(JSON.parse(unresolved.output).code).toBe('BUSINESS_NOT_RESOLVED')
+
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      discover: discoverWith(PERMALINK, calls),
+    })
+    const malformed = await serveCli(cli, [
+      'permalink',
+      'build',
+      '--business',
+      BUSINESS,
+      '--input',
+      '{"line_items": [',
+    ])
+    expect(malformed.exitCode).toBe(1)
+    expect(calls).toEqual([])
+  })
+})
+
+describe('createUcpCli — permalink build field check + output', () => {
+  const BUSINESS = 'https://rothys.example.com'
+  const PERMALINK = {
+    'dev.ucp.shopping.permalink': [
+      { version: '2026-08-25', config: { endpoint: 'https://rothys.example.com/buy' } },
+    ],
+  }
+  const CART_SCHEMA = {
+    create_cart: {
+      name: 'create_cart',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          cart: {
+            type: 'object',
+            properties: {
+              line_items: { type: 'array' },
+              discounts: { type: 'object', properties: { codes: { type: 'array' } } },
+              attribution: { type: 'object' },
+            },
+          },
+        },
+      },
+    },
+  }
+  const stub = (calls: unknown[], shopping?: typeof CART_SCHEMA | Error) =>
+    (async (...args: Parameters<typeof import('./core/discover.js').discover>) => {
+      calls.push(args)
+      const wantsShopping = args[1]?.capabilities?.includes('dev.ucp.shopping') === true
+      if (wantsShopping && shopping instanceof Error) throw shopping
+      return {
+        business: args[0],
+        profile: {
+          ucp: {
+            version: '2026-08-25',
+            status: 'success',
+            services: {},
+            capabilities: PERMALINK,
+            payment_handlers: {},
+          },
+        },
+        protocol: {
+          version: '2026-08-25',
+          source: 'well-known',
+          agentProfileUrl: PROFILE_URL,
+          businessProfileUrl: `${args[0]}/.well-known/ucp`,
+        },
+        expectedCapabilities: [],
+        negotiated:
+          wantsShopping && shopping !== undefined && !(shopping instanceof Error)
+            ? {
+                'dev.ucp.shopping': {
+                  capability: 'dev.ucp.shopping',
+                  version: '2026-08-25',
+                  transport: 'mcp',
+                  endpoint: `${args[0]}/api/ucp/mcp`,
+                  tools: shopping,
+                },
+              }
+            : {},
+      }
+    }) as never
+  const argv = (body: string, ...extra: string[]) => [
+    'permalink',
+    'build',
+    '--business',
+    BUSINESS,
+    '--input',
+    body,
+    ...extra,
+  ]
+
+  it('flags fields the create_cart schema does not list (a silently dropped discount)', async () => {
+    const calls: unknown[] = []
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      discover: stub(calls, CART_SCHEMA),
+    })
+    const { output, exitCode } = await serveCli(
+      cli,
+      argv(
+        '{"line_items":[{"item":{"id":"sku_1"},"quantity":1}],"discount_codes":["WELCOME10"],"com.example.loyalty":{"tier":"gold"}}',
+      ),
+    )
+    // Still succeeds — the link is valid; the business is the authority.
+    expect(exitCode).toBe(0)
+    expect(calls[1]).toMatchObject([BUSINESS, { capabilities: ['dev.ucp.shopping'] }])
+    const parsed = JSON.parse(output)
+    // Unlike operation dispatch, reverse-DNS keys are flagged too: the
+    // business drops any field its schema does not list.
+    expect(parsed.result.unrecognized_fields).toEqual(['discount_codes', 'com.example.loyalty'])
+    expect(parsed.cta.description).toMatch(/^FIX BEFORE SHARING/)
+    expect(parsed.cta.description).toMatch(/"discount_codes"/)
+    expect(parsed.cta.description).toMatch(/discounts\.codes/)
+  })
+
+  it('omits unrecognized_fields when every field is listed', async () => {
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      discover: stub([], CART_SCHEMA),
+    })
+    const { output } = await serveCli(
+      cli,
+      argv('{"line_items":[{"item":{"id":"sku_1"},"quantity":1}],"discounts":{"codes":["W10"]}}'),
+    )
+    const parsed = JSON.parse(output)
+    expect(parsed.result).not.toHaveProperty('unrecognized_fields')
+    expect(parsed.cta.description).not.toMatch(/FIX BEFORE SHARING/)
+  })
+
+  it('skips the check without failing when dev.ucp.shopping cannot be discovered', async () => {
+    const { UcpError, ErrorCodes } = await import('./lib/errors.js')
+    const unavailable = new UcpError({
+      layer: 'transport',
+      code: ErrorCodes.CAPABILITY_NOT_OFFERED,
+      message: 'business does not advertise capability "dev.ucp.shopping"',
+    })
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      discover: stub([], unavailable),
+    })
+    const { output, exitCode } = await serveCli(
+      cli,
+      argv('{"line_items":[{"item":{"id":"sku_1"},"quantity":1}],"discount_codes":["W10"]}'),
+    )
+    expect(exitCode).toBe(0)
+    const parsed = JSON.parse(output)
+    expect(parsed.result.url).toBe(
+      'https://rothys.example.com/buy/sku_1:1?discount_codes/0=W10&ucp/version=2026-08-25',
+    )
+    expect(parsed.result).not.toHaveProperty('unrecognized_fields')
+  })
+
+  it('skips the check without failing when the field check throws a non-UcpError', async () => {
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      discover: stub([], new TypeError('fetch failed')),
+    })
+    const { output, exitCode } = await serveCli(
+      cli,
+      argv('{"line_items":[{"item":{"id":"sku_1"},"quantity":1}]}'),
+    )
+    expect(exitCode).toBe(0)
+    expect(JSON.parse(output).result.url).toBe(
+      'https://rothys.example.com/buy/sku_1:1?ucp/version=2026-08-25',
+    )
+  })
+
+  it('refuses a bad body before any discovery request', async () => {
+    const calls: unknown[] = []
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      discover: stub(calls, CART_SCHEMA),
+    })
+    const { output, exitCode } = await serveCli(
+      cli,
+      argv('{"line_items":[{"item":{"id":"sku_1"},"quantity":1}],"payment":{"instruments":[]}}'),
+    )
+    expect(exitCode).toBe(1)
+    expect(JSON.parse(output).code).toBe('INVALID_INPUT')
+    expect(calls).toEqual([])
+  })
+
+  it('--view result.url projects the envelope to the URL (CTA still rides along)', async () => {
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      discover: stub([], CART_SCHEMA),
+    })
+    const { output, exitCode } = await serveCli(
+      cli,
+      argv('{"line_items":[{"item":{"id":"sku_1"},"quantity":2}]}', '--view', 'result.url'),
+    )
+    expect(exitCode).toBe(0)
+    const parsed = JSON.parse(output)
+    expect(parsed.data).toBe('https://rothys.example.com/buy/sku_1:2?ucp/version=2026-08-25')
+    expect(parsed.cta.description).toMatch(/does not place an order/)
+  })
+
+  it('rejects --view :alias (no package views ship for permalink)', async () => {
+    const calls: unknown[] = []
+    const cli = createUcpCli({
+      resolveSession: passthroughSession,
+      discover: stub(calls, CART_SCHEMA),
+    })
+    const { output, exitCode } = await serveCli(
+      cli,
+      argv('{"line_items":[{"item":{"id":"sku_1"},"quantity":1}]}', '--view', ':compact'),
+    )
+    expect(exitCode).toBe(1)
+    expect(JSON.parse(output).code).toBe('INVALID_INPUT')
+    expect(calls).toEqual([])
+  })
+})

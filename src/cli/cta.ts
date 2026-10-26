@@ -33,6 +33,7 @@
 // elsewhere; CTAs are the only place that should be reading unknown
 // response shapes defensively.
 
+import type { BuiltPermalink } from '../core/permalink.js'
 import type { CtaBlock } from '../lib/types.js'
 
 // ─── Section 1 — Universal parsers ─────────────────────────────────────────
@@ -634,6 +635,51 @@ function orderCta(result: unknown): CtaBlock | undefined {
     description:
       'Order is read-only. Summarize buyer-facing fulfillment from result.fulfillment.expectations and result.fulfillment.events; use result.adjustments for refunds/returns/credits; do not imply a return/reorder action exists unless the response data supports it.',
     commands,
+  }
+}
+
+// `permalink build` is client-side URL construction, not a business tool
+// call, so it is not routed through `buildCta`'s tool-name dispatcher. The
+// input is the CLI's own BuiltPermalink (not business-supplied), but the URL
+// itself is still never placed in a command template — it is data the agent
+// hands to the buyer, read from result.url.
+export function permalinkCta(
+  built: BuiltPermalink,
+  opts: { unrecognizedFields?: readonly string[] } = {},
+): CtaBlock {
+  // First, because it changes what the link does: these fields will be
+  // silently dropped when the buyer opens it. The names come from the
+  // agent's own body (not business data), but are JSON-quoted all the same.
+  const unrecognized = opts.unrecognizedFields ?? []
+  const typo =
+    unrecognized.length > 0
+      ? `FIX BEFORE SHARING: the business's cart schema does not list ${unrecognized.map((f) => JSON.stringify(f)).join(', ')} (see result.unrecognized_fields) — it will silently drop them when the link is opened, so a discount or detail you promised the buyer would be missing. Rename them to the fields \`ucp cart create --input-schema\` lists (discount codes go in discounts.codes) or remove them, then rebuild. `
+      : ''
+  const share = built.buyer_prefill
+    ? 'Contains buyer prefill (buyer/*): send it only directly to that buyer — never post, broadcast, or log it. '
+    : ''
+  // Over 2048 octets is refused in core/permalink.ts, so `fits` always has email.
+  let length = ''
+  if (!built.fits.includes('sms')) {
+    length = `At ${built.octets} octets it is too long for QR or SMS; use email or a direct handoff. `
+  } else if (!built.fits.includes('qr')) {
+    length = `At ${built.octets} octets it is too long for a QR code. `
+  }
+  // The business routes a link it cannot fully apply (an unavailable item, an
+  // invalid code) to continue_to when one is set, so the buyer sees the
+  // landing page either way and only the cart reveals the problem.
+  const landing = built.fields.includes('continue_to')
+    ? 'Because continue_to is set, the buyer lands on that page even when the business cannot apply part of the link, so tell them to check their cart there. '
+    : ''
+  return {
+    description: `${typo}${share}${length}${landing}Hand result.url to the buyer to open in a browser. The business builds a cart (or checkout) from it and redirects to its own page; it does not place an order, reserve stock, or confirm prices — the buyer reviews and pays on the business's site, where unavailable items or invalid discount codes surface. Each open starts a fresh cart, so the same link can be reused or shared. Present it as a link to the merchant, not as a completed purchase.`,
+    commands: [
+      {
+        command: "ucp cart create --input '<same body>'",
+        description:
+          'build the same cart in-protocol instead when you need real totals, shipping estimates, or discount validation before handing off; its continue_url resumes that one cart',
+      },
+    ],
   }
 }
 
